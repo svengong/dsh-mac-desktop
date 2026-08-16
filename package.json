@@ -1,0 +1,48 @@
+{
+  "name": "dsh-desktop-shell",
+  "version": "0.1.0",
+  "private": true,
+  "description": "macOS desktop shell for the DeepSeek Harness web app: local or SSH-remote connections with an in-menu update flow",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "smoke": "node scripts/smoke.js",
+    "icons": "bash scripts/gen-icons.sh",
+    "dist": "electron-builder --mac dir",
+    "dist:dmg": "electron-builder --mac dmg"
+  },
+  "devDependencies": {
+    "electron": "^35.0.0",
+    "electron-builder": "^26.0.0"
+  },
+  "build": {
+    "appId": "com.deepseek.harness.desktop",
+    "productName": "DeepSeek Harness",
+    "artifactName": "${productName}-${version}-${arch}.${ext}",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "src/**/*",
+      "build/icon.*",
+      "build/iconPressed.png",
+      "build/trayTemplate*"
+    ],
+    "mac": {
+      "icon": "build/icon.icns",
+      "category": "public.app-category.developer-tools",
+      "identity": null,
+      "extendInfo": {
+        "NSLocalNetworkUsageDescription": "DeepSeek Harness 需要访问局域网设备以建立 SSH 隧道并连接远程 harness 服务。"
+      },
+      "target": [
+        "dir",
+        "dmg"
+      ]
+    }
+  },
+  "allowScripts": {
+    "electron@35.7.5": true,
+    "electron-winstaller@5.4.0": true
+  }
+}
