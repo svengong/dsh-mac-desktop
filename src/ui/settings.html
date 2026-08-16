@@ -1,0 +1,550 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>DeepSeek Harness — 设置</title>
+<link rel="stylesheet" href="./shell.css">
+<style>
+  body { width: 100%; height: 100vh; }
+  .settings-section { max-width: 760px; }
+  .section-lead { margin: 2px 0 12px; color: var(--ds-text-muted); font-size: 12.5px; }
+  #update-components .component { margin-bottom: 0; }
+  .nav-badge { min-width: 18px; padding: 0 6px; text-align: center; }
+</style>
+</head>
+<body>
+<div class="settings-shell">
+  <aside class="settings-sidebar">
+    <div class="settings-brand">
+      <span class="settings-brand-mark">DS</span>
+      <span>DeepSeek Harness</span>
+    </div>
+    <nav class="settings-nav" aria-label="设置栏目">
+      <button type="button" data-section="connection" class="active">
+        <span class="nav-icon">⌁</span><span>连接</span>
+      </button>
+      <button type="button" data-section="updates">
+        <span class="nav-icon">↻</span><span>更新管理</span>
+        <span class="badge warn nav-badge" id="nav-update-count" hidden>0</span>
+      </button>
+      <button type="button" data-section="advanced">
+        <span class="nav-icon">⚙</span><span>高级</span>
+      </button>
+    </nav>
+    <div class="settings-sidebar-footer">桌面壳 · 本地 / SSH 远程</div>
+  </aside>
+
+  <main class="settings-main">
+    <header class="settings-titlebar">
+      <div class="settings-title-group">
+        <h1 id="section-title">连接</h1>
+        <span class="titlebar-subtitle" id="section-subtitle">选择运行 DeepSeek Harness 的方式</span>
+      </div>
+      <div class="titlebar-actions">
+        <button id="close-window" class="button quiet small" type="button" aria-label="关闭设置">关闭</button>
+      </div>
+    </header>
+
+    <div class="settings-scroll">
+      <section id="section-connection" class="settings-section">
+        <p class="section-lead">本地模式直接使用本机仓库；SSH 远程模式参考 VS Code Remote。</p>
+        <div id="live-strip" class="live-strip ok" hidden></div>
+
+        <div class="card">
+          <div class="card-head">
+            <h2 class="card-title">连接方式</h2>
+            <div class="segmented" id="mode-switch" role="tablist" aria-label="连接方式">
+              <button type="button" data-mode="local" class="active" role="tab" aria-selected="true">本地</button>
+              <button type="button" data-mode="ssh" role="tab" aria-selected="false">SSH 远程</button>
+            </div>
+          </div>
+          <div class="card-body">
+            <section id="local-fields">
+              <div class="field">
+                <label class="field-label" for="local-repo">仓库目录 <small>（默认：产品目录下的 deepseek-harness/）</small></label>
+                <div class="picker">
+                  <input id="local-repo" class="input" type="text" placeholder="deepseek-harness">
+                  <button id="pick-local" class="button" type="button">选择…</button>
+                </div>
+              </div>
+              <div class="field">
+                <label class="field-label" for="local-url">仓库地址 <small>（可选；目录不存在时自动克隆）</small></label>
+                <input id="local-url" class="input" type="text" placeholder="https://github.com/deepseek-ai/deepseek-harness.git">
+              </div>
+              <div class="row-grid">
+                <div class="field">
+                  <label class="field-label" for="local-port">本地端口</label>
+                  <input id="local-port" class="input" type="number" min="1" max="65535" value="3080">
+                </div>
+                <div class="field">
+                  <label class="field-label" for="local-home">数据目录（dsh home）</label>
+                  <input id="local-home" class="input" type="text" value="~/.dsh-desktop">
+                </div>
+              </div>
+            </section>
+
+            <section id="ssh-fields" class="hidden">
+              <div class="field">
+                <label class="field-label" for="ssh-host">SSH 主机 <small>（~/.ssh/config 别名或 user@host[:port]）</small></label>
+                <div class="picker">
+                  <select id="ssh-host" class="select"></select>
+                  <button id="test-ssh" class="button" type="button">测试连接</button>
+                </div>
+              </div>
+              <div class="field" id="ssh-custom-row" hidden>
+                <label class="field-label" for="ssh-custom">自定义地址</label>
+                <input id="ssh-custom" class="input" type="text" placeholder="dev@10.0.0.8">
+              </div>
+              <p class="field-hint" id="ssh-host-detail"></p>
+              <p class="field-hint" id="ssh-test-result"></p>
+              <div class="row-grid">
+                <div class="field"><label class="field-label" for="ssh-url">远程仓库地址</label><input id="ssh-url" class="input" type="text" placeholder="https://github.com/deepseek-ai/deepseek-harness.git"></div>
+                <div class="field"><label class="field-label" for="ssh-dir">远程仓库目录</label><input id="ssh-dir" class="input" type="text" value="~/deepseek-harness"></div>
+                <div class="field"><label class="field-label" for="ssh-rport">远程端口</label><input id="ssh-rport" class="input" type="number" min="1" max="65535" value="3080"></div>
+                <div class="field"><label class="field-label" for="ssh-lport">本地转发端口</label><input id="ssh-lport" class="input" type="number" min="1" max="65535" value="3080"></div>
+              </div>
+            </section>
+          </div>
+        </div>
+      </section>
+
+      <section id="section-updates" class="settings-section hidden">
+        <p class="section-lead">统一检查 Harness 与当前设备自己的 npm 插件、git 预设；更新源只属于当前连接的设备。</p>
+        <div class="top-actions">
+          <button id="check-all" class="button" type="button">检查全部</button>
+          <button id="update-all" class="button primary" type="button">更新全部并重启</button>
+          <span style="flex:1"></span>
+          <label class="switch-row">
+            <span style="color:var(--ds-text-muted);font-size:12px">启动自动检查</span>
+            <button id="auto-check" class="switch" type="button" role="switch" aria-label="启动自动检查"></button>
+          </label>
+        </div>
+
+        <div class="component-list" id="update-components" style="margin-bottom:12px" aria-live="polite"></div>
+
+        <div class="log-wrap" style="min-height:150px;margin-bottom:14px">
+          <div class="log-tools">
+            <span class="log-label">操作日志</span>
+            <span>
+              <button id="copy-log" class="button quiet small" type="button">复制</button>
+              <button id="reveal-log" class="button quiet small" type="button">打开日志文件</button>
+            </span>
+          </div>
+          <pre class="log" id="log">等待操作…</pre>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <h2 class="card-title">更新源</h2>
+            <div style="display:flex;gap:8px">
+              <button id="add-npm" class="button small" type="button">＋ npm 插件</button>
+              <button id="add-preset" class="button small" type="button">＋ Git 预设</button>
+            </div>
+          </div>
+          <div class="card-body">
+            <div class="component-list" style="margin-bottom:10px">
+              <section class="component">
+                <div class="component-main">
+                  <div class="component-title-row">
+                    <span class="status-dot" data-status="ready"></span>
+                    <span class="component-title">DeepSeek Harness</span>
+                    <span class="badge info">Harness</span>
+                  </div>
+                  <p class="component-desc">git pull --ff-only → pnpm install → build → 重启服务，源固定为「连接」中的仓库</p>
+                </div>
+              </section>
+            </div>
+            <div id="plugin-components" class="component-list" style="margin-bottom:12px"></div>
+            <button id="save-sources" class="button primary small" type="button">保存更新源</button>
+          </div>
+        </div>
+      </section>
+
+      <section id="section-advanced" class="settings-section hidden">
+        <p class="section-lead">留空自动探测；Finder 启动的应用 PATH 不含 brew/nvm。</p>
+        <div class="card">
+          <div class="card-head"><h2 class="card-title">工具路径</h2></div>
+          <div class="card-body">
+            <div class="row-grid">
+              <div class="field"><label class="field-label" for="tool-node">node</label><input id="tool-node" class="input mono" type="text" placeholder="自动探测"></div>
+              <div class="field"><label class="field-label" for="tool-git">git</label><input id="tool-git" class="input mono" type="text" placeholder="自动探测"></div>
+              <div class="field"><label class="field-label" for="tool-pnpm">pnpm</label><input id="tool-pnpm" class="input mono" type="text" placeholder="自动探测"></div>
+              <div class="field"><label class="field-label" for="tool-shell">登录 shell</label><input id="tool-shell" class="input mono" type="text" value="/bin/zsh"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <footer class="settings-footer">
+      <span class="footer-note" id="footer-note">已载入当前设置</span>
+      <span class="footer-actions" id="footer-actions"></span>
+    </footer>
+  </main>
+</div>
+
+<script>
+'use strict'
+const $ = id => document.getElementById(id)
+const api = window.desktopDialog
+
+let sshHostEntries = []
+let pluginEntries = []
+let nextPluginSeq = 1
+let activeMode = 'local'
+let activeSection = new URLSearchParams(location.search).get('section') === 'updates' ? 'updates' : 'connection'
+let updateState = { busy: false, autoCheckOnLaunch: true, lastCheckAt: '', components: [], available: [] }
+
+function status(text, ok) {
+  const el = $('footer-note')
+  el.textContent = text
+  el.style.color = ok === false ? 'var(--ds-warning)' : 'var(--ds-text-muted)'
+}
+function switchOf(id) { return $(id).getAttribute('aria-checked') === 'true' }
+function setSwitch(id, value) { $(id).setAttribute('aria-checked', value ? 'true' : 'false') }
+
+// ── section navigation ──────────────────────────────────────────────────────
+
+function refreshSections() {
+  for (const button of document.querySelectorAll('.settings-nav button')) {
+    button.classList.toggle('active', button.dataset.section === activeSection)
+  }
+  for (const name of ['connection', 'updates', 'advanced']) {
+    $(`section-${name}`).classList.toggle('hidden', name !== activeSection)
+  }
+  const meta = {
+    connection: ['连接', '选择运行 DeepSeek Harness 的方式'],
+    updates: ['更新管理', '检查与升级当前设备的 Harness、npm 插件和 git 预设'],
+    advanced: ['高级', '工具路径与登录 shell'],
+  }
+  $('section-title').textContent = meta[activeSection][0]
+  $('section-subtitle').textContent = meta[activeSection][1]
+  renderFooter()
+}
+function selectSection(name) {
+  if (!['connection', 'updates', 'advanced'].includes(name)) name = 'connection'
+  activeSection = name
+  refreshSections()
+}
+for (const button of document.querySelectorAll('.settings-nav button')) {
+  button.addEventListener('click', () => selectSection(button.dataset.section))
+}
+$('close-window').addEventListener('click', () => window.close())
+api.onSection && api.onSection(section => selectSection(section))
+
+function renderFooter() {
+  const actions = $('footer-actions')
+  actions.textContent = ''
+  if (activeSection === 'updates') {
+    const last = updateState.lastCheckAt
+      ? new Date(updateState.lastCheckAt).toLocaleString('zh-CN', { hour12: false })
+      : '尚未检查'
+    status(`上次检查：${last}${updateState.busy ? ' · 任务执行中' : ''}`)
+    return
+  }
+  const save = document.createElement('button')
+  save.id = 'save-settings'
+  save.className = 'button primary'
+  save.type = 'button'
+  save.textContent = '保存并连接'
+  save.addEventListener('click', saveSettings)
+  actions.appendChild(save)
+}
+
+// ── connection form ─────────────────────────────────────────────────────────
+
+function currentMode() { return document.querySelector('#mode-switch .active').dataset.mode }
+function refreshMode() {
+  const ssh = currentMode() === 'ssh'
+  $('local-fields').classList.toggle('hidden', ssh)
+  $('ssh-fields').classList.toggle('hidden', !ssh)
+  for (const button of document.querySelectorAll('#mode-switch button')) {
+    button.classList.toggle('active', button.dataset.mode === currentMode())
+    button.setAttribute('aria-selected', button.dataset.mode === currentMode() ? 'true' : 'false')
+  }
+}
+document.querySelectorAll('#mode-switch button').forEach(button => {
+  button.addEventListener('click', () => {
+    document.querySelectorAll('#mode-switch button').forEach(other => other.classList.toggle('active', other === button))
+    refreshMode()
+  })
+})
+function selectedSshHost() { return $('ssh-host').value === '__custom__' ? $('ssh-custom').value.trim() : $('ssh-host').value }
+function refreshSshHost() {
+  const custom = $('ssh-host').value === '__custom__'
+  $('ssh-custom-row').hidden = !custom
+  const entry = sshHostEntries.find(item => item.alias === $('ssh-host').value)
+  $('ssh-host-detail').textContent = entry ? `→ ${entry.detail}` : custom ? '→ 直连，不经 ~/.ssh/config' : ''
+}
+$('pick-local').addEventListener('click', async () => { const dir = await api.pickDirectory(); if (dir) $('local-repo').value = dir })
+$('ssh-host').addEventListener('change', refreshSshHost)
+$('ssh-custom').addEventListener('input', refreshSshHost)
+$('test-ssh').addEventListener('click', async () => {
+  const result = $('ssh-test-result')
+  const target = selectedSshHost()
+  result.className = 'field-hint'
+  if (target === '') { result.textContent = '请先选择 SSH 主机'; result.style.color = 'var(--ds-danger)'; return }
+  result.textContent = '测试中…'; result.style.color = 'var(--ds-text-muted)'
+  const outcome = await api.testSsh(target)
+  result.textContent = outcome.ok ? '连接成功' : `失败：${outcome.message}`
+  result.style.color = outcome.ok ? 'var(--ds-success)' : 'var(--ds-danger)'
+})
+
+// ── plugin source editor ────────────────────────────────────────────────────
+
+function repoDisplayName(url) {
+  return String(url || '').replace(/\/+$/, '').split('/').pop()?.replace(/\.git$/, '') || ''
+}
+function pluginDescription(entry) {
+  if (entry.kind === 'npm') return `dsh plugin --profile ${entry.profile || 'web'} add ${entry.packageName || entry.id}`
+  return `git pull 后同步 ${entry.sourceDir || 'preset'} → ~/.dsh/.agent-presets/${entry.presetId || entry.id}`
+}
+function nextPluginId() {
+  let id = `plugin-${nextPluginSeq}`; nextPluginSeq += 1
+  while (pluginEntries.some(entry => entry.id === id)) { id = `plugin-${nextPluginSeq}`; nextPluginSeq += 1 }
+  return id
+}
+function fieldEl(labelText, control) {
+  const field = document.createElement('div'); field.className = 'field'
+  const label = document.createElement('label'); label.className = 'field-label'; label.textContent = labelText
+  field.appendChild(label); field.appendChild(control); return field
+}
+function inputEl(entry, key, placeholder) {
+  const input = document.createElement('input'); input.className = 'input mono'; input.type = 'text'
+  input.placeholder = placeholder || ''; input.value = entry[key] || ''
+  input.addEventListener('input', () => { entry[key] = input.value }); return input
+}
+function pickerInputEl(entry, key) {
+  const wrap = document.createElement('div'); wrap.className = 'picker'
+  const input = inputEl(entry, key, '~/OpenSoft/plugin')
+  const button = document.createElement('button'); button.className = 'button'; button.type = 'button'; button.textContent = '选择…'
+  button.addEventListener('click', async () => { const dir = await api.pickDirectory(); if (dir) { input.value = dir; entry[key] = dir } })
+  wrap.appendChild(input); wrap.appendChild(button); return wrap
+}
+function checkoutDirEl(entry) {
+  if (activeMode === 'ssh') return inputEl(entry, 'checkoutDir', '~/OpenSoft/plugin')
+  return pickerInputEl(entry, 'checkoutDir')
+}
+function switchEl(entry) {
+  const button = document.createElement('button'); button.className = 'switch'; button.type = 'button'
+  button.setAttribute('role', 'switch'); button.setAttribute('aria-label', `启用 ${entry.title || entry.id} 更新`)
+  button.setAttribute('aria-checked', entry.enabled !== false ? 'true' : 'false')
+  button.addEventListener('click', () => { entry.enabled = button.getAttribute('aria-checked') !== 'true'; button.setAttribute('aria-checked', entry.enabled ? 'true' : 'false') })
+  return button
+}
+function pluginCard(entry, index) {
+  const card = document.createElement('section'); card.className = 'component source-plugin'; card.dataset.pluginId = entry.id
+
+
+  const main = document.createElement('div'); main.className = 'component-main'
+  const titleRow = document.createElement('div'); titleRow.className = 'component-title-row'
+  const dot = document.createElement('span'); dot.className = 'status-dot'; dot.dataset.status = entry.enabled !== false ? 'ready' : 'error'
+  const title = document.createElement('input'); title.className = 'input'; title.type = 'text'
+  title.value = entry.title || entry.presetId || entry.id
+  title.style.cssText = 'flex:1;min-width:0;padding:4px 8px;font-weight:600'
+  title.addEventListener('input', () => { entry.title = title.value; entry._titleEdited = true })
+  const badge = document.createElement('span'); badge.className = 'badge info'; badge.textContent = entry.kind === 'npm' ? 'npm 插件' : 'Git 预设'
+  titleRow.appendChild(dot); titleRow.appendChild(title); titleRow.appendChild(badge); main.appendChild(titleRow)
+  const desc = document.createElement('p'); desc.className = 'component-desc'; desc.textContent = pluginDescription(entry); main.appendChild(desc)
+  const meta = document.createElement('p'); meta.className = 'component-meta'; meta.textContent = entry.builtin ? '内置组件 · 可停用后恢复' : `自定义组件 · id: ${entry.id}`; main.appendChild(meta)
+  card.appendChild(main)
+
+  const actions = document.createElement('div'); actions.className = 'component-actions'; actions.appendChild(switchEl(entry))
+  if (!entry.builtin) {
+    const remove = document.createElement('button'); remove.className = 'button quiet small'; remove.type = 'button'; remove.textContent = '删除'
+    remove.setAttribute('aria-label', `删除 ${entry.title || entry.id}`)
+    remove.addEventListener('click', () => { pluginEntries.splice(index, 1); renderPluginList() }); actions.appendChild(remove)
+  }
+  card.appendChild(actions)
+
+  const fields = document.createElement('div'); fields.className = 'row-grid source-fields'
+  if (entry.kind === 'npm') {
+    fields.appendChild(fieldEl('npm 包名', inputEl(entry, 'packageName', 'dsh-my-plugin')))
+    fields.appendChild(fieldEl('profile', inputEl(entry, 'profile', 'web')))
+    fields.appendChild(fieldEl('npm registry', inputEl(entry, 'registryUrl', 'https://registry.npmjs.org')))
+  } else {
+    const deriveGitTitle = () => {
+      if (entry._titleEdited) return
+      entry.title = repoDisplayName(entry.repoUrl) || entry.presetId || entry.id
+      title.value = entry.title
+    }
+    const repoInput = inputEl(entry, 'repoUrl', 'https://github.com/you/plugin.git')
+    repoInput.addEventListener('input', deriveGitTitle)
+    const presetInput = inputEl(entry, 'presetId', entry.id)
+    presetInput.addEventListener('input', deriveGitTitle)
+    fields.appendChild(fieldEl('仓库地址', repoInput))
+    fields.appendChild(fieldEl(activeMode === 'ssh' ? '远端源目录（remote path）' : '本地源目录', checkoutDirEl(entry)))
+    fields.appendChild(fieldEl('源子目录（以插件 README 为准）', inputEl(entry, 'sourceDir', 'preset')))
+    fields.appendChild(fieldEl('安装名（$DSH_HOME/.agent-presets/…）', presetInput))
+  }
+  card.appendChild(fields)
+  return card
+}
+function renderPluginList() {
+  const host = $('plugin-components'); host.textContent = ''
+  for (const [index, entry] of pluginEntries.entries()) host.appendChild(pluginCard(entry, index))
+}
+function collectPluginEntries() {
+  return pluginEntries.map(entry => {
+    const repoName = repoDisplayName(entry.repoUrl)
+    const title = (entry.title || '').trim()
+      || (entry.kind === 'npm' ? (entry.packageName || '').trim() || entry.id : (entry.presetId || '').trim() || repoName || entry.id)
+    return {
+      id: entry.id, kind: entry.kind, title, enabled: entry.enabled !== false,
+      ...(entry.kind === 'npm'
+        ? { packageName: (entry.packageName || '').trim(), profile: (entry.profile || '').trim() || 'web', registryUrl: (entry.registryUrl || '').trim() || 'https://registry.npmjs.org' }
+        : { repoUrl: (entry.repoUrl || '').trim(), checkoutDir: (entry.checkoutDir || '').trim(), sourceDir: (entry.sourceDir || '').trim() || 'preset', presetId: (entry.presetId || '').trim() || entry.id }),
+    }
+  })
+}
+function validatePluginEntries() {
+  const ids = new Set()
+  for (const entry of collectPluginEntries()) {
+    if (ids.has(entry.id)) return `插件 id 重复：${entry.id}`
+    ids.add(entry.id)
+    if (entry.kind === 'npm' && entry.packageName === '') return `npm 插件 ${entry.title} 缺少包名`
+    if (entry.kind === 'git-preset' && entry.repoUrl === '' && entry.checkoutDir === '') return `Git 预设 ${entry.title} 需要仓库地址或本地源目录`
+  }
+  return null
+}
+$('add-npm').addEventListener('click', () => {
+  pluginEntries.push({ id: nextPluginId(), name: '', title: '新 npm 插件', kind: 'npm', description: '', packageName: '', profile: 'web', registryUrl: 'https://registry.npmjs.org', enabled: true, restart: true, builtin: false })
+  renderPluginList()
+})
+$('add-preset').addEventListener('click', () => {
+  const id = nextPluginId()
+  pluginEntries.push({ id, name: id, title: id, _titleEdited: false, kind: 'git-preset', description: '', repoUrl: '', checkoutDir: `~/OpenSoft/${id}`, sourceDir: 'preset', presetId: id, enabled: true, restart: true, builtin: false })
+  renderPluginList()
+})
+$('save-sources').addEventListener('click', async () => {
+  const error = validatePluginEntries()
+  if (error !== null) { status(error, false); return }
+  const result = await api.updates.action('save-sources', { components: collectPluginEntries() })
+  status(result && result.ok === false ? (result.error || '保存更新源失败') : '更新源已保存，下次检查生效', result && result.ok === false ? false : true)
+})
+
+// ── update manager runtime ──────────────────────────────────────────────────
+
+const KIND_TEXT = { harness: 'Harness', npm: 'npm 插件', 'git-preset': 'Git 预设' }
+function runtimeDot(row) {
+  const state = row.updateAvailable ? 'available' : row.status
+  const busy = row.status === 'checking' || row.status === 'updating'
+  const span = document.createElement('span'); span.className = `status-dot${busy ? ' pulse' : ''}`
+  span.dataset.status = state; span.setAttribute('aria-hidden', 'true'); return span
+}
+function badge(text, cls) { const span = document.createElement('span'); span.className = `badge ${cls || ''}`; span.textContent = text; return span }
+function runtimeMeta(row) {
+  const parts = []
+  if (row.kind === 'npm') parts.push(`${row.packageName || row.name} · ${row.profile || 'web'}`)
+  if (row.kind === 'git-preset') parts.push(row.repoUrl || row.checkoutDir)
+  if (row.current) parts.push(`当前 ${row.current}`)
+  if (row.latest && row.latest !== row.current) parts.push(`最新 ${row.latest}`)
+  return parts.join('  ·  ')
+}
+function renderUpdates() {
+  const list = $('update-components'); list.textContent = ''
+  for (const row of updateState.components) {
+    const item = document.createElement('section'); item.className = 'component fade-in'; item.dataset.available = row.updateAvailable ? 'true' : 'false'
+    const main = document.createElement('div'); main.className = 'component-main'
+    const titleRow = document.createElement('div'); titleRow.className = 'component-title-row'
+    titleRow.appendChild(runtimeDot(row))
+    const title = document.createElement('span'); title.className = 'component-title'; title.textContent = row.title || row.presetId || row.name || row.id; titleRow.appendChild(title)
+    titleRow.appendChild(badge(KIND_TEXT[row.kind] || row.kind, row.enabled ? 'info' : 'danger')); main.appendChild(titleRow)
+    const desc = document.createElement('p'); desc.className = 'component-desc'; desc.textContent = row.enabled ? row.description : `${row.description}（已停用）`; main.appendChild(desc)
+    const meta = document.createElement('p'); meta.className = 'component-meta'; meta.textContent = runtimeMeta(row); meta.title = runtimeMeta(row); main.appendChild(meta)
+    const summary = document.createElement('p'); summary.className = 'component-summary'; summary.textContent = row.error || row.summary
+    if (row.error) summary.style.color = 'var(--ds-danger)'
+    main.appendChild(summary); item.appendChild(main)
+    const actions = document.createElement('div'); actions.className = 'component-actions'
+    if (row.enabled) {
+      const busy = updateState.busy || row.status === 'checking' || row.status === 'updating'
+      if (row.updateAvailable) {
+        const button = document.createElement('button'); button.className = 'button primary'; button.type = 'button'
+        button.textContent = row.kind === 'harness' ? '更新并重启' : '更新'; button.disabled = busy
+        button.addEventListener('click', () => api.updates.action('update-one', { id: row.id })); actions.appendChild(button)
+      } else {
+        const button = document.createElement('button'); button.className = 'button'; button.type = 'button'
+        button.textContent = '检查'; button.disabled = busy
+        button.addEventListener('click', () => api.updates.action('check-one', { id: row.id })); actions.appendChild(button)
+      }
+    } else actions.appendChild(badge('已停用', ''))
+    item.appendChild(actions); list.appendChild(item)
+  }
+  const count = updateState.available.filter(row => row.enabled).length
+  const badgeEl = $('nav-update-count'); badgeEl.hidden = count === 0; badgeEl.textContent = String(count)
+  setSwitch('auto-check', updateState.autoCheckOnLaunch !== false)
+  $('check-all').disabled = updateState.busy
+  $('update-all').disabled = updateState.busy || count === 0
+  renderFooter()
+}
+$('check-all').addEventListener('click', () => api.updates.action('check-all', {}))
+$('update-all').addEventListener('click', () => api.updates.action('update-all', {}))
+$('auto-check').addEventListener('click', () => {
+  const next = !switchOf('auto-check'); setSwitch('auto-check', next)
+  updateState.autoCheckOnLaunch = next
+  api.updates.action('toggle-auto', { value: next })
+})
+$('copy-log').addEventListener('click', () => api.updates.action('copy-log', {}))
+$('reveal-log').addEventListener('click', () => api.updates.action('reveal-log', {}))
+api.updates.onLog(line => { const log = $('log'); log.textContent += `${line}\n`; log.scrollTop = log.scrollHeight })
+api.updates.onState(state => { updateState = state; renderUpdates() })
+
+// ── save connection / advanced settings ────────────────────────────────────
+
+async function saveSettings() {
+  const mode = currentMode()
+  const raw = {
+    mode,
+    local: { repoDir: $('local-repo').value.trim(), repoUrl: $('local-url').value.trim(), dshHome: $('local-home').value.trim(), port: Number($('local-port').value) },
+    ssh: { host: selectedSshHost(), remoteRepoUrl: $('ssh-url').value.trim(), remoteRepoDir: $('ssh-dir').value.trim(), remotePort: Number($('ssh-rport').value), localPort: Number($('ssh-lport').value) },
+    toolPaths: { node: $('tool-node').value.trim(), git: $('tool-git').value.trim(), pnpm: $('tool-pnpm').value.trim(), shell: $('tool-shell').value.trim() },
+  }
+  if (mode === 'local' && raw.local.repoDir === '') { status('请填写仓库目录', false); return }
+  if (mode === 'ssh' && raw.ssh.host === '') { status('请选择 SSH 主机', false); return }
+  const save = $('save-settings'); if (save) save.disabled = true
+  status('保存并重新连接…')
+  const outcome = await api.save(raw)
+  if (save) save.disabled = false
+  if (!outcome.ok) status(outcome.error || '保存失败', false)
+}
+
+// ── boot ────────────────────────────────────────────────────────────────────
+
+api.getState().then(state => {
+  const s = state.settings
+  activeMode = s.mode === 'ssh' ? 'ssh' : 'local'
+  sshHostEntries = state.sshHosts
+  const select = $('ssh-host'); const current = s.ssh?.host ?? ''; select.textContent = ''
+  for (const entry of state.sshHosts) {
+    const option = document.createElement('option'); option.value = entry.alias; option.textContent = `${entry.alias}（${entry.detail}）`
+    if (entry.alias === current) option.selected = true; select.appendChild(option)
+  }
+  const custom = document.createElement('option'); custom.value = '__custom__'; custom.textContent = '自定义地址…'
+  if (!state.sshHosts.some(entry => entry.alias === current)) custom.selected = true
+  select.appendChild(custom)
+  if (!state.sshHosts.some(entry => entry.alias === current)) $('ssh-custom').value = current
+  for (const button of document.querySelectorAll('#mode-switch button')) button.classList.toggle('active', button.dataset.mode === s.mode)
+  $('local-repo').value = s.local?.repoDir ?? ''; $('local-url').value = s.local?.repoUrl ?? ''
+  $('local-home').value = s.local?.dshHome ?? '~/.dsh-desktop'; $('local-port').value = s.local?.port ?? 3080
+  $('ssh-url').value = s.ssh?.remoteRepoUrl ?? ''; $('ssh-dir').value = s.ssh?.remoteRepoDir ?? '~/deepseek-harness'
+  $('ssh-rport').value = s.ssh?.remotePort ?? 3080; $('ssh-lport').value = s.ssh?.localPort ?? 3080
+  $('tool-node').value = s.toolPaths?.node ?? ''; $('tool-git').value = s.toolPaths?.git ?? ''
+  $('tool-pnpm').value = s.toolPaths?.pnpm ?? ''; $('tool-shell').value = s.toolPaths?.shell ?? '/bin/zsh'
+  const update = s.update ?? {}
+  updateState.autoCheckOnLaunch = update.autoCheckOnLaunch !== false
+  setSwitch('auto-check', updateState.autoCheckOnLaunch)
+  pluginEntries = (update.components ?? []).filter(item => item.id !== 'harness').map(item => ({
+    ...item,
+    _titleEdited: Boolean(item.title && item.title !== item.id),
+  }))
+  renderPluginList()
+  if (state.live && state.live.state === 'ready' && state.live.url) {
+    const live = $('live-strip'); live.hidden = false; live.textContent = `当前连接：${state.live.url} — ${state.live.detail}`
+  }
+  refreshMode(); refreshSshHost(); refreshSections()
+})
+
+api.updates.getState().then(state => { updateState = state; renderUpdates() })
+</script>
+</body>
+</html>

@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>DeepSeek Harness</title>
+<link rel="stylesheet" href="./shell.css">
+<style>
+  body { width: 760px; height: 100vh; }
+  #status { color: var(--ds-text-secondary); }
+</style>
+</head>
+<body>
+<header class="shell-header">
+  <div style="flex:1">
+    <h1 class="shell-title" id="title">正在执行…</h1>
+    <p class="shell-subtitle" id="status">准备中…</p>
+  </div>
+  <span class="badge info" id="state-badge">执行中</span>
+</header>
+
+<div class="shell-content" style="display:flex;flex-direction:column">
+  <div class="log-wrap" style="flex:1">
+    <div class="log-tools">
+      <span class="log-label">实时日志</span>
+      <span>
+        <button id="copy-log" class="button quiet small" type="button">复制日志</button>
+        <button id="reveal-log" class="button quiet small" type="button">显示日志文件</button>
+      </span>
+    </div>
+    <pre class="log" id="log"></pre>
+  </div>
+</div>
+
+<footer class="shell-footer">
+  <span class="footer-left" id="footer-status">操作完成后日志会写入文件，窗口可随时关闭</span>
+  <span class="footer-right" id="actions-right"></span>
+</footer>
+
+<script>
+'use strict'
+const $ = id => document.getElementById(id)
+const api = window.desktopDialog
+
+api.onLog(line => {
+  const log = $('log')
+  log.textContent += `${line}\n`
+  log.scrollTop = log.scrollHeight
+})
+
+function renderActions(actions) {
+  const bar = $('actions-right')
+  bar.textContent = ''
+  for (const action of actions) {
+    const button = document.createElement('button')
+    button.type = 'button'
+    button.textContent = action.label
+    button.className = `button${action.primary ? ' primary' : ''}`
+    button.disabled = Boolean(action.disabled)
+    button.addEventListener('click', () => api.action(action.name))
+    bar.appendChild(button)
+  }
+}
+
+$('copy-log').addEventListener('click', () => api.action('copy-log'))
+$('reveal-log').addEventListener('click', () => api.action('reveal-log'))
+
+api.onState(state => {
+  document.title = `DeepSeek Harness — ${state.title}`
+  $('title').textContent = state.title
+  $('status').textContent = state.status
+  $('state-badge').textContent = state.status
+  renderActions(state.actions || [])
+})
+</script>
+</body>
+</html>
