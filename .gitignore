@@ -2,3 +2,4 @@ node_modules/
 dist/
 deepseek-harness/
 *.log
+.pnpm-store/

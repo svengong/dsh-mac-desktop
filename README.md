@@ -17,11 +17,12 @@ This directory is the desktop-shell product directory. Local mode defaults to th
 
   - **Startup auto-check**: enabled by default; after the connection reaches `ready` the shell checks that device's own components in the background and shows a macOS notification when updates are available. The prompt is deduplicated per available set until the next launch, and the toggle and dedupe state are stored per device.
 - **Self-contained toolchain**: node candidates are filtered by the repo's engine range (^22.19 || >=24), so a stale brew node never wins; when no compatible node exists, the shell downloads the portable node tarball into `<repo>/.dsh-tools/node`; when no pnpm runs, it installs the repo-pinned pnpm into `<repo>/.dsh-tools` via npm. Local children get `PATH = node dir + .dsh-tools + repo node_modules/.bin + system base`, never the launchservices PATH. The same bootstrap runs on the remote into `~/.dsh-tools`.
-- **Visible state**: the main window title shows the live URL/port, the settings dialog shows the current connection, and the menu-bar tray carries the status. The update/init progress window closes itself on success (the log stays in the file), and stays open with retry/copy buttons on failure.
+- **Visible state**: window titles use the unified `DSH-[terminal]-address` format (for example `DSH-[local]-http://127.0.0.1:3080` or `DSH-[ubuntu]-…`); the settings panel, app menu, and tray carry the same terminal label. The update/init progress window closes itself on success (the log stays in the file), and stays open with retry/copy buttons on failure.
 - **Menu-bar tray**: connection status plus the same update-manager entries (open / check / update all / harness-only) without the main window; the tooltip shows the pending update count.
 - **Dock activation**: clicking the Dock icon shows a brief pressed-icon state, then follows macOS window restoration — minimized windows deminiaturize with the system animation, hidden windows are shown again, and a missing window is recreated.
 
-- **One macOS-style settings window per workspace**: connection, update manager, and advanced tool paths live behind one source-list sidebar bound to its owning main window; the window uses an inset title bar, traffic-light-safe layout, and the same appearance as macOS — light and dark follow the system automatically (`prefers-color-scheme`). Connection settings, update sources, and auto-check are scoped per device: switching a window to a new target starts from that device's own settings and never carries over another device's plugins or notification state.
+- **Workspace frame**: a fixed DSH frame at the top of every main window switches between Harness, connection, update manager, and advanced; settings open as an embedded panel, so future management pages only need one more frame tab.
+- **One macOS-style settings panel per workspace**: connection, update manager, and advanced tool paths live in an embedded panel bound to their owning main window and follow the system appearance automatically (`prefers-color-scheme`). Connection settings, update sources, and auto-check are scoped per device: switching a window to a new target starts from that device's own settings and never carries over another device's plugins or notification state.
 
 - Closing the window hides it (macOS convention); Cmd+Q quits and stops only services the shell started.
 
@@ -31,8 +32,11 @@ This directory is the desktop-shell product directory. Local mode defaults to th
 desktop-shell/
 ├── deepseek-harness/    local harness checkout (independent clone, default repoDir)
 ├── src/
-│   ├── main.js            main process: lifecycle, menu/tray wiring, IPC handlers
+│   ├── main.js            main process: lifecycle, workspace frame wiring, IPC handlers
 │   ├── settings.js        settings store (userData/settings.json)
+│   ├── labels.js          shared DSH-[terminal] labels for titles/menus/tray
+│   ├── shell-preload.js   preload for the local workspace frame
+│   ├── dialogs.js         embedded settings panel + progress windows
 │   ├── components.js      update-component catalog + version/hash helpers
 │   ├── update-manager.js  unified check/update logic for all components
 │   ├── connection.js      local + ssh connection lifecycle, port fallback, tunnel, remote service
@@ -40,6 +44,7 @@ desktop-shell/
 │   ├── runner.js          foreground command runner + detached service spawner
 │   ├── ssh.js             ssh target parsing, quoting, remote-path rendering
 │   ├── tools.js           engine-aware node/pnpm discovery + clean child environment
+│   └── ui/                shell.html (workspace frame), settings.html, progress.html, shell.css
 
 ├── build/                 icon.icns, icon.png, iconPressed.png, tray template icons (committed)
 └── scripts/               gen-icons.sh, build.sh, install.sh, smoke.js, e2e-local.js, e2e-ssh.js

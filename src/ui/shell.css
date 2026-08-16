@@ -146,6 +146,149 @@ button:focus-visible, input:focus-visible, select:focus-visible {
   from { opacity: 0; transform: translateY(2px); }
 }
 
+
+/* ── workspace frame (main window) ───────────────────────────────────────── */
+
+body.shell-workspace {
+  height: 100%;
+  overflow: hidden;
+  display: block;
+  background: var(--ds-bg);
+}
+
+.shell-frame {
+  position: fixed;
+  inset: 0 0 auto 0;
+  height: 46px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 0 10px 0 12px;
+  background: color-mix(in srgb, var(--ds-sidebar-bg) 86%, var(--ds-bg));
+  border-bottom: 1px solid var(--ds-border);
+  box-shadow: 0 1px 0 color-mix(in srgb, var(--ds-border-strong) 55%, transparent);
+  backdrop-filter: blur(28px) saturate(180%);
+  -webkit-backdrop-filter: blur(28px) saturate(180%);
+  -webkit-app-region: drag;
+  z-index: 10;
+}
+
+.shell-frame button {
+  -webkit-app-region: no-drag;
+}
+
+.shell-frame-brand {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding-right: 4px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.shell-frame-mark {
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  background: linear-gradient(135deg, var(--ds-accent), var(--ds-accent-hover));
+  color: #fff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: 700;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
+}
+
+.shell-frame-nav {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 100%;
+}
+
+.shell-frame-nav button {
+  height: 28px;
+  padding: 0 11px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ds-text-secondary);
+  font-size: 12.5px;
+  line-height: 20px;
+  cursor: pointer;
+  transition: background 100ms var(--ds-ease), color 100ms var(--ds-ease);
+}
+
+.shell-frame-nav button:hover { background: var(--ds-surface-hover); color: var(--ds-text); }
+.shell-frame-nav button.active {
+  background: var(--ds-accent);
+  color: #fff;
+  font-weight: 600;
+}
+
+.shell-frame-context {
+  flex: none;
+  max-width: 42%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding-right: 4px;
+}
+
+.shell-frame-terminal {
+  flex: none;
+  padding: 2px 8px;
+  border-radius: 5px;
+  background: var(--ds-accent-soft);
+  color: var(--ds-text-secondary);
+  font-size: 11.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.shell-frame-status {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ds-text-muted);
+  font-size: 11.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.shell-viewport {
+  position: fixed;
+  inset: 46px 0 0 0;
+  background:
+    radial-gradient(900px 420px at 80% -10%, var(--ds-glow), transparent 60%),
+    var(--ds-bg);
+}
+
+/* Settings panel embedded in the workspace frame: the frame already owns
+   section navigation, so the old settings-window sidebar is hidden. */
+body.embedded .settings-shell .settings-sidebar { display: none; }
+body.embedded .settings-shell {
+  height: 100%;
+}
+
+body.embedded .settings-titlebar {
+  padding-left: 14px;
+}
+
+.titlebar-terminal {
+  flex: none;
+  margin-left: auto;
+}
+
+body.embedded .settings-titlebar .titlebar-actions {
+  margin-left: 12px;
+}
+
 /* ── unified settings window ─────────────────────────────────────────────── */
 
 .settings-shell {

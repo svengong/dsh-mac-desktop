@@ -21,11 +21,14 @@
 
 const path = require('node:path')
 const fs = require('node:fs')
-const { app, BrowserWindow, Menu, shell, dialog, clipboard, Notification } = require('electron')
+const {
+  app, BrowserWindow, Menu, shell, dialog, clipboard, Notification, WebContentsView, ipcMain,
+} = require('electron')
 
 const {
   SettingsStore, normalizeSettings, deviceKeyOf,
 } = require('./settings')
+const { terminalLabel } = require('./labels')
 const { resolveTools } = require('./tools')
 const { runCommand } = require('./runner')
 const { sshCommandArgs, parseTarget, listSshHosts, isSshConfigAlias } = require('./ssh')
@@ -42,6 +45,9 @@ const SHELL_VERSION = '0.1.0'
 const DOCK_ICON = path.join(BUILD_DIR, 'icon.png')
 const DOCK_ICON_PRESSED = path.join(BUILD_DIR, 'iconPressed.png')
 const DOCK_PRESS_MS = 150
+const SHELL_HTML = path.join(__dirname, 'ui', 'shell.html')
+const SHELL_PRELOAD = path.join(__dirname, 'shell-preload.js')
+const SHELL_FRAME_HEIGHT = 46
 
 app.setName('DeepSeek Harness')
 
@@ -206,24 +212,83 @@ function saveUpdateForSession(session, patch) {
 
 // ── workspaces / windows ─────────────────────────────────────────────────────
 
+function workspaceViewBounds(win) {
+  const [width, height] = win.getContentSize()
+  return {
+    x: 0,
+    y: SHELL_FRAME_HEIGHT,
+    width,
+    height: Math.max(0, height - SHELL_FRAME_HEIGHT),
+  }
+}
+
+/** Keep the harness and embedded settings views exactly under the shell frame. */
+function layoutWorkspaceViews(workspace) {
+  const win = workspace.window
+  if (win === null || win.isDestroyed()) return
+  const bounds = workspaceViewBounds(win)
+  workspace.harnessView.setBounds(bounds)
+  workspace.setupDialog.setBounds(bounds)
+}
+
+function workspaceTerminal(workspace) {
+  return terminalLabel(settingsViewFor(workspace.deviceKey))
+}
+
+function workspaceTitle(workspace) {
+  const url = workspace.session.connection.url()
+  return `DSH-[${workspaceTerminal(workspace)}]-${url}`
+}
+
+function sendWorkspaceState(workspace) {
+  if (workspace.window === null || workspace.window.isDestroyed()) return
+  workspace.window.webContents.send('shell:state', {
+    view: workspace.activeView,
+    terminal: workspaceTerminal(workspace),
+    status: workspace.session.connection.status.detail,
+  })
+}
+
+/**
+ * Show one top-level workspace view. `view` is `harness` or one of the
+ * settings sections (`connection` / `updates` / `advanced`). This is the
+ * single switch used by the shell frame, menus, tray, and save flows.
+ */
+function setWorkspaceView(workspace, view) {
+  if (!['harness', 'connection', 'updates', 'advanced'].includes(view)) view = 'harness'
+  workspace.activeView = view
+  if (view === 'harness') {
+    workspace.setupDialog.close()
+    workspace.harnessView.setVisible(true)
+    workspace.harnessView.webContents.focus()
+  } else {
+    workspace.harnessView.setVisible(false)
+    workspace.setupDialog.setDeviceKey(workspace.deviceKey, view)
+    workspace.setupDialog.open(view)
+  }
+  sendWorkspaceState(workspace)
+  refreshTrayAndMenu()
+}
+
 function createBrowserWindow() {
   const win = new BrowserWindow({
     width: 1320,
     height: 900,
     minWidth: 900,
     minHeight: 600,
-    title: 'DeepSeek Harness',
+    title: 'DSH',
     icon: path.join(BUILD_DIR, 'icon.png'),
     show: false,
     webPreferences: {
+      preload: SHELL_PRELOAD,
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
     },
   })
-  // The shell owns the title: it shows the live URL so the active port is
-  // always visible, not the page's own title.
+  // The shell owns the title: it shows `DSH-[终端]-地址`, not the page title.
   win.on('page-title-updated', event => event.preventDefault())
+  win.loadFile(SHELL_HTML)
   return win
 }
 
@@ -242,15 +307,19 @@ function activeWorkspace() {
   return workspaces.values().next().value ?? null
 }
 
-/** Resolve the workspace that owns an IPC sender (main, setup, or progress). */
+/** Resolve the workspace that owns an IPC sender (frame, settings, or progress). */
 function workspaceForEvent(event) {
   const win = BrowserWindow.fromWebContents(event.sender)
   if (win !== null && !win.isDestroyed()) {
     for (const workspace of workspaces.values()) {
       if (workspace.window === win) return workspace
-      if (workspace.setupDialog.win === win) return workspace
       if (workspace.progressDialog.win === win) return workspace
     }
+  }
+  // WebContentsView senders can resolve to the owner window as well; keep an
+  // explicit fallback so embedded-settings IPC never falls through to focus.
+  for (const workspace of workspaces.values()) {
+    if (workspace.setupDialog.webContents === event.sender) return workspace
   }
   return activeWorkspace()
 }
@@ -263,8 +332,9 @@ function withWorkspace(workspace) {
 function loadAppUrl(workspace) {
   const session = workspace.session
   const url = session.connection.url()
-  workspace.window.loadURL(url)
-  workspace.window.setTitle(`DeepSeek Harness — ${url}`)
+  workspace.harnessView.webContents.loadURL(url)
+  workspace.window.setTitle(workspaceTitle(workspace))
+  setWorkspaceView(workspace, 'harness')
   presentWindow(workspace.window)
 }
 
@@ -291,24 +361,44 @@ function openWorkspaceWindow(workspace) {
 function createWorkspace(deviceKey = 'local') {
   const session = sessionFor(deviceKey)
   const win = createBrowserWindow()
+  const harnessView = new WebContentsView({
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  })
+  win.contentView.addChildView(harnessView)
+  harnessView.setVisible(false)
+  // The remote page never owns the window title.
+  harnessView.webContents.on('page-title-updated', event => event.preventDefault())
+  harnessView.webContents.loadURL('about:blank')
+
   const workspace = {
     id: nextWorkspaceId,
     deviceKey,
     session,
     window: win,
-    setupDialog: new SetupDialog(),
+    harnessView,
+    setupDialog: new SetupDialog(win),
     progressDialog: new ProgressDialog(),
     pendingOpen: true,
     lastProgressAction: '',
+    activeView: 'harness',
   }
   nextWorkspaceId += 1
   workspaces.set(workspace.id, workspace)
   session.windows.add(workspace)
+  win.setTitle(workspaceTitle(workspace))
 
   win.once('ready-to-show', () => {
+    layoutWorkspaceViews(workspace)
+    sendWorkspaceState(workspace)
     win.show()
     openWorkspaceWindow(workspace)
   })
+  win.on('resize', () => layoutWorkspaceViews(workspace))
+  win.on('focus', () => refreshTrayAndMenu())
   win.on('close', event => {
     if (!quitting) {
       event.preventDefault()
@@ -317,10 +407,12 @@ function createWorkspace(deviceKey = 'local') {
   })
   win.on('closed', () => disposeWorkspace(workspace))
   win.webContents.on('did-fail-load', (_event, code, description) => {
+    session.connection.log(`[窗口] 框架加载失败 ${code} ${description}`)
+  })
+  harnessView.webContents.on('did-fail-load', (_event, code, description) => {
     session.connection.log(`[窗口] 加载失败 ${code} ${description}`)
   })
 
-  win.loadURL('about:blank')
   return workspace
 }
 
@@ -329,6 +421,15 @@ function disposeWorkspace(workspace) {
   session.windows.delete(workspace)
   workspace.setupDialog.close()
   workspace.progressDialog.close()
+  for (const view of [workspace.harnessView, workspace.setupDialog.view]) {
+    if (view !== null && view !== undefined && !view.webContents.isDestroyed()) {
+      try {
+        view.webContents.close()
+      } catch {
+        // Window teardown already owns this webContents.
+      }
+    }
+  }
   workspace.window = null
   workspaces.delete(workspace.id)
   if (session.windows.size === 0 && session.key !== 'local') stopSession(session)
@@ -347,6 +448,12 @@ function attachWorkspace(workspace, deviceKey) {
   workspace.session = session
   workspace.pendingOpen = true
   session.windows.add(workspace)
+  // Never let a stale device's page flash while the new backend is connecting.
+  workspace.harnessView.webContents.loadURL('about:blank')
+  if (workspace.window !== null && !workspace.window.isDestroyed()) {
+    workspace.window.setTitle(workspaceTitle(workspace))
+    sendWorkspaceState(workspace)
+  }
   return session
 }
 
@@ -354,7 +461,7 @@ function attachWorkspace(workspace, deviceKey) {
 function reloadSessionWindows(session) {
   for (const workspace of session.windows) {
     if (workspace.window !== null && !workspace.window.isDestroyed()) {
-      workspace.window.webContents.reloadIgnoringCache()
+      workspace.harnessView.webContents.reloadIgnoringCache()
     }
   }
 }
@@ -403,7 +510,7 @@ function refreshMenu() {
 }
 
 function refreshTrayAndMenu() {
-  if (trayController !== null) trayController.update(activeStatus())
+  if (trayController !== null) trayController.update(activeStatus(), activeSettingsView())
   refreshMenu()
 }
 
@@ -411,7 +518,10 @@ function refreshTrayAndMenu() {
 function broadcastSession(session) {
   if (session.updateManager === null) return
   const snapshot = session.updateManager.snapshot()
-  for (const workspace of session.windows) workspace.setupDialog.state(snapshot)
+  for (const workspace of session.windows) {
+    workspace.setupDialog.state(snapshot)
+    sendWorkspaceState(workspace)
+  }
   refreshTrayAndMenu()
 }
 
@@ -420,12 +530,11 @@ function broadcastSession(session) {
 function onSessionStatus(session, status) {
   for (const workspace of session.windows) {
     if (workspace.window === null || workspace.window.isDestroyed()) continue
-    if (status.state === 'ready') {
-      workspace.window.setTitle(`DeepSeek Harness — ${session.connection.url()}`)
-      if (workspace.pendingOpen) {
-        workspace.pendingOpen = false
-        loadAppUrl(workspace)
-      }
+    workspace.window.setTitle(workspaceTitle(workspace))
+    sendWorkspaceState(workspace)
+    if (status.state === 'ready' && workspace.pendingOpen) {
+      workspace.pendingOpen = false
+      loadAppUrl(workspace)
     }
   }
   if (status.state === 'ready') {
@@ -451,11 +560,12 @@ function onSessionConnectFailed(session, error) {
 /** Present available updates as a macOS notification (falls back to a dialog). */
 function notifyUpdatesAvailable(session, available) {
   const lines = available.map(row => `· ${row.title}：${row.summary}`).join('\n')
-  const title = `DeepSeek Harness：${available.length} 个更新可用`
+  const title = `DSH-[${terminalLabel(settingsViewFor(session.key))}]-${available.length} 个更新可用`
   const target = session.windows.values().next().value ?? activeWorkspace()
   const open = () => {
     if (target !== undefined && target !== null) {
-      target.setupDialog.open('updates')
+      setWorkspaceView(target, 'updates')
+      presentWindow(target.window)
       broadcastSession(session)
     }
   }
@@ -532,14 +642,14 @@ async function startWithSettings(workspace) {
     // cannot even reach the host, connect() surfaces the real failure with a
     // proper dialog instead of a pointless build pipeline.
     session.connection.log(`构建检查失败：${error.message}`)
-    workspace.setupDialog.close()
+    setWorkspaceView(workspace, 'harness')
     workspace.pendingOpen = true
     connectSession(session)
     return
   }
   if (!built) {
     workspace.lastProgressAction = 'init'
-    workspace.setupDialog.close()
+    setWorkspaceView(workspace, 'harness')
     workspace.progressDialog.open()
     workspace.progressDialog.state({
       title: '初始化构建',
@@ -557,7 +667,7 @@ async function startWithSettings(workspace) {
     }
     workspace.progressDialog.close()
   }
-  workspace.setupDialog.close()
+  setWorkspaceView(workspace, 'harness')
   workspace.pendingOpen = true
   connectSession(session)
 }
@@ -567,7 +677,7 @@ async function runInit(workspace) {
   const outcome = await session.updater.runPipeline({ includePull: true, toleratePullFailure: true })
   if (outcome.ok) {
     workspace.progressDialog.close()
-    workspace.setupDialog.close()
+    setWorkspaceView(workspace, 'harness')
     workspace.pendingOpen = true
     connectSession(session)
   } else {
@@ -598,14 +708,16 @@ const actions = {
 
   openSettings(workspace) {
     const target = withWorkspace(workspace)
-    target.setupDialog.open('connection')
+    setWorkspaceView(target, 'connection')
+    presentWindow(target.window)
     return target
   },
 
   openUpdates(workspace) {
     const target = withWorkspace(workspace)
-    target.setupDialog.open('updates')
+    setWorkspaceView(target, 'updates')
     broadcastSession(target.session)
+    presentWindow(target.window)
     return target
   },
 
@@ -681,9 +793,9 @@ const actions = {
 
   showAbout() {
     app.setAboutPanelOptions({
-      applicationName: 'DeepSeek Harness',
+      applicationName: 'DSH 桌面壳',
       applicationVersion: `桌面壳 ${SHELL_VERSION}`,
-      credits: '桌面壳只加载 http://127.0.0.1:<端口> 的 DeepSeek Harness Web 服务；产品升级不需要改动壳。',
+      credits: 'DSH 桌面壳只加载 http://127.0.0.1:<端口> 的 DeepSeek Harness Web 服务；产品升级不需要改动壳。',
     })
     app.showAboutPanel()
   },
@@ -695,7 +807,7 @@ const actions = {
   openDevTools(workspace) {
     const target = withWorkspace(workspace)
     if (target.window !== null && !target.window.isDestroyed()) {
-      target.window.webContents.openDevTools({ mode: 'detach' })
+      target.harnessView.webContents.openDevTools({ mode: 'detach' })
     }
   },
 
@@ -715,6 +827,7 @@ function registerIpc() {
       const tools = resolveTools(view)
       return {
         settings: view,
+        terminal: terminalLabel(view),
         sshHosts: listSshHosts(),
         live: {
           state: workspace.session.connection.status.state,
@@ -771,7 +884,7 @@ function registerIpc() {
       session.updateManager.settings = view
       session.updateManager.reloadComponents()
       broadcastSession(session)
-      workspace.setupDialog.close()
+      setWorkspaceView(workspace, 'harness')
       startWithSettings(workspace)
       return { ok: true }
     },
@@ -806,6 +919,12 @@ function registerIpc() {
       return { ok: true }
     },
 
+    closePanel(event) {
+      const workspace = workspaceForEvent(event) ?? withWorkspace(null)
+      setWorkspaceView(workspace, 'harness')
+      return { ok: true }
+    },
+
     updatesGetState(event) {
       const workspace = workspaceForEvent(event) ?? withWorkspace(null)
       return workspace.session.updateManager.snapshot()
@@ -817,10 +936,10 @@ function registerIpc() {
       try {
         switch (name) {
           case 'close':
-            workspace.setupDialog.close()
+            setWorkspaceView(workspace, 'harness')
             break
           case 'open-settings':
-            workspace.setupDialog.showSection('connection')
+            setWorkspaceView(workspace, 'connection')
             break
           case 'toggle-auto':
             saveUpdateForSession(session, { autoCheckOnLaunch: Boolean(payload?.value) })
@@ -890,6 +1009,12 @@ function registerIpc() {
         return { ok: false, error: String(error.message || error) }
       }
     },
+  })
+
+  ipcMain.handle('shell:navigate', (event, view) => {
+    const workspace = workspaceForEvent(event) ?? withWorkspace(null)
+    setWorkspaceView(workspace, view)
+    return { ok: true }
   })
 }
 
@@ -982,11 +1107,11 @@ async function runSmoke() {
     if (!edit || !edit.submenu.items.some(item => item.role === 'paste')) {
       throw new Error('Edit menu must contain the paste role (Cmd+V)')
     }
-    const appMenu = menu.items.find(item => item.label === 'DeepSeek Harness')
+    const appMenu = menu.items.find(item => item.label === 'DSH-[本地]')
     if (!appMenu || !appMenu.submenu.items.some(item => item.label === '新建窗口')) {
       throw new Error('App menu must contain 新建窗口')
     }
-    const update = menu.items.find(item => item.label === '更新')
+    const update = menu.items.find(item => item.label === '更新 · 本地')
     if (!update) throw new Error('Update menu missing')
     const labels = update.submenu.items.map(item => item.label)
     for (const label of ['更新管理…', '检查更新…', '更新全部并重启…', '仅更新 Harness…']) {
@@ -1029,13 +1154,14 @@ if (!gotLock) {
     fs.mkdirSync(logsDir, { recursive: true })
     const stamp = new Date().toISOString().replace(/[:T]/g, '-').slice(0, 19)
     sessionLogFile = path.join(logsDir, `desktop-${stamp}.log`)
-    fs.writeFileSync(sessionLogFile, `DeepSeek Harness desktop shell — ${new Date().toLocaleString()}\n\n`)
+    fs.writeFileSync(sessionLogFile, `DSH desktop shell — ${new Date().toLocaleString()}\n\n`)
 
     registerIpc()
 
     trayController = createTray({
       actions,
       getStatus: () => activeStatus(),
+      getSettings: () => activeSettingsView(),
       getUpdateSummary: () => activeUpdateSummary(),
       isBusy: () => {
         const session = activeSession()
@@ -1059,7 +1185,7 @@ if (!gotLock) {
       ? firstView.local.repoDir !== ''
       : firstView.ssh.host !== ''
     if (complete) startWithSettings(first)
-    else first.setupDialog.open('connection')
+    else setWorkspaceView(first, 'connection')
 
     app.on('activate', (_event, hasVisibleWindows) => {
       flashDockIconPress()

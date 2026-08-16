@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<title>DeepSeek Harness</title>
+<title>DSH</title>
 <link rel="stylesheet" href="./shell.css">
 <style>
   body { width: 760px; height: 100vh; }
@@ -65,7 +65,7 @@ $('copy-log').addEventListener('click', () => api.action('copy-log'))
 $('reveal-log').addEventListener('click', () => api.action('reveal-log'))
 
 api.onState(state => {
-  document.title = `DeepSeek Harness — ${state.title}`
+  document.title = `DSH — ${state.title}`
   $('title').textContent = state.title
   $('status').textContent = state.status
   $('state-badge').textContent = state.status

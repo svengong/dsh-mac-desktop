@@ -18,10 +18,11 @@ DeepSeek Harness Web 应用的 macOS 桌面壳，交互模型参考 VS Code Remo
   - **启动自动检查**：默认开启；连接就绪后壳在后台检查该设备自己的所有组件，发现更新时发 macOS 通知，同一批更新在本轮启动内只提示一次，开关与去重状态按设备分别保存。
 
 - **自包含工具链**：node 候选按仓库 engine 范围（^22.19 || >=24）过滤，过期的 brew node 不会误选；没有兼容 node 时下载便携版 node 到 `<仓库>/.dsh-tools/node`；没有可用 pnpm 时用 npm 把仓库 pin 的 pnpm 装进 `<仓库>/.dsh-tools`。本地子进程的 `PATH = node 目录 + .dsh-tools + 仓库 node_modules/.bin + 系统基础目录`，与登录环境无关；远程在 `~/.dsh-tools` 做同样的引导。
-- **状态可见**：主窗口标题显示实际地址/端口，设置页显示当前连接状态，托盘常驻状态。更新/初始化构建窗口成功后自动关闭（日志已落盘），失败则保留窗口并附重试/复制按钮。
+- **状态可见**：主窗口标题统一为 `DSH-[终端]-地址`（如 `DSH-[本地]-http://127.0.0.1:3080`、`DSH-[ubuntu]-…`），设置页与顶部菜单同样带终端标识，托盘常驻状态。更新/初始化构建窗口成功后自动关闭（日志已落盘），失败则保留窗口并附重试/复制按钮。
 - **菜单栏托盘**：常驻状态（模式/地址/详情）与待更新数量，不开主窗口也能打开更新管理/检查/更新全部/仅更新 Harness/退出。
 - **程序坞唤醒**：点击程序坞图标先显示短暂的按下态图标，再遵循 macOS 窗口还原行为——最小化窗口以系统动画还原，关闭后隐藏会重新显示，尚未打开则重新创建。
-- **每个窗口独立的 macOS 风格设置**：连接、更新管理、高级工具路径收进一个带侧栏（source list）的窗口，并绑定到所属主窗口；使用内嵌标题栏与交通灯安全布局，浅色/深色自动跟随 macOS 系统外观（`prefers-color-scheme`）。连接设置、更新源与自动检查按设备隔离：切换窗口连接的新设备就从该设备自己的设置开始，不会带上另一台设备的插件或通知状态。
+- **工作区边框**：主窗口顶部有固定 DSH 边框，可在 Harness、连接、更新管理、高级之间直接切换；设置作为嵌入面板打开，后续新增管理页只需向边框注册一个栏目。
+- **每个窗口独立的 macOS 风格设置**：连接、更新管理、高级工具路径作为嵌入面板绑定到所属主窗口，并使用与 macOS 一致的浅色/深色外观（`prefers-color-scheme`）。连接设置、更新源与自动检查按设备隔离：切换窗口连接的新设备就从该设备自己的设置开始，不会带上另一台设备的插件或通知状态。
 
 
 - 关闭窗口只是隐藏（macOS 习惯）；Cmd+Q 退出时只停掉壳自己拉起的服务。
@@ -32,8 +33,11 @@ DeepSeek Harness Web 应用的 macOS 桌面壳，交互模型参考 VS Code Remo
 desktop-shell/
 ├── deepseek-harness/    本地 harness 检出（独立 clone，默认 repoDir）
 ├── src/
-│   ├── main.js            main process: lifecycle, menu/tray wiring, IPC handlers
+│   ├── main.js            main process: lifecycle, workspace frame wiring, IPC handlers
 │   ├── settings.js        settings store (userData/settings.json)
+│   ├── labels.js          shared DSH-[终端] labels for titles/menus/tray
+│   ├── shell-preload.js   preload for the local workspace frame
+│   ├── dialogs.js         embedded settings panel + progress windows
 │   ├── components.js      update-component catalog + version/hash helpers
 │   ├── update-manager.js  unified check/update logic for all components
 │   ├── connection.js      local + ssh connection lifecycle, port fallback, tunnel, remote service
@@ -41,6 +45,7 @@ desktop-shell/
 │   ├── runner.js          foreground command runner + detached service spawner
 │   ├── ssh.js             ssh target parsing, quoting, remote-path rendering
 │   ├── tools.js           engine-aware node/pnpm discovery + clean child environment
+│   └── ui/                shell.html (workspace frame), settings.html, progress.html, shell.css
 
 ├── build/                 icon.icns, icon.png, iconPressed.png, tray template icons (committed)
 └── scripts/               gen-icons.sh, build.sh, install.sh, smoke.js, e2e-local.js, e2e-ssh.js
