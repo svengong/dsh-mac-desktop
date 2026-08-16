@@ -108,6 +108,7 @@ class ConnectionManager extends EventEmitter {
     this.status = { state: 'idle', mode: 'local', url: '', detail: '未连接', serviceOwner: 'none' }
     this.localChild = null
     this.tunnelChild = null
+    this.tunnelChildren = new Set()
     this.localRetries = 0
     this.tunnelRetries = 0
     this.stopped = false
@@ -236,21 +237,32 @@ class ConnectionManager extends EventEmitter {
     if (this.status.state !== 'error') this.setStatus({ state: 'idle', detail: '已断开', serviceOwner: 'none' })
   }
 
+  /** Mark a child as intentionally stopped and terminate its process group. */
+  killChild(child) {
+    if (child === null || child === undefined) return
+    child._dshStopRequested = true
+    try {
+      process.kill(-child.pid, 'SIGTERM')
+    } catch {
+      try {
+        child.kill('SIGTERM')
+      } catch {
+        // The process is already gone; nothing to reap here.
+      }
+    }
+  }
+
   stopOwnedChildren() {
     if (this.localChild !== null) {
-      try {
-        process.kill(-this.localChild.pid, 'SIGTERM')
-      } catch {
-        // The group is already gone; nothing to reap here.
-      }
+      this.killChild(this.localChild)
       this.localChild = null
     }
+    // Kill every tunnel ever spawned by this manager. Keeping the set until
+    // each child emits close prevents an overwritten/forgotten reference from
+    // orphaning a still-running ssh tunnel.
+    for (const child of this.tunnelChildren) this.killChild(child)
     if (this.tunnelChild !== null) {
-      try {
-        process.kill(-this.tunnelChild.pid, 'SIGTERM')
-      } catch {
-        // The group is already gone; nothing to reap here.
-      }
+      this.killChild(this.tunnelChild)
       this.tunnelChild = null
     }
   }
@@ -262,10 +274,7 @@ class ConnectionManager extends EventEmitter {
       // A first-run pipeline has no tunnel yet; bring one up so the readiness
       // wait has something to probe through. connect() replaces it afterwards.
       if (this.tunnelChild === null) {
-        let localPort = settings.ssh.localPort
-        if (await tcpProbe(localPort)) localPort = await this.findFreePort(localPort)
-        this.localPort = localPort
-        await this.startTunnel(settings, localPort)
+        await this.startTunnelOnFreePort(settings)
       }
       await this.restartRemoteService(settings)
       await waitReady(this.url())
@@ -273,11 +282,8 @@ class ConnectionManager extends EventEmitter {
     }
     if (this.localChild !== null) {
       this.log('重启本地服务…')
-      try {
-        process.kill(-this.localChild.pid, 'SIGTERM')
-      } catch {
-        this.localChild.kill('SIGTERM')
-      }
+      this.killChild(this.localChild)
+      this.localChild = null
       await waitReady(this.url())
       this.localRetries = 0
       return
@@ -436,15 +442,7 @@ class ConnectionManager extends EventEmitter {
       )
     }
     await this.ensureRemoteRepo(settings)
-    // The local forward port is preferred but never fought over: when busy,
-    // fall back to the next free port, exactly like local mode.
-    let localPort = settings.ssh.localPort
-    if (await tcpProbe(localPort)) {
-      localPort = await this.findFreePort(localPort)
-      this.log(`本地转发端口 ${settings.ssh.localPort} 已被占用，改用 ${localPort}。`)
-    }
-    this.localPort = localPort
-    await this.startTunnel(settings, localPort)
+    await this.startTunnelOnFreePort(settings)
     const url = this.url()
     const probe = await probeOnce(url)
     if (!probe.up) await this.startRemoteService(settings)
@@ -490,8 +488,34 @@ class ConnectionManager extends EventEmitter {
     return { code: 0, lines: [] }
   }
 
+  /** Pick the configured local forward port when free, else the next free port. */
+  async startTunnelOnFreePort(settings) {
+    // Reap stale tunnels before picking a port so a forgotten earlier spawn
+    // can't force us onto an unnecessarily high fallback port.
+    for (const child of this.tunnelChildren) {
+      if (child !== null && child !== undefined && child.exitCode === null && child.signalCode === null) {
+        this.killChild(child)
+      }
+    }
+    let localPort = settings.ssh.localPort
+    if (await tcpProbe(localPort)) {
+      localPort = await this.findFreePort(localPort)
+      this.log(`本地转发端口 ${settings.ssh.localPort} 已被占用，改用 ${localPort}。`)
+    }
+    this.localPort = localPort
+    await this.startTunnel(settings, localPort)
+  }
+
   async startTunnel(settings, localPort) {
     const tools = this.resolvedTools()
+    // Reap any still-running tunnels from earlier attempts before opening a new
+    // forward: a prior spawn that was overwritten (e.g. by a reconnect or by
+    // the update flow) must never be left holding a local port.
+    for (const child of this.tunnelChildren) {
+      if (child !== null && child !== undefined && child.exitCode === null && child.signalCode === null) {
+        this.killChild(child)
+      }
+    }
     const args = tunnelArgs(settings.ssh.host, localPort, settings.ssh.remotePort)
     this.log(`建立隧道 127.0.0.1:${localPort} → ${settings.ssh.host}:${settings.ssh.remotePort} …`)
     const service = spawnService({
@@ -501,9 +525,15 @@ class ConnectionManager extends EventEmitter {
       onLine: line => this.log(`[隧道] ${line}`),
     })
     this.tunnelChild = service.child
+    // Track every spawned tunnel so an overwritten/forgotten reference can
+    // still be reaped on disconnect (the root cause of "Address already in
+    // use" even after switching ports).
+    this.tunnelChildren.add(service.child)
     service.child.on('close', (code, signal) => {
-      this.tunnelChild = null
+      this.tunnelChildren.delete(service.child)
+      if (this.tunnelChild === service.child) this.tunnelChild = null
       if (this.stopped) return
+      if (service.child._dshStopRequested) return
       if (this.status.state !== 'connecting' && this.status.state !== 'ready') return
       const why = `SSH 隧道断开（code=${code} signal=${signal ?? ''}）`
       this.log(why)
