@@ -24,6 +24,7 @@ contextBridge.exposeInMainWorld('desktopDialog', {
 
   updates: {
     getState: () => ipcRenderer.invoke('updates:get-state'),
+    getLog: () => ipcRenderer.invoke('updates:get-log'),
     action: (name, payload) => ipcRenderer.invoke('updates:action', name, payload),
     onLog: callback => subscribe('updates:log', callback),
     onState: callback => subscribe('updates:state', callback),

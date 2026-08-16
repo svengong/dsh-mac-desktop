@@ -163,7 +163,9 @@ body.shell-workspace {
   display: flex;
   align-items: center;
   gap: 14px;
-  padding: 0 10px 0 12px;
+  /* Leave room for the native traffic lights rendered by titleBarStyle:
+     macOS toolbar controls sit around x=18–70 in a 46px hiddenInset bar. */
+  padding: 0 12px 0 84px;
   background: color-mix(in srgb, var(--ds-sidebar-bg) 86%, var(--ds-bg));
   border-bottom: 1px solid var(--ds-border);
   box-shadow: 0 1px 0 color-mix(in srgb, var(--ds-border-strong) 55%, transparent);
@@ -868,6 +870,19 @@ body.embedded .settings-titlebar .titlebar-actions {
 
 /* ── log console ─────────────────────────────────────────────────────────── */
 
+/* Update-management console is deliberately fixed-height and always the last
+   card in the tab: components above stay scannable, the log never pushes the
+   page taller, and its own scrollbar always starts pinned to the newest line. */
+.updates-log {
+  flex: none;
+  height: 176px;
+  margin-bottom: 4px;
+}
+
+.updates-log .log {
+  min-height: 0;
+}
+
 .log-wrap {
   display: flex;
   flex-direction: column;
@@ -922,3 +937,13 @@ body.embedded .settings-titlebar .titlebar-actions {
 }
 ::-webkit-scrollbar-thumb:hover { background: var(--ds-text-muted); background-clip: padding-box; }
 ::-webkit-scrollbar-track { background: transparent; }
+
+/* ── macOS accessibility motion ──────────────────────────────────────────── */
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

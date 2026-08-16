@@ -76,6 +76,10 @@
                 <label class="field-label" for="local-home">数据目录（dsh home）</label>
                 <input id="local-home" class="input" type="text" value="~/.dsh-desktop">
               </div>
+              <div class="field">
+                <label class="field-label" for="local-port">本地端口 <small>（占用时自动顺延 30 个端口）</small></label>
+                <input id="local-port" class="input" type="number" min="1" max="65535" step="1" value="3080">
+              </div>
             </section>
 
             <section id="ssh-fields" class="hidden">
@@ -96,6 +100,10 @@
                 <div class="field"><label class="field-label" for="ssh-url">远程仓库地址</label><input id="ssh-url" class="input" type="text" placeholder="https://github.com/deepseek-ai/deepseek-harness.git"></div>
                 <div class="field"><label class="field-label" for="ssh-dir">远程仓库目录</label><input id="ssh-dir" class="input" type="text" value="~/deepseek-harness"></div>
               </div>
+              <div class="row-grid" style="margin-top:12px">
+                <div class="field"><label class="field-label" for="ssh-remote-port">远端服务端口 <small>（占用时自动顺延）</small></label><input id="ssh-remote-port" class="input" type="number" min="1" max="65535" step="1" value="3080"></div>
+                <div class="field"><label class="field-label" for="ssh-local-port">本机转发端口 <small>（占用时自动顺延）</small></label><input id="ssh-local-port" class="input" type="number" min="1" max="65535" step="1" value="3080"></div>
+              </div>
             </section>
           </div>
         </div>
@@ -114,17 +122,6 @@
         </div>
 
         <div class="component-list" id="update-components" style="margin-bottom:12px" aria-live="polite"></div>
-
-        <div class="log-wrap" style="min-height:150px;margin-bottom:14px">
-          <div class="log-tools">
-            <span class="log-label">操作日志</span>
-            <span>
-              <button id="copy-log" class="button quiet small" type="button">复制</button>
-              <button id="reveal-log" class="button quiet small" type="button">打开日志文件</button>
-            </span>
-          </div>
-          <pre class="log" id="log">等待操作…</pre>
-        </div>
 
         <div class="card">
           <div class="card-head">
@@ -150,6 +147,17 @@
             <div id="plugin-components" class="component-list" style="margin-bottom:12px"></div>
             <button id="save-sources" class="button primary small" type="button">保存更新源</button>
           </div>
+        </div>
+
+        <div class="log-wrap updates-log" id="update-log-wrap">
+          <div class="log-tools">
+            <span class="log-label">操作日志</span>
+            <span>
+              <button id="copy-log" class="button quiet small" type="button">复制</button>
+              <button id="reveal-log" class="button quiet small" type="button">打开日志文件</button>
+            </span>
+          </div>
+          <pre class="log" id="log">等待操作…</pre>
         </div>
       </section>
 
@@ -223,6 +231,7 @@ function selectSection(name) {
   if (!['connection', 'updates', 'advanced'].includes(name)) name = 'connection'
   activeSection = name
   refreshSections()
+  if (name === 'updates') void refreshUpdatesLog()
 }
 for (const button of document.querySelectorAll('.settings-nav button')) {
   button.addEventListener('click', () => selectSection(button.dataset.section))
@@ -268,7 +277,9 @@ function refreshMode() {
 document.querySelectorAll('#mode-switch button').forEach(button => {
   button.addEventListener('click', () => {
     document.querySelectorAll('#mode-switch button').forEach(other => other.classList.toggle('active', other === button))
+    activeMode = button.dataset.mode === 'ssh' ? 'ssh' : 'local'
     refreshMode()
+    renderPluginList()
   })
 })
 function selectedSshHost() { return $('ssh-host').value === '__custom__' ? $('ssh-custom').value.trim() : $('ssh-host').value }
@@ -297,8 +308,58 @@ $('test-ssh').addEventListener('click', async () => {
 function repoDisplayName(url) {
   return String(url || '').replace(/\/+$/, '').split('/').pop()?.replace(/\.git$/, '') || ''
 }
+function stripQuotes(value) {
+  const cleaned = String(value || '').trim()
+  if (cleaned.length >= 2 && ((cleaned.startsWith('"') && cleaned.endsWith('"')) || (cleaned.startsWith("'") && cleaned.endsWith("'")))) {
+    return cleaned.slice(1, -1).trim()
+  }
+  return cleaned
+}
+function packageNameFromSpec(spec) {
+  let value = stripQuotes(spec)
+  if (value === '') return ''
+  if (value.startsWith('npm:')) value = value.slice(4)
+  if (value.startsWith('@')) {
+    const slash = value.indexOf('/')
+    if (slash <= 1) return ''
+    const scope = value.slice(0, slash)
+    const rest = value.slice(slash + 1)
+    const at = rest.indexOf('@')
+    const name = at === -1 ? rest : rest.slice(0, at)
+    return name === '' ? '' : `${scope}/${name}`
+  }
+  if (/^(github:|gitlab:|bitbucket:|git\+|git@|file:|link:|\.|\.\.|\/|~|https?:\/\/)/.test(value)) return ''
+  const at = value.indexOf('@')
+  return (at === -1 ? value : value.slice(0, at)).trim() || ''
+}
+/**
+ * Accept either a raw pnpm `add` spec or a full official command:
+ * `dsh plugin --profile web add dsh-example` → spec `dsh-example`,
+ * profile `web`. The shell only forwards the spec after the official `add`
+ * verb; the command is never shell-executed.
+ */
+function applyInstallCommand(entry, value) {
+  const cleaned = stripQuotes(value)
+  const command = /^dsh\s+plugin\b[\s\S]*?\badd\s+([\s\S]+)$/i.exec(cleaned)
+  if (command) {
+    const profile = /(?:^|\s)--profile\s+(\S+)/.exec(cleaned)
+    if (profile) entry.profile = profile[1]
+    entry.installSpec = stripQuotes(command[1].trim())
+  } else {
+    entry.installSpec = cleaned
+  }
+  if (!entry._packageNameEdited) {
+    entry.packageName = packageNameFromSpec(entry.installSpec) || ''
+  }
+  if (!entry._titleEdited) {
+    entry.title = packageNameFromSpec(entry.installSpec) || '新 npm 插件'
+  }
+}
 function pluginDescription(entry) {
-  if (entry.kind === 'npm') return `dsh plugin --profile ${entry.profile || 'web'} add ${entry.packageName || entry.id}`
+  if (entry.kind === 'npm') {
+    const spec = entry.installSpec || entry.packageName || entry.id
+    return `dsh plugin --profile ${entry.profile || 'web'} add ${spec}`
+  }
   return `git pull 后同步 ${entry.sourceDir || 'preset'} → ~/.dsh/.agent-presets/${entry.presetId || entry.id}`
 }
 function nextPluginId() {
@@ -337,7 +398,6 @@ function switchEl(entry) {
 function pluginCard(entry, index) {
   const card = document.createElement('section'); card.className = 'component source-plugin'; card.dataset.pluginId = entry.id
 
-
   const main = document.createElement('div'); main.className = 'component-main'
   const titleRow = document.createElement('div'); titleRow.className = 'component-title-row'
   const dot = document.createElement('span'); dot.className = 'status-dot'; dot.dataset.status = entry.enabled !== false ? 'ready' : 'error'
@@ -361,9 +421,39 @@ function pluginCard(entry, index) {
 
   const fields = document.createElement('div'); fields.className = 'row-grid source-fields'
   if (entry.kind === 'npm') {
-    fields.appendChild(fieldEl('npm 包名', inputEl(entry, 'packageName', 'dsh-my-plugin')))
-    fields.appendChild(fieldEl('profile', inputEl(entry, 'profile', 'web')))
-    fields.appendChild(fieldEl('npm registry', inputEl(entry, 'registryUrl', 'https://registry.npmjs.org')))
+    const refreshNpm = () => {
+      desc.textContent = pluginDescription(entry)
+      if (!entry._packageNameEdited) packageInput.value = entry.packageName || ''
+      if (!entry._titleEdited) {
+        entry.title = packageNameFromSpec(entry.installSpec) || '新 npm 插件'
+        title.value = entry.title
+      }
+    }
+    const specInput = document.createElement('input')
+    specInput.className = 'input mono'; specInput.type = 'text'; specInput.value = entry.installSpec || ''
+    specInput.placeholder = 'dsh plugin --profile web add dsh-example'
+    specInput.addEventListener('input', () => {
+      applyInstallCommand(entry, specInput.value)
+      refreshNpm()
+    })
+    const specField = fieldEl('安装命令 / pnpm add 参数', specInput)
+    specField.style.gridColumn = '1 / -1'
+    const specHint = document.createElement('p'); specHint.className = 'field-hint'
+    specHint.textContent = '可直接粘贴完整命令，也可只填 pnpm add 参数：dsh-example、@scope/pkg@^1、github:owner/repo、file:./plugin、./plugin.tgz'
+    specField.appendChild(specHint)
+    fields.appendChild(specField)
+
+    const packageInput = inputEl(entry, 'packageName', '自动从安装参数识别')
+    packageInput.addEventListener('input', () => { entry._packageNameEdited = packageInput.value.trim() !== '' })
+    fields.appendChild(fieldEl('包名（用于 registry 版本检查）', packageInput))
+
+    const profileInput = inputEl(entry, 'profile', 'web')
+    profileInput.addEventListener('input', refreshNpm)
+    fields.appendChild(fieldEl('profile', profileInput))
+
+    const registryField = fieldEl('npm registry', inputEl(entry, 'registryUrl', 'https://registry.npmjs.org'))
+    registryField.style.gridColumn = '1 / -1'
+    fields.appendChild(registryField)
   } else {
     const deriveGitTitle = () => {
       if (entry._titleEdited) return
@@ -389,12 +479,18 @@ function renderPluginList() {
 function collectPluginEntries() {
   return pluginEntries.map(entry => {
     const repoName = repoDisplayName(entry.repoUrl)
+    const installSpec = (entry.installSpec || entry.packageName || '').trim()
     const title = (entry.title || '').trim()
-      || (entry.kind === 'npm' ? (entry.packageName || '').trim() || entry.id : (entry.presetId || '').trim() || repoName || entry.id)
+      || (entry.kind === 'npm' ? packageNameFromSpec(installSpec) || installSpec || entry.id : (entry.presetId || '').trim() || repoName || entry.id)
     return {
       id: entry.id, kind: entry.kind, title, enabled: entry.enabled !== false,
       ...(entry.kind === 'npm'
-        ? { packageName: (entry.packageName || '').trim(), profile: (entry.profile || '').trim() || 'web', registryUrl: (entry.registryUrl || '').trim() || 'https://registry.npmjs.org' }
+        ? {
+            installSpec,
+            packageName: (entry.packageName || '').trim() || packageNameFromSpec(installSpec) || entry.id,
+            profile: (entry.profile || '').trim() || 'web',
+            registryUrl: (entry.registryUrl || '').trim() || 'https://registry.npmjs.org',
+          }
         : { repoUrl: (entry.repoUrl || '').trim(), checkoutDir: (entry.checkoutDir || '').trim(), sourceDir: (entry.sourceDir || '').trim() || 'preset', presetId: (entry.presetId || '').trim() || entry.id }),
     }
   })
@@ -404,13 +500,16 @@ function validatePluginEntries() {
   for (const entry of collectPluginEntries()) {
     if (ids.has(entry.id)) return `插件 id 重复：${entry.id}`
     ids.add(entry.id)
-    if (entry.kind === 'npm' && entry.packageName === '') return `npm 插件 ${entry.title} 缺少包名`
+    if (entry.kind === 'npm') {
+      if (entry.installSpec === '') return `npm 插件 ${entry.title} 缺少安装命令/参数`
+      if (entry.installSpec.includes('\n')) return `npm 插件 ${entry.title} 的安装参数不能包含换行`
+    }
     if (entry.kind === 'git-preset' && entry.repoUrl === '' && entry.checkoutDir === '') return `Git 预设 ${entry.title} 需要仓库地址或本地源目录`
   }
   return null
 }
 $('add-npm').addEventListener('click', () => {
-  pluginEntries.push({ id: nextPluginId(), name: '', title: '新 npm 插件', kind: 'npm', description: '', packageName: '', profile: 'web', registryUrl: 'https://registry.npmjs.org', enabled: true, restart: true, builtin: false })
+  pluginEntries.push({ id: nextPluginId(), name: '', title: '新 npm 插件', _titleEdited: false, kind: 'npm', description: '', installSpec: '', packageName: '', profile: 'web', registryUrl: 'https://registry.npmjs.org', enabled: true, restart: true, builtin: false })
   renderPluginList()
 })
 $('add-preset').addEventListener('click', () => {
@@ -488,17 +587,45 @@ $('auto-check').addEventListener('click', () => {
 })
 $('copy-log').addEventListener('click', () => api.updates.action('copy-log', {}))
 $('reveal-log').addEventListener('click', () => api.updates.action('reveal-log', {}))
-api.updates.onLog(line => { const log = $('log'); log.textContent += `${line}\n`; log.scrollTop = log.scrollHeight })
+let logBooted = false
+async function refreshUpdatesLog() {
+  const text = await api.updates.getLog()
+  const log = $('log')
+  log.textContent = text && text.trim() !== '' ? `${text.trim()}\n` : '等待操作…\n'
+  log.scrollTop = log.scrollHeight
+  logBooted = true
+}
+function appendLog(line) {
+  const log = $('log')
+  if (!logBooted) log.textContent = ''
+  log.textContent += `${line}\n`
+  log.scrollTop = log.scrollHeight
+}
+api.updates.onLog(appendLog)
 api.updates.onState(state => { updateState = state; renderUpdates() })
 
 // ── save connection / advanced settings ────────────────────────────────────
 
+function portValue(id, fallback = 3080) {
+  const raw = $(id).value.trim()
+  if (raw === '') return fallback
+  return Number(raw)
+}
+function isValidPort(value) {
+  return Number.isInteger(value) && value >= 1 && value <= 65535
+}
 async function saveSettings() {
   const mode = currentMode()
+  const localPort = portValue('local-port')
+  const sshRemotePort = portValue('ssh-remote-port')
+  const sshLocalPort = portValue('ssh-local-port')
+  if (!isValidPort(localPort)) { status('本地端口需为 1–65535 的整数', false); return }
+  if (!isValidPort(sshRemotePort)) { status('远端服务端口需为 1–65535 的整数', false); return }
+  if (!isValidPort(sshLocalPort)) { status('本机转发端口需为 1–65535 的整数', false); return }
   const raw = {
     mode,
-    local: { repoDir: $('local-repo').value.trim(), repoUrl: $('local-url').value.trim(), dshHome: $('local-home').value.trim(), port: savedSettings?.local?.port ?? 3080 },
-    ssh: { host: selectedSshHost(), remoteRepoUrl: $('ssh-url').value.trim(), remoteRepoDir: $('ssh-dir').value.trim(), remotePort: savedSettings?.ssh?.remotePort ?? 3080, localPort: savedSettings?.ssh?.localPort ?? 3080 },
+    local: { repoDir: $('local-repo').value.trim(), repoUrl: $('local-url').value.trim(), dshHome: $('local-home').value.trim(), port: localPort },
+    ssh: { host: selectedSshHost(), remoteRepoUrl: $('ssh-url').value.trim(), remoteRepoDir: $('ssh-dir').value.trim(), remotePort: sshRemotePort, localPort: sshLocalPort },
     toolPaths: { node: $('tool-node').value.trim(), git: $('tool-git').value.trim(), pnpm: $('tool-pnpm').value.trim(), shell: $('tool-shell').value.trim() },
   }
   if (mode === 'local' && raw.local.repoDir === '') { status('请填写仓库目录', false); return }
@@ -531,7 +658,10 @@ api.getState().then(state => {
   for (const button of document.querySelectorAll('#mode-switch button')) button.classList.toggle('active', button.dataset.mode === s.mode)
   $('local-repo').value = s.local?.repoDir ?? ''; $('local-url').value = s.local?.repoUrl ?? ''
   $('local-home').value = s.local?.dshHome ?? '~/.dsh-desktop'
+  $('local-port').value = s.local?.port ?? 3080
   $('ssh-url').value = s.ssh?.remoteRepoUrl ?? ''; $('ssh-dir').value = s.ssh?.remoteRepoDir ?? '~/deepseek-harness'
+  $('ssh-remote-port').value = s.ssh?.remotePort ?? 3080
+  $('ssh-local-port').value = s.ssh?.localPort ?? 3080
   $('tool-node').value = s.toolPaths?.node ?? ''; $('tool-git').value = s.toolPaths?.git ?? ''
   $('tool-pnpm').value = s.toolPaths?.pnpm ?? ''; $('tool-shell').value = s.toolPaths?.shell ?? '/bin/zsh'
   const update = s.update ?? {}
@@ -539,13 +669,16 @@ api.getState().then(state => {
   setSwitch('auto-check', updateState.autoCheckOnLaunch)
   pluginEntries = (update.components ?? []).filter(item => item.id !== 'harness').map(item => ({
     ...item,
-    _titleEdited: Boolean(item.title && item.title !== item.id),
+    installSpec: item.installSpec || item.packageName || item.id,
+    _titleEdited: Boolean(item.title && item.title !== item.id && item.title !== item.packageName),
+    _packageNameEdited: Boolean(item.packageName && item.packageName !== item.id),
   }))
   renderPluginList()
   if (state.live && state.live.state === 'ready' && state.live.url) {
     const live = $('live-strip'); live.hidden = false; live.textContent = `当前连接：${state.live.url} — ${state.live.detail}`
   }
   refreshMode(); refreshSshHost(); refreshSections()
+  if (activeSection === 'updates') void refreshUpdatesLog()
 })
 
 api.updates.getState().then(state => { updateState = state; renderUpdates() })
