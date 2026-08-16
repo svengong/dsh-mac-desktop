@@ -82,6 +82,12 @@ The shell depends on exactly three stable product surfaces:
 
 Everything else — the frontend dist, plugin composition, presets — changes freely underneath. The shell itself has no auto-update framework: when a shell change is ever needed, rebuild and reinstall from this directory.
 
+## Documentation
+
+- [Requirements](docs/requirements.md) — functional requirements, edge cases, acceptance criteria.
+- [Development](docs/development.md) — architecture, port policy, testing, commit conventions.
+- [Agent](docs/agent.md) — invariants, module map, and pitfalls for coding agents.
+
 ## Known limitations
 
 - macOS only; no code signing/notarization (local use — macOS may ask to confirm on first launch).
