@@ -502,6 +502,15 @@ function activeUpdateSummary() {
   }
 }
 
+/** The first session currently running a build/update task, if any. */
+function busySession() {
+  for (const session of sessions.values()) {
+    if (session.updater !== null && session.updater.busy) return session
+    if (session.updateManager !== null && session.updateManager.busy) return session
+  }
+  return null
+}
+
 function refreshMenu() {
   const workspace = activeWorkspace()
   const session = workspace === null ? null : workspace.session
@@ -831,6 +840,23 @@ const actions = {
   },
 
   quit() {
+    // A build/update child is in the shell's process group. Letting the app
+    // quit now would tear down `pnpm run build` mid-flight and leave the repo
+    // half-built (the exact failure mode in the 2026-08-16 build log).
+    const busy = busySession()
+    if (busy !== null) {
+      const workspace = busy.windows.values().next().value ?? activeWorkspace()
+      if (workspace !== null && workspace !== undefined) {
+        workspace.progressDialog.open()
+        workspace.progressDialog.state({
+          title: '任务执行中，暂不能退出',
+          status: '正在构建或更新组件。请等待任务完成后再退出；进度窗口关闭不会中断任务。',
+          actions: [{ label: '关闭', name: 'close' }],
+        })
+      }
+      dialog.showErrorBox('任务执行中', '正在构建或更新组件，退出会中断构建并可能留下半成品。请等待完成后再退出。')
+      return
+    }
     quitting = true
     app.quit()
   },
@@ -1217,7 +1243,15 @@ if (!gotLock) {
     })
   })
 
-  app.on('before-quit', () => {
+  app.on('before-quit', event => {
+    // Cmd+Q can arrive while a build is running; prevent it so `pnpm run
+    // build` is never killed mid-flight by a normal quit.
+    if (busySession() !== null) {
+      event.preventDefault()
+      const workspace = activeWorkspace()
+      if (workspace !== null) workspace.progressDialog.open()
+      return
+    }
     quitting = true
     for (const session of sessions.values()) session.connection.stop()
   })
