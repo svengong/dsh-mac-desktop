@@ -62,8 +62,8 @@ function buildMenu({ actions, getStatus, getSettings, isBusy, getUpdateSummary }
         { label: `地址：${status.url || '—'}`, enabled: false },
         { label: `状态：${status.detail}`, enabled: false },
         { type: 'separator' },
-        { label: '重新连接', click: () => actions.reconnect() },
-        { label: '重置后端服务…', click: () => actions.resetBackend() },
+        { label: '重新连接', enabled: !isBusy(), click: () => actions.reconnect() },
+        { label: '重置后端服务…', enabled: !isBusy(), click: () => actions.resetBackend() },
       ],
     },
     {

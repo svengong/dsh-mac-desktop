@@ -15,12 +15,13 @@ const path = require('node:path')
 const { normalizeSettings } = require('../src/settings')
 const { terminalLabel, terminalPrefix } = require('../src/labels')
 const {
-  compareVersions, hashTreeSync, isNewerVersion, versionOf,
+  compareVersions, hashTreeSync, isNewerVersion, normalizeUserComponent, packageNameOfSpec, pluginSpecKind, versionOf,
 } = require('../src/components')
 const { UpdateManager, workspacePatchScript } = require('../src/update-manager')
 const { parseTarget, shellQuote, remotePath, tunnelArgs, parseSshConfig, listSshHosts } = require('../src/ssh')
 const { runCommand } = require('../src/runner')
 const { ConnectionManager } = require('../src/connection')
+const { findFreePort, releasePort, reservePort } = require('../src/ports')
 const { resolveTools, engineOk } = require('../src/tools')
 const { presentWindow } = require('../src/windows')
 
@@ -86,12 +87,27 @@ async function main() {
   assert.strictEqual(withUpdates.update.components[1].enabled, false)
   assert.strictEqual(withUpdates.update.components[2].id, 'custom-npm')
   assert.strictEqual(withUpdates.update.components[2].packageName, 'dsh-custom')
+  assert.strictEqual(withUpdates.update.components[2].installSpec, 'dsh-custom')
   assert.strictEqual(withUpdates.update.components[3].id, 'custom-preset')
   assert.strictEqual(withUpdates.update.components[3].checkoutDir, '~/OpenSoft/custom-preset')
   assert.strictEqual(withUpdates.update.components[3].title, 'custom')
   assert.ok(withUpdates.update.components.some(item => item.id === 'better-sidebar') === false)
   assert.ok(withUpdates.update.components.some(item => item.id === 'unknown') === false)
   assert.ok(withUpdates.update.components.some(item => item.id === 'bad-script') === false)
+  assert.strictEqual(normalizeSettings({ local: { port: 0 } }).local.port, 3080)
+
+  // npm plugin specs: the shell accepts the full pnpm add surface and only
+  // uses package-name extraction for registry version checks.
+  assert.strictEqual(packageNameOfSpec('@scope/pkg@^1.2.3'), '@scope/pkg')
+  assert.strictEqual(packageNameOfSpec('npm:dsh-example@1'), 'dsh-example')
+  assert.strictEqual(packageNameOfSpec('github:owner/repo'), '')
+  assert.strictEqual(pluginSpecKind('dsh-example'), 'registry')
+  assert.strictEqual(pluginSpecKind('github:owner/repo'), 'git')
+  assert.strictEqual(pluginSpecKind('file:./hello-plugin'), 'path')
+  assert.strictEqual(pluginSpecKind('https://example.com/plugin.tgz'), 'url')
+  const gitPlugin = normalizeUserComponent({ id: 'git-plugin', kind: 'npm', installSpec: 'github:you/hello-plugin' })
+  assert.strictEqual(gitPlugin.installSpec, 'github:you/hello-plugin')
+  assert.strictEqual(gitPlugin.packageName, 'git-plugin')
 
   // version comparison subset used by the update manager
   assert.strictEqual(versionOf('^0.12.1'), '0.12.1')
@@ -329,16 +345,24 @@ async function main() {
   assert.ok(diffCommand.includes(`diff -qr "$HOME"/'OpenSoft/preset/preset' "$HOME"/'.dsh/.agent-presets/preset-id'`), diffCommand)
   assert.ok(diffCommand.includes(`'\"$HOME\"'`) === false, `double-wrapped diff target: ${diffCommand}`)
 
-  // port fallback: a busy port yields the next free one
+  // port fallback + in-process reservations: a busy port yields the next free
+  // one, and a reserved free port is skipped by the shell's own allocator so
+  // two sessions cannot race onto the same fallback port.
   const blocker = net.createServer()
   await new Promise(resolve => blocker.listen(0, '127.0.0.1', resolve))
   const busyPort = blocker.address().port
   const fallbackConnection = new ConnectionManager({
     getSettings: () => ({ mode: 'local', local: { port: busyPort, repoDir: '', repoUrl: '' }, ssh: {} }),
   })
-  const freePort = await fallbackConnection.findFreePort(busyPort)
+  const freePort = await fallbackConnection.acquireLocalPort(busyPort)
   assert.ok(freePort > busyPort, `expected a port above ${busyPort}, got ${freePort}`)
+  assert.strictEqual(await findFreePort(freePort), freePort + 1)
+  fallbackConnection.releaseReservedLocalPort()
   blocker.close()
+  const reserved = freePort + 1
+  assert.strictEqual(reservePort(reserved), true)
+  assert.notStrictEqual(await findFreePort(reserved), reserved)
+  assert.strictEqual(releasePort(reserved), true)
 
   console.log('smoke: all checks passed')
 }

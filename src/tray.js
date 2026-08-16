@@ -37,7 +37,7 @@ function createTray({ actions, getStatus, getSettings, getUpdateSummary, isBusy 
       { label: '更新全部并重启…', enabled: !busy && summary.availableCount > 0, click: () => actions.updateAll() },
       { label: '仅更新 Harness…', enabled: !busy, click: () => actions.updateAndRestart() },
       { type: 'separator' },
-      { label: '重置后端服务…', click: () => actions.resetBackend() },
+      { label: '重置后端服务…', enabled: !busy, click: () => actions.resetBackend() },
       { label: '退出', click: () => actions.quit() },
     ]))
   }

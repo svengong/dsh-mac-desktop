@@ -20,35 +20,19 @@
 const fs = require('node:fs')
 const path = require('node:path')
 const http = require('node:http')
-const net = require('node:net')
 const { EventEmitter } = require('node:events')
 const { runCommand, spawnService } = require('./runner')
 const { sshCommandArgs, tunnelArgs, shellQuote, remotePath, remoteToolchainPrefix, displayLabel } = require('./ssh')
 const { resolveTools } = require('./tools')
+const {
+  findFreePort, releasePort, releaseRemotePort, reservePort, reserveRemotePort, reservedRemotePorts, runExclusive, tcpProbe,
+} = require('./ports')
 
 const PROBE_INTERVAL_MS = 750
 const READY_TIMEOUT_MS = 90 * 1000
 const SERVICE_RETRIES = 3
 const TUNNEL_RETRIES = 5
 const LOG_RING_LINES = 300
-
-/** Probe whether a local TCP port accepts connections (tunnel-bound check). */
-function tcpProbe(port, timeoutMs = 1500) {
-  return new Promise(resolve => {
-    const socket = net.connect({ host: '127.0.0.1', port })
-    let settled = false
-    const done = value => {
-      if (settled) return
-      settled = true
-      socket.destroy()
-      resolve(value)
-    }
-    socket.setTimeout(timeoutMs)
-    socket.once('connect', () => done(true))
-    socket.once('timeout', () => done(false))
-    socket.once('error', () => done(false))
-  })
-}
 
 /** Probe a URL once; `isDsh` checks for the boot marker in the served HTML. */
 function probeOnce(url) {
@@ -134,6 +118,9 @@ class ConnectionManager extends EventEmitter {
     this.localPort = null
     this.remotePort = null
     this.localVersion = null
+    this.reservedLocalPort = null
+    this.reservedRemotePort = null
+    this.remoteHostKey = null
   }
 
   url() {
@@ -165,15 +152,65 @@ class ConnectionManager extends EventEmitter {
   }
 
   /**
-   * The first free TCP port at or after `start`, bounded at +30. When the
-   * configured port is taken by a non-dsh process, the shell simply serves
-   * on the next free port instead of failing.
+   * Reserve the first free local TCP port at or after `start`, bounded at
+   * +30. When the configured port is taken by another process or reserved by
+   * another session in this shell, the service silently moves to the next
+   * free port instead of failing.
    */
-  async findFreePort(start) {
-    for (let port = start; port <= start + 30; port += 1) {
-      if (!(await tcpProbe(port))) return port
+  async acquireLocalPort(start) {
+    this.releaseReservedLocalPort()
+    const port = await findFreePort(start)
+    if (!reservePort(port)) throw new Error(`端口 ${port} 刚被其他工作区预留，请重试连接。`)
+    this.reservedLocalPort = port
+    if (port !== start) this.log(`端口 ${start} 已被占用，改用 ${port}。`)
+    return port
+  }
+
+  releaseReservedLocalPort() {
+    if (this.reservedLocalPort !== null) {
+      releasePort(this.reservedLocalPort)
+      this.reservedLocalPort = null
     }
-    throw new Error(`端口 ${start} 起连续 31 个端口都被占用，无法启动服务。`)
+  }
+
+  /** Find + reserve a free port on one remote host's loopback interface. */
+  async acquireRemotePort(settings, start) {
+    const hostKey = `ssh:${settings.ssh.host}`
+    // One remote probe covers the whole +30 range and is serialized per host,
+    // so two sessions targeting the same host can never both observe the same
+    // free port and race each other to it.
+    return runExclusive(hostKey, async () => {
+      this.releaseReservedRemotePort()
+      const reserved = reservedRemotePorts(hostKey)
+      const skip = reserved.length === 0
+        ? ''
+        : `case " ${reserved.join(' ')} " in *" $p "*) continue ;; esac;`
+      const script = `for p in $(seq ${start} $(( ${start} + 30 ))); do ${skip} if (exec 3<>/dev/tcp/127.0.0.1/$p) 2>/dev/null; then :; else echo $p; break; fi; done`
+      const result = await this.remoteRun(settings.ssh.host, script, { timeoutMs: 20_000 })
+      const found = result.lines.map(line => line.trim()).find(line => /^\d+$/.test(line))
+      if (!found) throw new Error(`远程端口 ${start} 起连续 31 个端口都被占用，无法启动服务。`)
+      const port = Number(found)
+      if (!reserveRemotePort(hostKey, port)) {
+        throw new Error(`远程端口 ${port} 刚被其他工作区预留，请重试连接。`)
+      }
+      this.reservedRemotePort = port
+      this.remoteHostKey = hostKey
+      if (port !== start) this.log(`远程端口 ${start} 已被占用，改用 ${port}。`)
+      return port
+    })
+  }
+
+  releaseReservedRemotePort() {
+    if (this.reservedRemotePort !== null && this.remoteHostKey !== null) {
+      releaseRemotePort(this.remoteHostKey, this.reservedRemotePort)
+    }
+    this.reservedRemotePort = null
+    this.remoteHostKey = null
+  }
+
+  releaseReservedPorts() {
+    this.releaseReservedLocalPort()
+    this.releaseReservedRemotePort()
   }
 
   /**
@@ -261,17 +298,6 @@ class ConnectionManager extends EventEmitter {
     )
   }
 
-  /** Find the first free port on the REMOTE loopback, at or after `start`. */
-  async findFreeRemotePort(settings) {
-    const start = settings.ssh.remotePort
-    const script = `bash -c 'for p in $(seq ${start} $(( ${start} + 30 ))); do (exec 3<>/dev/tcp/127.0.0.1/$p) 2>/dev/null || { echo $p; break; }; done'`
-    const result = await this.remoteRun(settings.ssh.host, script, { timeoutMs: 20_000 })
-    const found = result.lines.map(line => line.trim()).find(line => /^\d+$/.test(line))
-    if (found) return Number(found)
-    // No usable remote probe (e.g. bash missing): fall back to the base port.
-    return start
-  }
-
   /** Run one remote command through the remote login shell. */
   async remoteRun(target, inner, { timeoutMs, onLine } = {}) {
     const tools = this.resolvedTools()
@@ -336,11 +362,13 @@ class ConnectionManager extends EventEmitter {
     this.remotePort = null
     this.localVersion = null
     this.stopOwnedChildren()
+    this.releaseReservedPorts()
     this.setStatus({ state: 'connecting', mode: settings.mode, url: this.url(), detail: '正在连接…', serviceOwner: 'none' })
     try {
       if (settings.mode === 'ssh') await this.connectSsh(settings)
       else await this.connectLocal(settings)
     } catch (error) {
+      this.releaseReservedPorts()
       this.setStatus({ state: 'error', detail: String(error.message || error) })
       this.emit('connect-failed', error)
     }
@@ -350,6 +378,7 @@ class ConnectionManager extends EventEmitter {
   stop() {
     this.stopped = true
     this.stopOwnedChildren()
+    this.releaseReservedPorts()
     if (this.status.state !== 'error') this.setStatus({ state: 'idle', detail: '已断开', serviceOwner: 'none' })
   }
 
@@ -365,6 +394,7 @@ class ConnectionManager extends EventEmitter {
     const settings = this.getSettings()
     this.stopped = true
     this.stopOwnedChildren()
+    this.releaseReservedPorts()
     this.tunnelChildren.clear()
 
     if (settings.mode === 'ssh') {
@@ -404,6 +434,7 @@ class ConnectionManager extends EventEmitter {
     this.localPort = null
     this.remotePort = null
     this.localVersion = null
+    this.releaseReservedPorts()
     this.stopped = false
     this.setStatus({ state: 'idle', detail: '后端服务已重置', serviceOwner: 'none' })
   }
@@ -504,9 +535,13 @@ class ConnectionManager extends EventEmitter {
       }
     }
 
-    const port = await this.findFreePort(settings.local.port)
-    if (port !== settings.local.port) this.log(`端口 ${settings.local.port} 已被占用，改用 ${port}。`)
-    await this.spawnLocalService(settings, port, version)
+    const port = await this.acquireLocalPort(settings.local.port)
+    try {
+      await this.spawnLocalService(settings, port, version)
+    } catch (error) {
+      this.releaseReservedLocalPort()
+      throw error
+    }
     const ready = await waitReady(this.url())
     this.localRetries = 0
     this.setStatus({
@@ -666,10 +701,14 @@ class ConnectionManager extends EventEmitter {
     }
 
     // Pick a free port on the remote loopback, then tunnel to it.
-    const remotePort = await this.findFreeRemotePort(settings)
-    if (remotePort !== settings.ssh.remotePort) this.log(`远程端口 ${settings.ssh.remotePort} 已被占用，改用 ${remotePort}。`)
+    const remotePort = await this.acquireRemotePort(settings, settings.ssh.remotePort)
     this.remotePort = remotePort
-    await this.startTunnelOnFreePort(settings, remotePort)
+    try {
+      await this.startTunnelOnFreePort(settings, remotePort)
+    } catch (error) {
+      this.releaseReservedRemotePort()
+      throw error
+    }
     const url = this.url()
     const probe = await probeOnce(url)
     if (!probe.up) await this.startRemoteService(settings, remotePort, version)
@@ -724,13 +763,14 @@ class ConnectionManager extends EventEmitter {
         this.killChild(child)
       }
     }
-    let localPort = settings.ssh.localPort
-    if (await tcpProbe(localPort)) {
-      localPort = await this.findFreePort(localPort)
-      this.log(`本地转发端口 ${settings.ssh.localPort} 已被占用，改用 ${localPort}。`)
-    }
+    const localPort = await this.acquireLocalPort(settings.ssh.localPort)
     this.localPort = localPort
-    await this.startTunnel(settings, localPort, remotePort)
+    try {
+      await this.startTunnel(settings, localPort, remotePort)
+    } catch (error) {
+      this.releaseReservedLocalPort()
+      throw error
+    }
   }
 
   async startTunnel(settings, localPort, remotePort) {
@@ -792,6 +832,7 @@ class ConnectionManager extends EventEmitter {
       }
       await sleep(300)
     }
+    if (this.tunnelChild !== null && this.tunnelChild.exitCode === null) this.killChild(this.tunnelChild)
     throw new Error('隧道建立超时。请检查 SSH 配置后「重新连接」。')
   }
 

@@ -52,6 +52,56 @@ const DEFAULT_COMPONENTS = Object.freeze([HARNESS])
 const text = value => (typeof value === 'string' ? value.trim() : '')
 const flag = (value, fallback) => (typeof value === 'boolean' ? value : fallback)
 
+/** Strip one pair of matching single/double quotes around a pasted command. */
+function stripQuotes(value) {
+  const cleaned = text(value)
+  if (cleaned.length >= 2 && ((cleaned.startsWith('"') && cleaned.endsWith('"')) || (cleaned.startsWith("'") && cleaned.endsWith("'")))) {
+    return cleaned.slice(1, -1).trim()
+  }
+  return cleaned
+}
+
+/**
+ * Extract the registry package name from a pnpm `add` spec when possible.
+ * Supports `pkg`, `pkg@^1`, `@scope/pkg@latest`, and `npm:pkg@1`. Git/path/
+ * tarball specs return '' and are never sent to the registry version check.
+ */
+function packageNameOfSpec(spec) {
+  let value = stripQuotes(spec)
+  if (value === '') return ''
+  if (/^(github|gitlab|bitbucket):|^git\+[a-z]+:|^git@|^(file|link):|^(\.{1,2}[\\/])|^https?:\/\//.test(value)) return ''
+  if (value.startsWith('/') || value.startsWith('~') || /\.git(?:#|$)/.test(value)) return ''
+  if (value.startsWith('npm:')) value = value.slice(4)
+  if (value.startsWith('@')) {
+    const slash = value.indexOf('/')
+    if (slash <= 1) return ''
+    const scope = value.slice(0, slash)
+    const rest = value.slice(slash + 1)
+    const at = rest.indexOf('@')
+    const name = at === -1 ? rest : rest.slice(0, at)
+    return name === '' ? '' : `${scope}/${name}`
+  }
+  const at = value.indexOf('@')
+  const name = at === -1 ? value : value.slice(0, at)
+  return name === '' ? '' : name
+}
+
+/**
+ * Classify a pnpm `add` spec. Everything `dsh plugin add <spec>` accepts is a
+ * valid value; the kind only decides whether the shell can compare versions
+ * against an npm registry or must fall back to "re-run the install".
+ */
+function pluginSpecKind(spec) {
+  const value = stripQuotes(spec)
+  if (value === '') return 'empty'
+  if (/^(github|gitlab|bitbucket):/.test(value)) return 'git'
+  if (/^git\+[a-z]+:/.test(value) || /^git@/.test(value)) return 'git'
+  if (/\.git(?:#|$)/.test(value)) return 'git'
+  if (/^(file|link):/.test(value) || /^(\.{1,2}[\\/])/.test(value) || value.startsWith('/') || value.startsWith('~')) return 'path'
+  if (/^https?:\/\//.test(value)) return 'url'
+  return 'registry'
+}
+
 /** Normalize a user-chosen component id: lowercase, spaces become dashes. */
 function normalizeId(value, fallback) {
   const cleaned = text(value)
@@ -99,11 +149,16 @@ function normalizeUserComponent(raw) {
   if (id === '' || (kind !== 'npm' && kind !== 'git-preset')) return null
   const repoUrl = text(source.repoUrl)
   const repoName = repoUrl.replace(/\/+$/, '').split('/').pop()?.replace(/\.git$/, '') || ''
+  const npmSpec = kind === 'npm'
+    ? stripQuotes(text(source.installSpec)) || stripQuotes(text(source.packageName)) || id
+    : ''
+  const npmName = kind === 'npm' ? text(source.packageName) || packageNameOfSpec(npmSpec) || id : ''
+  const npmProfile = kind === 'npm' ? text(source.profile) || 'web' : 'web'
   const title = text(source.title)
-    || (kind === 'npm' ? text(source.packageName) || id : text(source.presetId) || repoName || id)
+    || (kind === 'npm' ? npmName : text(source.presetId) || repoName || id)
 
   const description = text(source.description) || (kind === 'npm'
-    ? `npm 插件：dsh plugin --profile web add ${text(source.packageName) || id}`
+    ? `npm 插件：dsh plugin --profile ${npmProfile} add ${npmSpec}`
     : `git 预设：同步 ${text(source.sourceDir) || 'preset'} 到 ~/.dsh/.agent-presets/${text(source.presetId) || id}`)
   const base = {
     id,
@@ -118,8 +173,15 @@ function normalizeUserComponent(raw) {
   if (kind === 'npm') {
     return {
       ...base,
-      packageName: text(source.packageName) || id,
-      profile: text(source.profile) || 'web',
+      // `installSpec` is the exact value forwarded after `dsh plugin add`.
+      // It accepts every pnpm add spec: npm name/range/tag, `npm:alias`,
+      // `github:owner/repo`, `git+https://…`, `file:…`, a tarball, or `./dir`.
+      installSpec: npmSpec,
+      // `packageName` is the best-effort registry identity used for version
+      // checks; git/path specs keep the component id so they can still be
+      // re-installed/updated by re-running their spec.
+      packageName: npmName,
+      profile: npmProfile,
       registryUrl: text(source.registryUrl) || NPM_REGISTRY,
     }
   }
@@ -279,6 +341,7 @@ function componentView(def) {
     enabled: def.enabled !== false,
     restart: def.restart === true,
     builtin: def.builtin === true,
+    ...(typeof def.installSpec === 'string' ? { installSpec: def.installSpec } : {}),
     ...(typeof def.packageName === 'string' ? { packageName: def.packageName } : {}),
     ...(typeof def.profile === 'string' ? { profile: def.profile } : {}),
     ...(typeof def.registryUrl === 'string' ? { registryUrl: def.registryUrl } : {}),
@@ -301,5 +364,8 @@ module.exports = {
   normalizeComponents,
   normalizeUpdate,
   normalizeUserComponent,
+  packageNameOfSpec,
+  pluginSpecKind,
+  stripQuotes,
   versionOf,
 }
