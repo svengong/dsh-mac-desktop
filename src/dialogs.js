@@ -52,6 +52,7 @@ class SetupDialog {
     this.view = null
     this.activeSection = 'connection'
     this.deviceKey = null
+    this.bounds = null
   }
 
   get webContents() {
@@ -87,6 +88,9 @@ class SetupDialog {
       },
     })
     this.ownerWindow.contentView.addChildView(this.view)
+    // A freshly created View defaults to 0×0 bounds; the workspace has already
+    // measured its layout, so apply the last known bounds immediately.
+    if (this.bounds !== null) this.view.setBounds(this.bounds)
     this.view.setVisible(false)
     this.view.webContents.loadFile(SETTINGS_HTML, { query: { section, embedded: '1' } })
     return this.view
@@ -116,6 +120,7 @@ class SetupDialog {
   }
 
   setBounds(bounds) {
+    this.bounds = bounds
     if (this.view !== null && !this.view.webContents.isDestroyed()) {
       this.view.setBounds(bounds)
     }

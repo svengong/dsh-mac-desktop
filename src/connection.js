@@ -73,6 +73,22 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
 
+/** Whether a local PID is alive (signal 0 probes without signalling). */
+function pidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return error.code === 'EPERM'
+  }
+}
+
+/** Normalize a version fingerprint into a shell/JSON-safe token. */
+function versionToken(value) {
+  return String(value).replace(/[^a-zA-Z0-9._-]/g, '').slice(0, 64) || 'unknown'
+}
+
 async function waitReady(url, timeoutMs = READY_TIMEOUT_MS) {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
@@ -116,6 +132,8 @@ class ConnectionManager extends EventEmitter {
     this.tools = null
     this.cachedRemoteShell = ''
     this.localPort = null
+    this.remotePort = null
+    this.localVersion = null
   }
 
   url() {
@@ -156,6 +174,102 @@ class ConnectionManager extends EventEmitter {
       if (!(await tcpProbe(port))) return port
     }
     throw new Error(`端口 ${start} 起连续 31 个端口都被占用，无法启动服务。`)
+  }
+
+  /**
+   * The build fingerprint of the checkout the settings point at. A git HEAD is
+   * the primary token; a missing/empty repo falls back to the built `bin.js`
+   * mtime so a rebuild still trips an upgrade.
+   */
+  async currentVersion(settings) {
+    if (settings.mode === 'local') {
+      const tools = this.resolvedTools()
+      if (tools.git !== '') {
+        const result = await runCommand({
+          cmd: tools.git,
+          args: ['-C', settings.local.repoDir, 'rev-parse', 'HEAD'],
+          timeoutMs: 10_000,
+        })
+        const head = result.code === 0 ? result.lines.map(line => line.trim()).find(Boolean) : ''
+        if (head) return versionToken(head)
+      }
+      try {
+        const stat = fs.statSync(path.join(settings.local.repoDir, 'apps/cli/lib/bin.js'))
+        return `mtime:${stat.mtimeMs}`
+      } catch {
+        return 'unknown'
+      }
+    }
+    const dir = remotePath(settings.ssh.remoteRepoDir)
+    const result = await this.remoteRun(
+      settings.ssh.host,
+      `git -C ${dir} rev-parse HEAD 2>/dev/null || stat -f %m ${dir}/apps/cli/lib/bin.js 2>/dev/null || echo unknown`,
+      { timeoutMs: 15_000 },
+    )
+    const line = result.lines.map(text => text.trim()).find(Boolean)
+    return versionToken(line || 'unknown')
+  }
+
+  localStatePath(settings) {
+    return path.join(expandHome(settings.local.dshHome), 'desktop-web.state.json')
+  }
+
+  readLocalState(settings) {
+    try {
+      const state = JSON.parse(fs.readFileSync(this.localStatePath(settings), 'utf8'))
+      if (Number.isInteger(state.pid) && Number.isInteger(state.port) && typeof state.version === 'string') return state
+    } catch {
+      // A missing/corrupt state file just means "no previously owned service".
+    }
+    return null
+  }
+
+  writeLocalState(settings, state) {
+    try {
+      fs.writeFileSync(this.localStatePath(settings), JSON.stringify(state, null, 2))
+    } catch {
+      // State persistence is best-effort; a read-only home must not break serving.
+    }
+  }
+
+  async readRemoteState(settings) {
+    const stateFile = '"$HOME"/.dsh/desktop-web.state.json'
+    const result = await this.remoteRun(
+      settings.ssh.host,
+      `cat ${stateFile} 2>/dev/null || echo __none__`,
+      { timeoutMs: 15_000 },
+    )
+    if (result.code !== 0) return null
+    const text = result.lines.join('\n').trim()
+    if (text === '' || text === '__none__') return null
+    try {
+      const state = JSON.parse(text)
+      if (Number.isInteger(state.pid) && Number.isInteger(state.port) && typeof state.version === 'string') return state
+    } catch {
+      // A corrupt remote state file degrades to "no service".
+    }
+    return null
+  }
+
+  async writeRemoteState(settings, state) {
+    const stateFile = '"$HOME"/.dsh/desktop-web.state.json'
+    // versionToken guarantees a JSON/shell-safe token; pid/port are integers.
+    await this.remoteRun(
+      settings.ssh.host,
+      `printf '{"pid":%s,"port":%s,"version":"%s"}' "${state.pid}" "${state.port}" "${versionToken(state.version)}" > ${stateFile}`,
+      { timeoutMs: 15_000 },
+    )
+  }
+
+  /** Find the first free port on the REMOTE loopback, at or after `start`. */
+  async findFreeRemotePort(settings) {
+    const start = settings.ssh.remotePort
+    const script = `bash -c 'for p in $(seq ${start} $(( ${start} + 30 ))); do (exec 3<>/dev/tcp/127.0.0.1/$p) 2>/dev/null || { echo $p; break; }; done'`
+    const result = await this.remoteRun(settings.ssh.host, script, { timeoutMs: 20_000 })
+    const found = result.lines.map(line => line.trim()).find(line => /^\d+$/.test(line))
+    if (found) return Number(found)
+    // No usable remote probe (e.g. bash missing): fall back to the base port.
+    return start
   }
 
   /** Run one remote command through the remote login shell. */
@@ -219,6 +333,8 @@ class ConnectionManager extends EventEmitter {
     this.localRetries = 0
     this.tunnelRetries = 0
     this.localPort = null
+    this.remotePort = null
+    this.localVersion = null
     this.stopOwnedChildren()
     this.setStatus({ state: 'connecting', mode: settings.mode, url: this.url(), detail: '正在连接…', serviceOwner: 'none' })
     try {
@@ -235,6 +351,61 @@ class ConnectionManager extends EventEmitter {
     this.stopped = true
     this.stopOwnedChildren()
     if (this.status.state !== 'error') this.setStatus({ state: 'idle', detail: '已断开', serviceOwner: 'none' })
+  }
+
+  /**
+   * Reset the owned backend end-to-end: terminate the recorded local/remote
+   * pid, delete the state file, and forget in-memory port/version references.
+   * Unlike `stop()` (which disconnects but keeps the state file so a later
+   * window can adopt the still-running service), reset fully discards state so
+   * the next connect starts from a clean slate — the escape hatch for a wedged
+   * or version-mismatched service.
+   */
+  async resetService() {
+    const settings = this.getSettings()
+    this.stopped = true
+    this.stopOwnedChildren()
+    this.tunnelChildren.clear()
+
+    if (settings.mode === 'ssh') {
+      const state = await this.readRemoteState(settings)
+      if (state !== null && Number.isInteger(state.pid)) {
+        this.log(`重置：终止远端服务（pid ${state.pid}）…`)
+        await this.remoteRun(
+          settings.ssh.host,
+          `kill ${state.pid} 2>/dev/null || true`,
+          { timeoutMs: 15_000 },
+        )
+      }
+      await this.remoteRun(
+        settings.ssh.host,
+        'rm -f "$HOME"/.dsh/desktop-web.pid "$HOME"/.dsh/desktop-web.state.json 2>/dev/null || true',
+        { timeoutMs: 15_000 },
+      )
+    } else {
+      const state = this.readLocalState(settings)
+      if (state !== null && pidAlive(state.pid)) {
+        this.log(`重置：终止本地服务（pid ${state.pid}）…`)
+        try {
+          process.kill(state.pid, 'SIGTERM')
+        } catch {
+          // Already gone.
+        }
+      }
+      try {
+        fs.rmSync(this.localStatePath(settings), { force: true })
+      } catch {
+        // Best-effort; a read-only home must not block the reset.
+      }
+    }
+
+    this.localChild = null
+    this.tunnelChild = null
+    this.localPort = null
+    this.remotePort = null
+    this.localVersion = null
+    this.stopped = false
+    this.setStatus({ state: 'idle', detail: '后端服务已重置', serviceOwner: 'none' })
   }
 
   /** Mark a child as intentionally stopped and terminate its process group. */
@@ -305,11 +476,37 @@ class ConnectionManager extends EventEmitter {
       throw new Error('未找到兼容的 node（需 22.19+ 或 24+）。请安装 Node.js，或在「设置 → 高级」中手动指定 node 路径。')
     }
     await this.ensureLocalRepo(settings)
-    // The shell always serves its own instance: the configured port when free,
-    // the next free port when something else already listens there.
+    const version = await this.currentVersion(settings)
+    const state = this.readLocalState(settings)
+
+    // Reuse a previously owned service when it still matches this build: same
+    // version fingerprint AND a dsh service still answering on its port.
+    if (state !== null && state.version === version) {
+      const url = `http://127.0.0.1:${state.port}`
+      const probe = await probeOnce(url)
+      if (probe.up && probe.isDsh) {
+        this.localPort = state.port
+        this.localVersion = version
+        this.log(`复用已运行的 dsh web（端口 ${state.port}，版本 ${version.slice(0, 8)}）`)
+        this.setStatus({ state: 'ready', url, detail: '已连接（复用已运行服务）', serviceOwner: 'external' })
+        return
+      }
+    }
+
+    // Otherwise reap a stale/outdated leftover service (auto-upgrade) so it
+    // never lingers as an orphan, then serve on the first free port.
+    if (state !== null && pidAlive(state.pid)) {
+      this.log(`检测到旧版/残留服务（pid ${state.pid}），清理后升级…`)
+      try {
+        process.kill(state.pid, 'SIGTERM')
+      } catch {
+        // Already gone; nothing to reap.
+      }
+    }
+
     const port = await this.findFreePort(settings.local.port)
     if (port !== settings.local.port) this.log(`端口 ${settings.local.port} 已被占用，改用 ${port}。`)
-    await this.spawnLocalService(settings, port)
+    await this.spawnLocalService(settings, port, version)
     const ready = await waitReady(this.url())
     this.localRetries = 0
     this.setStatus({
@@ -378,10 +575,12 @@ class ConnectionManager extends EventEmitter {
     return home
   }
 
-  async spawnLocalService(settings, port) {
+  async spawnLocalService(settings, port, version) {
     const tools = this.resolvedTools()
     const servePort = port ?? this.localPort ?? settings.local.port
+    const serveVersion = version ?? this.localVersion ?? 'unknown'
     this.localPort = servePort
+    this.localVersion = serveVersion
     const binPath = path.join(settings.local.repoDir, 'apps/cli/lib/bin.js')
     try {
       fs.accessSync(binPath, fs.constants.R_OK)
@@ -400,6 +599,7 @@ class ConnectionManager extends EventEmitter {
       onLine: line => this.log(`[web] ${line}`),
     })
     this.localChild = service.child
+    this.writeLocalState(settings, { pid: service.child.pid, port: servePort, version: serveVersion })
     service.child.on('close', (code, signal) => {
       this.localChild = null
       if (this.stopped) return
@@ -442,10 +642,37 @@ class ConnectionManager extends EventEmitter {
       )
     }
     await this.ensureRemoteRepo(settings)
-    await this.startTunnelOnFreePort(settings)
+    const version = await this.currentVersion(settings)
+    const state = await this.readRemoteState(settings)
+
+    // Reuse a previously started remote service when its build still matches.
+    if (state !== null && state.version === version) {
+      this.remotePort = state.port
+      await this.startTunnelOnFreePort(settings, state.port)
+      const probe = await probeOnce(this.url())
+      if (probe.up && probe.isDsh) {
+        this.log(`复用远端 dsh web（端口 ${state.port}，版本 ${version.slice(0, 8)}）`)
+        this.setStatus({ state: 'ready', url: this.url(), detail: `已连接（${displayLabel(target)}，复用远端服务）`, serviceOwner: 'remote' })
+        return
+      }
+      // Tunnel is up but nothing dsh answers behind it: fall through to (re)start.
+    }
+
+    // Reap a stale/outdated remote service before starting a fresh one.
+    if (state !== null && Number.isInteger(state.pid)) {
+      this.log(`清理旧版/残留远端服务（pid ${state.pid}）…`)
+      await this.remoteRun(target, `kill ${state.pid} 2>/dev/null || true`, { timeoutMs: 15_000 })
+      await sleep(800)
+    }
+
+    // Pick a free port on the remote loopback, then tunnel to it.
+    const remotePort = await this.findFreeRemotePort(settings)
+    if (remotePort !== settings.ssh.remotePort) this.log(`远程端口 ${settings.ssh.remotePort} 已被占用，改用 ${remotePort}。`)
+    this.remotePort = remotePort
+    await this.startTunnelOnFreePort(settings, remotePort)
     const url = this.url()
     const probe = await probeOnce(url)
-    if (!probe.up) await this.startRemoteService(settings)
+    if (!probe.up) await this.startRemoteService(settings, remotePort, version)
     const ready = await waitReady(url)
     this.setStatus({
       state: 'ready',
@@ -489,7 +716,7 @@ class ConnectionManager extends EventEmitter {
   }
 
   /** Pick the configured local forward port when free, else the next free port. */
-  async startTunnelOnFreePort(settings) {
+  async startTunnelOnFreePort(settings, remotePort) {
     // Reap stale tunnels before picking a port so a forgotten earlier spawn
     // can't force us onto an unnecessarily high fallback port.
     for (const child of this.tunnelChildren) {
@@ -503,10 +730,10 @@ class ConnectionManager extends EventEmitter {
       this.log(`本地转发端口 ${settings.ssh.localPort} 已被占用，改用 ${localPort}。`)
     }
     this.localPort = localPort
-    await this.startTunnel(settings, localPort)
+    await this.startTunnel(settings, localPort, remotePort)
   }
 
-  async startTunnel(settings, localPort) {
+  async startTunnel(settings, localPort, remotePort) {
     const tools = this.resolvedTools()
     // Reap any still-running tunnels from earlier attempts before opening a new
     // forward: a prior spawn that was overwritten (e.g. by a reconnect or by
@@ -516,8 +743,10 @@ class ConnectionManager extends EventEmitter {
         this.killChild(child)
       }
     }
-    const args = tunnelArgs(settings.ssh.host, localPort, settings.ssh.remotePort)
-    this.log(`建立隧道 127.0.0.1:${localPort} → ${settings.ssh.host}:${settings.ssh.remotePort} …`)
+    const rport = remotePort ?? this.remotePort ?? settings.ssh.remotePort
+    this.remotePort = rport
+    const args = tunnelArgs(settings.ssh.host, localPort, rport)
+    this.log(`建立隧道 127.0.0.1:${localPort} → ${settings.ssh.host}:${rport} …`)
     const service = spawnService({
       cmd: tools.ssh,
       args,
@@ -566,7 +795,7 @@ class ConnectionManager extends EventEmitter {
     throw new Error('隧道建立超时。请检查 SSH 配置后「重新连接」。')
   }
 
-  async startRemoteService(settings) {
+  async startRemoteService(settings, remotePort, version) {
     const dir = remotePath(settings.ssh.remoteRepoDir)
     const bin = `${dir}/apps/cli/lib/bin.js`
     const check = await this.remoteRun(
@@ -579,27 +808,34 @@ class ConnectionManager extends EventEmitter {
         `远程仓库尚未构建（${settings.ssh.remoteRepoDir}/apps/cli/lib/bin.js 不存在）。请在顶部菜单「更新 → 更新并重启」完成远程构建。`,
       )
     }
-    await this.launchRemoteService(settings)
+    await this.launchRemoteService(settings, remotePort, version)
   }
 
-  /** Start the remote web service detached, recording its pid in ~/.dsh/desktop-web.pid. */
-  async launchRemoteService(settings) {
+  /**
+   * Start the remote web service detached, recording its pid in
+   * ~/.dsh/desktop-web.pid and its version/port in ~/.dsh/desktop-web.state.json
+   * so a later shell can adopt or upgrade it.
+   */
+  async launchRemoteService(settings, remotePort, version) {
     const dir = remotePath(settings.ssh.remoteRepoDir)
     const bin = `${dir}/apps/cli/lib/bin.js`
     const logFile = '"$HOME"/.dsh/desktop-web.log'
     const pidFile = '"$HOME"/.dsh/desktop-web.pid'
-    this.log(`启动远程 dsh web（端口 ${settings.ssh.remotePort}）…`)
+    const stateFile = '"$HOME"/.dsh/desktop-web.state.json'
+    const port = remotePort ?? this.remotePort ?? settings.ssh.remotePort
+    const token = versionToken(version)
+    this.log(`启动远程 dsh web（端口 ${port}）…`)
     const result = await this.remoteRun(
       settings.ssh.host,
-      // mkdir runs in the foreground first (`;`), so the pid file redirect
-      // below never races the directory creation.
-      `${remoteToolchainPrefix()} mkdir -p "$HOME"/.dsh; cd ${dir} && exec nohup node ${bin} web --port ${settings.ssh.remotePort} >> ${logFile} 2>&1 < /dev/null & echo $! > ${pidFile}`,
+      // mkdir runs in the foreground first (`;`), so the pid/state redirects
+      // below never race the directory creation.
+      `${remoteToolchainPrefix()} mkdir -p "$HOME"/.dsh; cd ${dir} && exec nohup node ${bin} web --port ${port} >> ${logFile} 2>&1 < /dev/null & pid=$!; echo "$pid" > ${pidFile}; printf '{"pid":%s,"port":%s,"version":"%s"}' "$pid" "${port}" "${token}" > ${stateFile}`,
       { timeoutMs: 20_000 },
     )
     if (result.code !== 0) throw new Error(`远程服务启动失败：${result.lines.join('\n')}`)
   }
 
-  async restartRemoteService(settings) {
+  async restartRemoteService(settings, remotePort) {
     const pidFile = '"$HOME"/.dsh/desktop-web.pid'
     this.log('停止远程服务…')
     await this.remoteRun(
@@ -608,7 +844,8 @@ class ConnectionManager extends EventEmitter {
       { timeoutMs: 15_000 },
     )
     await sleep(1500)
-    await this.launchRemoteService(settings)
+    const version = await this.currentVersion(settings)
+    await this.launchRemoteService(settings, remotePort, version)
   }
 }
 

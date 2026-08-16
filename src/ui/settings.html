@@ -72,15 +72,9 @@
                 <label class="field-label" for="local-url">仓库地址 <small>（可选；目录不存在时自动克隆）</small></label>
                 <input id="local-url" class="input" type="text" placeholder="https://github.com/deepseek-ai/deepseek-harness.git">
               </div>
-              <div class="row-grid">
-                <div class="field">
-                  <label class="field-label" for="local-port">本地端口</label>
-                  <input id="local-port" class="input" type="number" min="1" max="65535" value="3080">
-                </div>
-                <div class="field">
-                  <label class="field-label" for="local-home">数据目录（dsh home）</label>
-                  <input id="local-home" class="input" type="text" value="~/.dsh-desktop">
-                </div>
+              <div class="field">
+                <label class="field-label" for="local-home">数据目录（dsh home）</label>
+                <input id="local-home" class="input" type="text" value="~/.dsh-desktop">
               </div>
             </section>
 
@@ -101,8 +95,6 @@
               <div class="row-grid">
                 <div class="field"><label class="field-label" for="ssh-url">远程仓库地址</label><input id="ssh-url" class="input" type="text" placeholder="https://github.com/deepseek-ai/deepseek-harness.git"></div>
                 <div class="field"><label class="field-label" for="ssh-dir">远程仓库目录</label><input id="ssh-dir" class="input" type="text" value="~/deepseek-harness"></div>
-                <div class="field"><label class="field-label" for="ssh-rport">远程端口</label><input id="ssh-rport" class="input" type="number" min="1" max="65535" value="3080"></div>
-                <div class="field"><label class="field-label" for="ssh-lport">本地转发端口</label><input id="ssh-lport" class="input" type="number" min="1" max="65535" value="3080"></div>
               </div>
             </section>
           </div>
@@ -199,6 +191,7 @@ let activeMode = 'local'
 let activeSection = ['connection', 'updates', 'advanced'].includes(params.get('section')) ? params.get('section') : 'connection'
 let updateState = { busy: false, autoCheckOnLaunch: true, lastCheckAt: '', components: [], available: [] }
 let deviceTerminal = '本地'
+let savedSettings = null
 
 function status(text, ok) {
   const el = $('footer-note')
@@ -504,8 +497,8 @@ async function saveSettings() {
   const mode = currentMode()
   const raw = {
     mode,
-    local: { repoDir: $('local-repo').value.trim(), repoUrl: $('local-url').value.trim(), dshHome: $('local-home').value.trim(), port: Number($('local-port').value) },
-    ssh: { host: selectedSshHost(), remoteRepoUrl: $('ssh-url').value.trim(), remoteRepoDir: $('ssh-dir').value.trim(), remotePort: Number($('ssh-rport').value), localPort: Number($('ssh-lport').value) },
+    local: { repoDir: $('local-repo').value.trim(), repoUrl: $('local-url').value.trim(), dshHome: $('local-home').value.trim(), port: savedSettings?.local?.port ?? 3080 },
+    ssh: { host: selectedSshHost(), remoteRepoUrl: $('ssh-url').value.trim(), remoteRepoDir: $('ssh-dir').value.trim(), remotePort: savedSettings?.ssh?.remotePort ?? 3080, localPort: savedSettings?.ssh?.localPort ?? 3080 },
     toolPaths: { node: $('tool-node').value.trim(), git: $('tool-git').value.trim(), pnpm: $('tool-pnpm').value.trim(), shell: $('tool-shell').value.trim() },
   }
   if (mode === 'local' && raw.local.repoDir === '') { status('请填写仓库目录', false); return }
@@ -521,6 +514,7 @@ async function saveSettings() {
 
 api.getState().then(state => {
   const s = state.settings
+  savedSettings = s
   activeMode = s.mode === 'ssh' ? 'ssh' : 'local'
   deviceTerminal = state.terminal || (activeMode === 'ssh' ? 'SSH' : '本地')
   $('titlebar-terminal').textContent = `DSH-[${deviceTerminal}]`
@@ -536,9 +530,8 @@ api.getState().then(state => {
   if (!state.sshHosts.some(entry => entry.alias === current)) $('ssh-custom').value = current
   for (const button of document.querySelectorAll('#mode-switch button')) button.classList.toggle('active', button.dataset.mode === s.mode)
   $('local-repo').value = s.local?.repoDir ?? ''; $('local-url').value = s.local?.repoUrl ?? ''
-  $('local-home').value = s.local?.dshHome ?? '~/.dsh-desktop'; $('local-port').value = s.local?.port ?? 3080
+  $('local-home').value = s.local?.dshHome ?? '~/.dsh-desktop'
   $('ssh-url').value = s.ssh?.remoteRepoUrl ?? ''; $('ssh-dir').value = s.ssh?.remoteRepoDir ?? '~/deepseek-harness'
-  $('ssh-rport').value = s.ssh?.remotePort ?? 3080; $('ssh-lport').value = s.ssh?.localPort ?? 3080
   $('tool-node').value = s.toolPaths?.node ?? ''; $('tool-git').value = s.toolPaths?.git ?? ''
   $('tool-pnpm').value = s.toolPaths?.pnpm ?? ''; $('tool-shell').value = s.toolPaths?.shell ?? '/bin/zsh'
   const update = s.update ?? {}
