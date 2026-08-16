@@ -265,6 +265,11 @@ function setWorkspaceView(workspace, view) {
     workspace.harnessView.setVisible(false)
     workspace.setupDialog.setDeviceKey(workspace.deviceKey, view)
     workspace.setupDialog.open(view)
+    // The settings view is created lazily on first use, so it has missed
+    // the window's initial resize/layout pass. Give it the frame-aware
+    // bounds now; otherwise it keeps WebContentsView's default 0x0 and
+    // renders as a white panel.
+    layoutWorkspaceViews(workspace)
   }
   sendWorkspaceState(workspace)
   refreshTrayAndMenu()
@@ -728,6 +733,20 @@ const actions = {
     connectSession(target.session)
   },
 
+  async resetBackend(workspace) {
+    const target = withWorkspace(workspace)
+    try {
+      await target.session.connection.resetService()
+      target.pendingOpen = true
+      target.session.autoReconnectAttempts = 0
+      connectSession(target.session)
+    } catch (error) {
+      routeSessionLine(target.session, `✗ 重置后端服务失败：${String(error.message || error)}`)
+      dialog.showErrorBox('重置后端服务失败', String(error.message || error))
+    }
+    return target
+  },
+
   async checkUpdates(workspace) {
     const target = actions.openUpdates(workspace)
     try {
@@ -1091,7 +1110,7 @@ async function runSmoke() {
   })
 
   await check('action surface complete', () => {
-    for (const name of ['newWindow', 'openMain', 'openSettings', 'openUpdates', 'checkUpdates', 'updateAll', 'updateAndRestart', 'quit']) {
+    for (const name of ['newWindow', 'openMain', 'openSettings', 'openUpdates', 'checkUpdates', 'updateAll', 'updateAndRestart', 'resetBackend', 'quit']) {
       if (typeof actions[name] !== 'function') throw new Error(`actions.${name} missing`)
     }
   })
