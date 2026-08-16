@@ -155,6 +155,8 @@ class ProgressDialog {
   constructor() {
     this.win = null
     this.visible = false
+    this.ready = false
+    this.pending = []
   }
 
   open() {
@@ -165,12 +167,22 @@ class ProgressDialog {
     }
     this.win = dialogWindow(PROGRESS_HTML, { width: 800, height: 700 })
     this.visible = true
+    this.ready = false
+    // Main code calls state()/log() immediately after open(); queue those
+    // messages until the renderer has loaded so the first status line and
+    // first log lines can never silently disappear.
+    this.win.webContents.once('did-finish-load', () => {
+      this.ready = true
+      for (const [channel, payload] of this.pending.splice(0)) this.send(channel, payload)
+    })
     this.win.on('show', () => {
       this.visible = true
     })
     this.win.on('closed', () => {
       this.win = null
       this.visible = false
+      this.ready = false
+      this.pending = []
     })
   }
 
@@ -179,7 +191,12 @@ class ProgressDialog {
   }
 
   send(channel, payload) {
-    if (this.win !== null && !this.win.isDestroyed()) this.win.webContents.send(channel, payload)
+    if (this.win === null || this.win.isDestroyed()) return
+    if (!this.ready) {
+      this.pending.push([channel, payload])
+      return
+    }
+    this.win.webContents.send(channel, payload)
   }
 
   log(line) {
