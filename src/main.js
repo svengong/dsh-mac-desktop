@@ -1175,6 +1175,13 @@ async function runSmoke() {
     const migrated = normalizeSettings({ mode: 'ssh', ssh: { target: 'legacy-host' } })
     if (migrated.ssh.host !== 'legacy-host') throw new Error('ssh target migration failed')
   })
+  await check('dev userData isolation', () => {
+    if (app.isPackaged) return
+    const expected = path.join(os.homedir(), '.dsh-desktop')
+    if (app.getPath('userData') !== expected) {
+      throw new Error(`dev userData should be ${expected}, got ${app.getPath('userData')}`)
+    }
+  })
   await check('ssh parseTarget', () => {
     const p = parse('u@h:2222')
     if (p === null || p.user !== 'u' || p.host !== 'h' || p.port !== 2222) throw new Error('parse failed')
