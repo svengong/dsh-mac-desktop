@@ -21,12 +21,13 @@
 
 const path = require('node:path')
 const fs = require('node:fs')
+const os = require('node:os')
 const {
   app, BrowserWindow, Menu, shell, dialog, clipboard, Notification, WebContentsView, ipcMain,
 } = require('electron')
 
 const {
-  SettingsStore, normalizeSettings, deviceKeyOf,
+  SettingsStore, normalizeSettings, deviceKeyOf, DEV_DEFAULT_DSH_HOME,
 } = require('./settings')
 const { terminalLabel } = require('./labels')
 const { resolveTools } = require('./tools')
@@ -49,6 +50,29 @@ const SHELL_HTML = path.join(__dirname, 'ui', 'shell.html')
 const SHELL_PRELOAD = path.join(__dirname, 'shell-preload.js')
 const SHELL_FRAME_HEIGHT = 46
 
+/**
+ * Keep development launches from touching the packaged app's settings/logs.
+ * `electron .` and `npm start` use `~/.dsh-desktop` as the Electron userData
+ * directory (the same home the local service already uses for its own DSH
+ * state), so a shell under development can never overwrite the installed
+ * DeepSeek Harness app's `~/Library/Application Support/DeepSeek Harness`.
+ * Packaged builds keep Electron's default unless DSH_DESKTOP_USER_DATA is set.
+ */
+function configureUserData() {
+  const override = process.env.DSH_DESKTOP_USER_DATA
+  if (typeof override === 'string' && override.trim() !== '') {
+    const expanded = override.trim().startsWith('~/')
+      ? path.join(os.homedir(), override.trim().slice(2))
+      : override.trim()
+    app.setPath('userData', expanded)
+    return
+  }
+  if (!app.isPackaged) {
+    app.setPath('userData', path.join(os.homedir(), DEV_DEFAULT_DSH_HOME.replace(/^~\//, '')))
+  }
+}
+
+configureUserData()
 app.setName('DeepSeek Harness')
 
 let settingsStore = null
@@ -149,6 +173,7 @@ function sessionFor(deviceKey) {
     updateManager: null,
     windows: new Set(),
     autoCheckTimer: null,
+    autoReconnectTimer: null,
     autoReconnectAttempts: 0,
     connecting: false,
   }
@@ -180,7 +205,9 @@ function sessionFor(deviceKey) {
 function stopSession(session) {
   if (session === undefined || session === null) return
   clearTimeout(session.autoCheckTimer)
+  clearTimeout(session.autoReconnectTimer)
   session.autoCheckTimer = null
+  session.autoReconnectTimer = null
   session.connection.stop()
   if (session.key !== 'local') sessions.delete(session.key)
 }
@@ -284,6 +311,10 @@ function createBrowserWindow() {
     title: 'DSH',
     icon: path.join(BUILD_DIR, 'icon.png'),
     show: false,
+    // The shell frame is the window's only titlebar: hidden native title,
+    // native traffic lights on top of the macOS-style toolbar.
+    titleBarStyle: 'hiddenInset',
+    trafficLightPosition: { x: 18, y: 15 },
     webPreferences: {
       preload: SHELL_PRELOAD,
       contextIsolation: true,
@@ -518,7 +549,7 @@ function refreshMenu() {
     actions,
     getStatus: () => session === null ? idleStatus() : session.connection.status,
     getSettings: () => activeSettingsView(),
-    isBusy: () => session !== null && (session.updater.busy || session.updateManager.busy),
+    isBusy: () => busySession() !== null,
     getUpdateSummary: () => activeUpdateSummary(),
   }))
 }
@@ -552,6 +583,8 @@ function onSessionStatus(session, status) {
     }
   }
   if (status.state === 'ready') {
+    clearTimeout(session.autoReconnectTimer)
+    session.autoReconnectTimer = null
     session.autoReconnectAttempts = 0
     scheduleAutoCheck(session)
   }
@@ -563,7 +596,14 @@ function onSessionConnectFailed(session, error) {
   if (session.autoReconnectAttempts <= 2) {
     const delay = session.autoReconnectAttempts * 10_000
     session.connection.log(`连接失败，${delay / 1000} 秒后自动重试（第 ${session.autoReconnectAttempts}/2 次）…`)
-    setTimeout(() => {
+    clearTimeout(session.autoReconnectTimer)
+    session.autoReconnectTimer = setTimeout(() => {
+      session.autoReconnectTimer = null
+      // The session may have been stopped while the timer was pending (e.g.
+      // the last window switched to another device); never resurrect an
+      // unowned SSH session from a stale reconnect timer.
+      if (sessions.get(session.key) !== session) return
+      if (session.windows.size === 0 && session.key !== 'local') return
       if (session.connection.status.state === 'error') connectSession(session)
     }, delay)
     return
@@ -662,6 +702,18 @@ async function startWithSettings(workspace) {
     return
   }
   if (!built) {
+    const busyMessage = busyTaskMessage()
+    if (busyMessage !== '') {
+      workspace.lastProgressAction = 'init'
+      setWorkspaceView(workspace, 'harness')
+      workspace.progressDialog.open()
+      workspace.progressDialog.state({
+        title: '初始化构建',
+        status: `${busyMessage} 稍后请从「更新 → 更新并重启」重试。`,
+        actions: [{ label: '关闭', name: 'close' }],
+      })
+      return
+    }
     workspace.lastProgressAction = 'init'
     setWorkspaceView(workspace, 'harness')
     workspace.progressDialog.open()
@@ -688,6 +740,7 @@ async function startWithSettings(workspace) {
 
 async function runInit(workspace) {
   const session = workspace.session
+  if (!canStartBusyTask()) return
   const outcome = await session.updater.runPipeline({ includePull: true, toleratePullFailure: true })
   if (outcome.ok) {
     workspace.progressDialog.close()
@@ -704,6 +757,26 @@ async function runInit(workspace) {
 }
 
 // ── user actions ────────────────────────────────────────────────────────────
+
+/**
+ * Build/update tasks are globally serialized: multi-window makes it easy for
+ * a background session to still be running pnpm install/build while the
+ * focused window tries to start another one. Two pipelines can contend for
+ * CPU, ports, and the same repo checkout.
+ */
+function busyTaskMessage() {
+  const busy = busySession()
+  if (busy === null) return ''
+  const terminal = terminalLabel(settingsViewFor(busy.key))
+  return `${terminal} 正在构建或更新组件，请等待任务完成后再启动新的更新/构建。`
+}
+
+function canStartBusyTask() {
+  const message = busyTaskMessage()
+  if (message === '') return true
+  dialog.showErrorBox('任务执行中', message)
+  return false
+}
 
 const actions = {
   newWindow() {
@@ -736,6 +809,7 @@ const actions = {
   },
 
   reconnect(workspace) {
+    if (!canStartBusyTask()) return withWorkspace(workspace)
     const target = withWorkspace(workspace)
     target.session.autoReconnectAttempts = 0
     target.pendingOpen = true
@@ -743,6 +817,7 @@ const actions = {
   },
 
   async resetBackend(workspace) {
+    if (!canStartBusyTask()) return withWorkspace(workspace)
     const target = withWorkspace(workspace)
     try {
       await target.session.connection.resetService()
@@ -757,6 +832,7 @@ const actions = {
   },
 
   async checkUpdates(workspace) {
+    if (!canStartBusyTask()) return withWorkspace(workspace)
     const target = actions.openUpdates(workspace)
     try {
       await target.session.updateManager.checkAll()
@@ -767,6 +843,7 @@ const actions = {
   },
 
   async updateAll(workspace) {
+    if (!canStartBusyTask()) return withWorkspace(workspace)
     const target = actions.openUpdates(workspace)
     routeSessionLine(target.session, '\n==> 更新全部组件')
     try {
@@ -779,6 +856,7 @@ const actions = {
   },
 
   async updateAndRestart(workspace) {
+    if (!canStartBusyTask()) return withWorkspace(workspace)
     const target = withWorkspace(workspace)
     target.lastProgressAction = 'update'
     target.progressDialog.open()
@@ -903,6 +981,8 @@ function registerIpc() {
 
     async save(event, rawSettings) {
       const workspace = workspaceForEvent(event) ?? withWorkspace(null)
+      const busyMessage = busyTaskMessage()
+      if (busyMessage !== '') return { ok: false, error: busyMessage }
       const candidate = normalizeSettings(rawSettings)
       const error = validateSettings(candidate)
       if (error !== null) return { ok: false, error }
@@ -929,6 +1009,10 @@ function registerIpc() {
       session.updateManager.settings = view
       session.updateManager.reloadComponents()
       broadcastSession(session)
+      // Any other window attached to this device already has a kept-alive
+      // settings view with the pre-save form; reload every panel so a
+      // multi-window save can never be overwritten from a stale copy.
+      for (const attached of session.windows) attached.setupDialog.reload()
       setWorkspaceView(workspace, 'harness')
       startWithSettings(workspace)
       return { ok: true }
@@ -975,9 +1059,22 @@ function registerIpc() {
       return workspace.session.updateManager.snapshot()
     },
 
+    updatesGetLog(event) {
+      const workspace = workspaceForEvent(event) ?? withWorkspace(null)
+      // The panel is created lazily and may have missed every earlier line;
+      // return the connection's bounded ring so the tab can show the latest
+      // log immediately instead of starting with an empty console.
+      return workspace.session.connection.dumpLog()
+    },
+
     async updatesAction(event, name, payload = {}) {
       const workspace = workspaceForEvent(event) ?? withWorkspace(null)
       const session = workspace.session
+      const taskNames = ['check-all', 'check-one', 'update-one', 'update-all']
+      const busyMessage = busyTaskMessage()
+      if (taskNames.includes(name) && busyMessage !== '') {
+        return { ok: false, error: busyMessage }
+      }
       try {
         switch (name) {
           case 'close':
@@ -1208,10 +1305,7 @@ if (!gotLock) {
       getStatus: () => activeStatus(),
       getSettings: () => activeSettingsView(),
       getUpdateSummary: () => activeUpdateSummary(),
-      isBusy: () => {
-        const session = activeSession()
-        return session !== null && (session.updater.busy || session.updateManager.busy)
-      },
+      isBusy: () => busySession() !== null,
     })
 
     try {
@@ -1246,10 +1340,19 @@ if (!gotLock) {
   app.on('before-quit', event => {
     // Cmd+Q can arrive while a build is running; prevent it so `pnpm run
     // build` is never killed mid-flight by a normal quit.
-    if (busySession() !== null) {
+    const busy = busySession()
+    if (busy !== null) {
       event.preventDefault()
-      const workspace = activeWorkspace()
-      if (workspace !== null) workspace.progressDialog.open()
+      const workspace = busy.windows.values().next().value ?? activeWorkspace()
+      if (workspace !== null && workspace !== undefined) {
+        workspace.progressDialog.open()
+        workspace.progressDialog.state({
+          title: '任务执行中，暂不能退出',
+          status: '正在构建或更新组件。请等待任务完成后再退出；进度窗口关闭不会中断任务。',
+          actions: [{ label: '关闭', name: 'close' }],
+        })
+      }
+      dialog.showErrorBox('任务执行中', busyTaskMessage())
       return
     }
     quitting = true

@@ -4,17 +4,21 @@
  * Settings persistence for the desktop shell.
  *
  * The settings file lives in the Electron userData directory
- * (`~/Library/Application Support/DeepSeek Harness/settings.json`). It is
- * scoped per target device: `devices` maps a device key (`local`, or
- * `ssh:<host>`) to that device's connection fields and update-manager
- * settings. The in-memory normalized document also exposes the active
- * device's `mode` / `local` / `ssh` / `update` at the top level so the rest
- * of the shell keeps reading the same shape it always read.
+ * (`~/Library/Application Support/DeepSeek Harness/settings.json` in packaged
+ * builds; `~/.dsh-desktop/settings.json` during development). It is scoped per
+ * target device: `devices` maps a device key (`local`, or `ssh:<host>`) to
+ * that device's connection fields and update-manager settings. The in-memory
+ * normalized document also exposes the active device's `mode` / `local` /
+ * `ssh` / `update` at the top level so the rest of the shell keeps reading
+ * the same shape it always read.
  */
 
 const fs = require('node:fs')
 const path = require('node:path')
 const { normalizeUpdate } = require('./components')
+
+/** The shell-owned dsh home used for development/desktop service isolation. */
+const DEV_DEFAULT_DSH_HOME = '~/.dsh-desktop'
 
 /** The harness checkout lives inside the shell product directory. */
 const DEFAULT_LOCAL_REPO_DIR = path.join(__dirname, '..', 'deepseek-harness')
@@ -22,7 +26,7 @@ const DEFAULT_LOCAL_REPO_DIR = path.join(__dirname, '..', 'deepseek-harness')
 /** Defaults every device entry is normalized against. */
 const DEVICE_DEFAULTS = Object.freeze({
   mode: 'local',
-  local: Object.freeze({ repoDir: DEFAULT_LOCAL_REPO_DIR, repoUrl: '', dshHome: '~/.dsh-desktop', port: 3080 }),
+  local: Object.freeze({ repoDir: DEFAULT_LOCAL_REPO_DIR, repoUrl: '', dshHome: DEV_DEFAULT_DSH_HOME, port: 3080 }),
   ssh: Object.freeze({
     host: '',
     remoteRepoUrl: '',
@@ -43,7 +47,7 @@ function text(value, fallback = '') {
 
 function portOf(value, fallback) {
   const number = Number(value)
-  return Number.isInteger(number) && number >= 0 && number <= 65535 ? number : fallback
+  return Number.isInteger(number) && number >= 1 && number <= 65535 ? number : fallback
 }
 
 function normalizeLocal(raw) {
@@ -214,6 +218,7 @@ class SettingsStore {
 }
 
 module.exports = {
+  DEV_DEFAULT_DSH_HOME,
   DEFAULTS,
   defaultDevice,
   deviceKeyOf,

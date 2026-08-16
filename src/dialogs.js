@@ -68,6 +68,16 @@ class SetupDialog {
     this.activeSection = ['connection', 'updates', 'advanced'].includes(section) ? section : 'connection'
     if (this.deviceKey === deviceKey) return
     this.deviceKey = deviceKey
+    this.reload()
+  }
+
+  /**
+   * Reload a panel that already exists. Used when another window changed the
+   * shared settings for the same device: a kept-alive WebContentsView would
+   * otherwise keep displaying (and later save) the stale form.
+   */
+  reload(section = this.activeSection) {
+    this.activeSection = ['connection', 'updates', 'advanced'].includes(section) ? section : 'connection'
     if (this.view !== null && !this.view.webContents.isDestroyed()) {
       this.view.webContents.loadFile(SETTINGS_HTML, {
         query: { section: this.activeSection, embedded: '1' },
@@ -197,6 +207,7 @@ function registerDialogIpc(handlers) {
   ipcMain.handle('dialog:action', (event, name) => handlers.action(event, name))
   ipcMain.handle('dialog:close-panel', event => handlers.closePanel(event))
   ipcMain.handle('updates:get-state', event => handlers.updatesGetState(event))
+  ipcMain.handle('updates:get-log', event => handlers.updatesGetLog(event))
   ipcMain.handle('updates:action', (event, name, payload) => handlers.updatesAction(event, name, payload))
 }
 

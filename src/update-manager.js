@@ -20,7 +20,7 @@ const path = require('node:path')
 const { request } = require('node:https')
 const { URL } = require('node:url')
 const {
-  componentView, DEFAULT_COMPONENTS, expandHome, hashTreeSync, isNewerVersion,
+  componentView, DEFAULT_COMPONENTS, expandHome, hashTreeSync, isNewerVersion, packageNameOfSpec, pluginSpecKind,
 } = require('./components')
 const { runCommand } = require('./runner')
 const { remotePath, remoteToolchainPrefix, shellQuote } = require('./ssh')
@@ -336,49 +336,96 @@ class UpdateManager {
     })
   }
 
-  async checkNpmComponent(def) {
-    const row = this.component(def.id)
-    this.patchRow(def.id, { status: 'checking', summary: '查询 npm registry…', error: '' })
-    let installed = ''
+  dependencyKey(profile, def, spec) {
+    const dependencies = profile.dependencies ?? {}
+    if (dependencies[def.packageName] !== undefined) return def.packageName
+    // Git/path specs are recorded under the package's REAL name, which may
+    // differ from the component id. Find the dependency whose saved spec
+    // matches what the shell installed.
+    for (const [name, saved] of Object.entries(dependencies)) {
+      if (typeof saved === 'string' && (saved === spec || saved.includes(spec))) return name
+    }
+    return def.packageName
+  }
+
+  async readInstalledNpm(def) {
+    const settings = this.getSettings()
+    const spec = def.installSpec || def.packageName || def.id
     try {
-      const settings = this.getSettings()
       if (settings.mode === 'ssh') {
         const profileFile = remotePath(`${this.managedDshHome()}/profiles/${def.profile}/package.json`)
         const profile = await this.remoteCatJson(profileFile)
-        installed = profile.dependencies?.[def.packageName] ?? ''
-      } else {
-        const nodePkg = path.join(this.profilePath(def), 'node_modules', def.packageName, 'package.json')
+        const key = this.dependencyKey(profile, def, spec)
+        const nodePkg = remotePath(`${this.managedDshHome()}/profiles/${def.profile}/node_modules/${key}/package.json`)
         try {
-          installed = JSON.parse(fs.readFileSync(nodePkg, 'utf8')).version
+          return { version: (await this.remoteCatJson(nodePkg)).version ?? '', spec: profile.dependencies?.[key] ?? '' }
         } catch {
-          const profile = JSON.parse(fs.readFileSync(path.join(this.profilePath(def), 'package.json'), 'utf8'))
-          installed = profile.dependencies?.[def.packageName] ?? ''
+          return { version: '', spec: profile.dependencies?.[key] ?? '' }
         }
       }
-    } catch (error) {
-      this.patchRow(def.id, {
-        status: 'error',
-        summary: '读取已安装版本失败',
-        error: error.message,
-      })
-      return
+      const profile = JSON.parse(fs.readFileSync(path.join(this.profilePath(def), 'package.json'), 'utf8'))
+      const key = this.dependencyKey(profile, def, spec)
+      const nodePkg = path.join(this.profilePath(def), 'node_modules', key, 'package.json')
+      try {
+        return { version: JSON.parse(fs.readFileSync(nodePkg, 'utf8')).version ?? '', spec: profile.dependencies?.[key] ?? '' }
+      } catch {
+        return { version: '', spec: profile.dependencies?.[key] ?? '' }
+      }
+    } catch {
+      return { version: '', spec: '' }
     }
-    const latest = await fetchJson(`${String(def.registryUrl).replace(/\/$/, '')}/${def.packageName}/latest`)
-    const latestVersion = typeof latest.version === 'string' ? latest.version : ''
-    if (latestVersion === '') throw new Error('registry 响应缺少 version 字段')
-    const missing = installed === ''
-    const updateAvailable = missing || isNewerVersion(latestVersion, installed)
+  }
+
+  async checkNpmComponent(def) {
+    const spec = def.installSpec || def.packageName || def.id
+    const kind = pluginSpecKind(spec)
     this.patchRow(def.id, {
-      status: 'ready',
-      current: missing ? '未安装' : `v${String(installed).replace(/^v/, '')}`,
-      latest: `v${latestVersion.replace(/^v/, '')}`,
-      updateAvailable,
-      summary: missing
-        ? `未安装，可点击更新执行 dsh plugin add ${def.packageName}`
-        : updateAvailable ? `可更新到 v${latestVersion}` : '已是最新',
+      status: 'checking',
+      summary: kind === 'registry' ? '查询 npm registry…' : '读取本地/远端已安装状态…',
       error: '',
     })
-    return { latest: latestVersion, installed: row.current }
+    try {
+      const installed = await this.readInstalledNpm(def)
+      if (kind !== 'registry') {
+        // Git/path/tarball specs cannot be compared through `/latest`; the
+        // shell re-runs the exact `dsh plugin add <spec>` as the update.
+        const missing = installed.version === '' && installed.spec === ''
+        this.patchRow(def.id, {
+          status: 'ready',
+          current: installed.version !== ''
+            ? `v${String(installed.version).replace(/^v/, '')}`
+            : installed.spec !== '' ? installed.spec : '未安装',
+          latest: spec,
+          updateAvailable: true,
+          summary: missing
+            ? `未安装，点击更新执行 dsh plugin add ${spec}`
+            : `自定义安装源（${kind}），点击更新重新执行 dsh plugin add ${spec}`,
+          error: '',
+        })
+        return { latest: spec, installed: installed.version || installed.spec }
+      }
+      const registryUrl = String(def.registryUrl).replace(/\/$/, '')
+      const latest = await fetchJson(`${registryUrl}/${def.packageName}/latest`)
+      const latestVersion = typeof latest.version === 'string' ? latest.version : ''
+      if (latestVersion === '') throw new Error('registry 响应缺少 version 字段')
+      const installedVersion = installed.version || installed.spec || ''
+      const missing = installedVersion === ''
+      const updateAvailable = missing || isNewerVersion(latestVersion, installedVersion)
+      this.patchRow(def.id, {
+        status: 'ready',
+        current: missing ? '未安装' : `v${String(installedVersion).replace(/^v/, '')}`,
+        latest: `v${latestVersion.replace(/^v/, '')}`,
+        updateAvailable,
+        summary: missing
+          ? `未安装，可点击更新执行 dsh plugin add ${spec}`
+          : updateAvailable ? `可更新到 v${latestVersion}` : '已是最新',
+        error: '',
+      })
+      return { latest: latestVersion, installed: installedVersion }
+    } catch (error) {
+      this.patchRow(def.id, { status: 'error', summary: '检查失败', error: error.message })
+      throw error
+    }
   }
 
 
@@ -482,16 +529,18 @@ class UpdateManager {
     this.setBusy(true)
     this.settings = this.getSettings()
     this.reloadComponents()
-    const checks = []
-    for (const row of this.enabledComponents()) {
+    const checks = this.enabledComponents().map(async row => {
       const def = this.rows.get(row.id)
-      if (def.kind === 'harness') checks.push(this.checkHarness())
-      else if (def.kind === 'npm') checks.push(this.checkNpmComponent(def))
-      else if (def.kind === 'git-preset') checks.push(this.checkPresetComponent(def))
-    }
-    await Promise.allSettled(checks.map(promise => Promise.resolve(promise).catch(error => {
-      this.onLog(`✗ 检查失败：${error.message}`)
-    })))
+      try {
+        if (def.kind === 'harness') await this.checkHarness()
+        else if (def.kind === 'npm') await this.checkNpmComponent(def)
+        else if (def.kind === 'git-preset') await this.checkPresetComponent(def)
+      } catch (error) {
+        this.patchRow(row.id, { status: 'error', summary: '检查失败', error: error.message })
+        this.onLog(`✗ 检查失败：${error.message}`)
+      }
+    })
+    await Promise.all(checks)
     const lastCheckAt = new Date().toISOString()
     this.saveUpdate({ lastCheckAt })
     this.settings = this.getSettings()
@@ -533,33 +582,53 @@ class UpdateManager {
 
 
   async updateNpmComponent(def) {
-    // Resolve the concrete latest version first and pass `pkg@x.y.z` to the
-    // official CLI. A bare `pnpm add pkg` leaves an exact dependency such as
-    // `"pkg": "0.12.1"` untouched on pnpm 11, so the plugin would "update"
-    // and restart while staying on the old version.
-    const registryUrl = String(def.registryUrl).replace(/\/$/, '')
-    const metadata = await fetchJson(`${registryUrl}/${def.packageName}/latest`)
-    const latestVersion = typeof metadata.version === 'string' ? metadata.version : ''
-    if (latestVersion === '') throw new Error(`无法解析 ${def.packageName} 的最新版本（registry 响应缺少 version）`)
-    const spec = `${def.packageName}@${latestVersion}`
+    const requestedSpec = def.installSpec || def.packageName || def.id
+    const kind = pluginSpecKind(requestedSpec)
+    const registryUrl = String(def.registryUrl || 'https://registry.npmjs.org').replace(/\/$/, '')
+    let spec = requestedSpec
+    let latestVersion = ''
+
+    if (kind === 'registry') {
+      const packageName = packageNameOfSpec(requestedSpec) || def.packageName
+      // A bare `pnpm add pkg` leaves an exact dependency such as `"pkg":
+      // "0.12.1"` untouched on pnpm 11, so only a bare package is promoted to
+      // `pkg@x.y.z`. Specs that already carry a tag/range (or `npm:` alias)
+      // are forwarded verbatim and the user keeps control of the policy.
+      if (packageName === requestedSpec) {
+        const metadata = await fetchJson(`${registryUrl}/${packageName}/latest`)
+        latestVersion = typeof metadata.version === 'string' ? metadata.version : ''
+        if (latestVersion === '') throw new Error(`无法解析 ${packageName} 的最新版本（registry 响应缺少 version）`)
+        spec = `${packageName}@${latestVersion}`
+      } else {
+        try {
+          const metadata = await fetchJson(`${registryUrl}/${packageName}/latest`)
+          latestVersion = typeof metadata.version === 'string' ? metadata.version : ''
+        } catch (error) {
+          this.log(`版本检查失败，仍按原安装参数执行：${error.message}`)
+        }
+      }
+    }
+
     this.patchRow(def.id, {
       status: 'updating',
       summary: `执行官方命令：dsh plugin --profile ${def.profile} add ${spec}`,
       error: '',
     })
-    this.log(`npm 最新版本：${latestVersion}，按 ${spec} 更新。`)
+    this.log(kind === 'registry' && latestVersion !== ''
+      ? `npm 最新版本：${latestVersion}，按 ${spec} 更新。`
+      : `按自定义安装参数执行：dsh plugin --profile ${def.profile} add ${spec}`)
     const settings = this.getSettings()
     await this.harnessUpdater.ensureToolchain(settings)
     await this.ensureBetterSidebarWorkspace(def)
+    const registryEnv = `export npm_config_registry=${shellQuote(registryUrl)};`
     if (settings.mode === 'ssh') {
       const result = await this.connection.remoteRun(
         settings.ssh.host,
-        `${REMOTE_PREFIX} export DSH_HOME="$HOME"/.dsh; cd ${remotePath(settings.ssh.remoteRepoDir)} && node apps/cli/lib/bin.js plugin --profile ${def.profile} add ${spec}`,
+        `${REMOTE_PREFIX} ${registryEnv} export DSH_HOME="$HOME"/.dsh; cd ${remotePath(settings.ssh.remoteRepoDir)} && node apps/cli/lib/bin.js plugin --profile ${def.profile} add ${shellQuote(spec)}`,
         { timeoutMs: PLUGIN_TIMEOUT_MS, onLine: line => this.log(line) },
       )
       if (result.code !== 0) throw new Error(`插件更新失败（退出码 ${result.code}）：${result.lines.slice(-6).join('\n')}`)
     } else {
-
       const tools = this.connection.resolvedTools({ refresh: true })
       const binPath = path.join(settings.local.repoDir, 'apps/cli/lib/bin.js')
       // `dsh plugin` resolves pnpm from PATH, while the shell's clean env
@@ -569,12 +638,12 @@ class UpdateManager {
       const pluginEnv = {
         ...tools.env,
         DSH_HOME: this.managedDshHome(),
+        npm_config_registry: registryUrl,
         PATH: pnpmDir === '' ? tools.env.PATH : `${pnpmDir}:${tools.env.PATH}`,
       }
       const result = await runCommand({
         cmd: tools.node,
         args: [binPath, 'plugin', '--profile', def.profile, 'add', spec],
-
         cwd: settings.local.repoDir,
         env: pluginEnv,
         timeoutMs: PLUGIN_TIMEOUT_MS,
