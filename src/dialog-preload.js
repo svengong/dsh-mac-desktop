@@ -1,9 +1,9 @@
 'use strict'
 
 /**
- * Preload for the dialog windows only. Exposes one narrow, JSON-only API;
- * the main window loads the remote page with no preload at all. The updates
- * panel gets its own state/log channels beside the progress window's.
+ * Preload for the settings panel and progress windows. Exposes one narrow,
+ * JSON-only API; the harness view gets no preload at all, and the main
+ * window's local frame uses `shell-preload.js`.
  */
 
 const { contextBridge, ipcRenderer } = require('electron')
@@ -19,6 +19,8 @@ contextBridge.exposeInMainWorld('desktopDialog', {
   pickDirectory: () => ipcRenderer.invoke('dialog:pick-directory'),
   testSsh: target => ipcRenderer.invoke('dialog:test-ssh', target),
   save: settings => ipcRenderer.invoke('dialog:save', settings),
+  closePanel: () => ipcRenderer.invoke('dialog:close-panel'),
+  onSection: callback => subscribe('dialog:section', callback),
 
   updates: {
     getState: () => ipcRenderer.invoke('updates:get-state'),

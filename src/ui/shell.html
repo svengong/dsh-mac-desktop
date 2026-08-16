@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>DSH</title>
+<link rel="stylesheet" href="./shell.css">
+</head>
+<body class="shell-workspace">
+<header class="shell-frame" id="shell-frame">
+  <div class="shell-frame-brand">
+    <span class="shell-frame-mark">DS</span>
+    <span class="shell-frame-name">DSH</span>
+  </div>
+
+  <nav class="shell-frame-nav" id="shell-nav" aria-label="工作区栏目">
+    <button type="button" data-view="harness" class="active">Harness</button>
+    <button type="button" data-view="connection">连接</button>
+    <button type="button" data-view="updates">更新管理</button>
+    <button type="button" data-view="advanced">高级</button>
+  </nav>
+
+  <div class="shell-frame-context">
+    <span class="shell-frame-terminal" id="shell-terminal">DSH-[本地]</span>
+    <span class="shell-frame-status" id="shell-status">未连接</span>
+  </div>
+</header>
+
+<main class="shell-viewport" id="shell-viewport" aria-live="polite"></main>
+
+<script>
+'use strict'
+const $ = id => document.getElementById(id)
+const api = window.desktopShell
+
+const buttons = document.querySelectorAll('#shell-nav button')
+for (const button of buttons) {
+  button.addEventListener('click', () => {
+    api.navigate(button.dataset.view)
+  })
+}
+
+api.onState(state => {
+  for (const button of buttons) {
+    const active = state.view === 'harness'
+      ? button.dataset.view === 'harness'
+      : button.dataset.view === state.view
+    button.classList.toggle('active', active)
+    button.setAttribute('aria-current', active ? 'page' : 'false')
+  }
+  $('shell-terminal').textContent = `DSH-[${state.terminal || '本地'}]`
+  $('shell-status').textContent = state.status || ''
+  $('shell-status').title = state.status || ''
+})
+</script>
+</body>
+</html>
