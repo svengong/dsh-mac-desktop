@@ -128,6 +128,13 @@ class WindowManager {
       activeView: workspace.activeView || previous.activeView || 'harness',
       updatedAt: new Date().toISOString(),
     }
+    const ids = Object.keys(this.state.windows)
+    if (ids.length > 12) {
+      const oldest = ids
+        .sort((a, b) => String(this.state.windows[a].updatedAt).localeCompare(String(this.state.windows[b].updatedAt)))
+        .slice(0, ids.length - 12)
+      for (const id of oldest) delete this.state.windows[id]
+    }
     this.scheduleSave()
   }
 
