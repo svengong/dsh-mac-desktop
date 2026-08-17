@@ -70,7 +70,7 @@ bash scripts/install.sh
 
 First launch opens the connection settings dialog. Pick 本地 (repo dir + port) or SSH 远程 (a host alias from `~/.ssh/config`, remote repo url, remote dir, ports), then 保存并连接. The first connection runs an initialization build (pull if possible → install → build → start) when `apps/cli/lib/bin.js` is missing. After that the top menu 「更新」 handles routine upgrades. Connection settings, update sources, and startup auto-check are stored per device: switching to a new SSH host or to local starts 更新管理 from that device's own harness row and plugin sources, never from the previous device.
 
-Ports: in local mode the configured 端口 is a **preferred port** — the shell uses it when free and otherwise falls back to the next free port (for example when a terminal already runs `dsh web`); it always passes the actual port as `--port` to `dsh web`, which overrides the web profile's `webserver.port`, and the main window follows the actual port. In SSH mode the shell fully owns 本地转发端口; 远程端口 must match the remote web profile.
+Ports: local and remote `dsh web` are started with `--port 0`; the CLI prints `dsh web: http://127.0.0.1:<port>`, the shell records that port in runtime state, and every window follows the actual URL. SSH local forward ports remain shell-owned and use the configured 本地转发端口 as a preference with a +30 fallback; the remote service port setting is kept only for compatibility.
 
 ## Design contract (why upgrades never touch the shell)
 

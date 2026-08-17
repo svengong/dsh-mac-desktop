@@ -13,7 +13,10 @@ Electron macOS 薄壳：主窗口顶部 46px 壳边框，下面是 harness WebCo
 | 主题 | 位置 | 关键点 |
 |---|---|---|
 | 开发态隔离 | `src/main.js#configureUserData` | 未打包时 userData=`~/.dsh-desktop`；`DSH_DESKTOP_USER_DATA` 可覆盖 |
-| 端口冲突 | `src/ports.js`、`src/connection.js` | 探测+预留；远程按 `ssh:<host>` 串行；设置页可编辑三个端口 |
+| 端口 0 | `src/runtime-store.js`、`src/connection.js` | 本地/远端 `dsh web --port 0`，解析 `dsh web: URL` 回读真实端口 |
+| 转发端口 | `src/ports.js` | 仅 SSH 本地转发使用优先端口 + 顺延 30 + 进程内预留 |
+| 安装/构建锁 | `src/runtime-store.js`、`src/update.js` | 本地 `mkdir` 锁；远端 owner+30min stale 锁；clone/build 串行 |
+| 窗口状态 | `src/window-manager.js`、`src/main.js` | `window-state.json` 保存 bounds/active-view/last-active，启动恢复 |
 | 多窗口加固 | `src/main.js` | 保存后重载同设备所有设置面板；全局 busy 阻止并发任务；重连定时器不复活已 stop session |
 | 退出防护 | `src/main.js#actions.quit`、`before-quit` | build/update 中禁止退出 |
 | 日志面板 | `src/ui/settings.html` | 日志在 tab 最后、固定 176px、`updates:get-log` 回填最新 |
@@ -26,18 +29,20 @@ Electron macOS 薄壳：主窗口顶部 46px 壳边框，下面是 harness WebCo
    `node bin.js plugin --profile <profile> add <spec>`，`spec` 作为单个 argv 传入。
 2. **壳只杀自管子进程。** 非自管服务只探测、只复用，不 kill。
 3. **settings 永远先归一化。** 所有入口都经 `normalizeSettings`，坏数据回退默认。
-4. **所有端口分配必须配对 release。** 用 `acquireLocalPort/acquireRemotePort`，
-   停止/失败路径调 `releaseReservedPorts()`。
-5. **busy 任务全局互斥。** 新增任何 pnpm install/build/plugin update 路径前，先经过
+4. **Web 服务端口必须用 `--port 0`。** 不要重新引入本地/远端 web 端口扫描；只有 SSH
+   转发端口使用 `acquireLocalPort()`，停止/失败路径调 `releaseReservedPorts()`。
+5. **clone/build 必须过 runtime-store 锁。** 新增任何仓库写入或 pnpm build 路径时，
+   先判断是否会被第二个壳实例并发执行。
+6. **busy 任务全局互斥。** 新增任何 pnpm install/build/plugin update 路径前，先经过
    `busySession()` / `canStartBusyTask()` 语义（或复用 `Updater.runPipeline` /
    `UpdateManager.update*`）。
-6. **多窗口设置不能有第二事实源。** 连接设置保存后必须 `setupDialog.reload()` 同设备窗口；
+7. **多窗口设置不能有第二事实源。** 连接设置保存后必须 `setupDialog.reload()` 同设备窗口；
    更新状态用 `broadcastSession` 推送。
-7. **标题与菜单统一走 `labels.js`。** 不要手写第二份 `DSH-[终端]`。
-8. **渲染器保持 sandbox。** 只通过 preload 的窄 API；IPC 返回 JSON-safe 数据。
-9. **开发态不要碰生产数据。** 不要绕过 `configureUserData` 或写死
+8. **标题与菜单统一走 `labels.js`。** 不要手写第二份 `DSH-[终端]`。
+9. **渲染器保持 sandbox。** 只通过 preload 的窄 API；IPC 返回 JSON-safe 数据。
+10. **开发态不要碰生产数据。** 不要绕过 `configureUserData` 或写死
    `~/Library/Application Support/DeepSeek Harness`。
-10. **每个功能提交一次 git，并在提交前跑两条 smoke。** 见下。
+11. **每个功能提交一次 git，并在提交前跑两条 smoke。** 见下。
 
 ## 4. 验收命令
 
