@@ -69,14 +69,19 @@ store.save({
   toolPaths: saved.toolPaths,
 })
 const windowState = path.join(userData, 'window-state.json')
-if (!fs.existsSync(windowState)) {
-  fs.writeFileSync(windowState, JSON.stringify({
-    version: 1,
-    lastActiveDeviceKey: key,
-    lastActiveWorkspaceId: null,
-    windows: {},
-  }, null, 2))
+let restored = {
+  version: 1,
+  lastActiveDeviceKey: key,
+  lastActiveWorkspaceId: null,
+  windows: {},
 }
+try {
+  const previous = JSON.parse(fs.readFileSync(windowState, 'utf8'))
+  restored = { ...restored, ...previous, lastActiveDeviceKey: key }
+} catch {
+  // Fresh install: use the empty state above.
+}
+fs.writeFileSync(windowState, JSON.stringify(restored, null, 2))
 console.log(`Configured installed app for ${key}`)
 NODE
 fi
