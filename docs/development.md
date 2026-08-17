@@ -155,6 +155,8 @@ https://example.com/hello-plugin.tgz
 - git/path/tarball：不查 registry，`updateAvailable=true` 表示“重新执行安装源”。
 
 `registryUrl` 通过 `npm_config_registry` 传给实际 pnpm 安装，版本检查也使用同一 registry。
+npm 插件与 Git 预设的实际安装通过 `withComponentLock` 串行化（本地/远端锁），
+避免第二个壳实例同时写同一 profile 或预设目录。
 
 ## 7. macOS UI 约定
 
