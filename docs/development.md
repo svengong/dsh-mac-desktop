@@ -131,7 +131,17 @@ BrowserWindow (shell.html 边框)
 
 未知 kind 会在归一化时丢弃，因此 settings.json 永远不能把壳变成任意命令执行器。
 
-### 6.2 npm 插件 spec
+### 6.2 Harness staged runtime
+
+- clean 工作区：`git worktree add --detach <dshHome>/runtime/<version> HEAD`，
+  在 worktree 里 `pnpm install + build`，成功后原子切换 `current` symlink；
+- dirty 工作区：保持旧行为，在源目录构建，不提供回滚快照；
+- `runtime/manifest.json` 保存 `current` 与 `previous`，最多保留当前 + 上一版本；
+- 新 runtime 启动失败：自动切回 `previous` 并重启旧版本；
+- 更新菜单「回滚 Harness…」调用同一套 runtime-store 回滚并重置/重连后端；
+- 远端同构：`~/.dsh/runtime/<version>` + `~/.dsh/runtime/current`。
+
+### 6.3 npm 插件 spec
 
 支持 pnpm `add` 全语法：
 
@@ -185,7 +195,7 @@ DSH_DESKTOP_SMOKE=1 npx electron .       # Electron 冒烟（菜单/Dock/actions
 - `normalizeSettings` / `normalizeUserComponent` / npm spec 解析。
 - `findFreePort` + reservation 的跳端口行为。
 - `parseDshWebUrl` + 实际启动 `dsh web --port 0` 并回读端口。
-- `runtimeStore` local state round-trip 与本地锁。
+- `runtimeStore` local state round-trip、本地锁、local/remote runtime 激活与回滚。
 - `WindowManager` 保存/恢复 last-active device 与 bounds。
 - ssh quoting、remotePath、tunnelArgs。
 - UpdateManager 非网络快照与 preset checkout 路径。
