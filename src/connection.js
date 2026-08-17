@@ -836,9 +836,10 @@ class ConnectionManager extends EventEmitter {
       ? '启动远程 dsh web（由系统分配端口）…'
       : `启动远程 dsh web（端口 ${remotePort}）…`)
 
+    const startCommand = `if command -v setsid >/dev/null 2>&1; then setsid sh -c ${shellQuote(`cd ${dir} && exec node ${bin} web --port ${remotePort} > ${portFile} 2>> ${logFile} < /dev/null`)} </dev/null >/dev/null 2>&1 & else nohup sh -c ${shellQuote(`cd ${dir} && exec node ${bin} web --port ${remotePort} > ${portFile} 2>> ${logFile} < /dev/null`)} >/dev/null 2>&1 </dev/null & fi; echo $! > ${pidFile}`
     const start = await this.remoteRun(
       settings.ssh.host,
-      `${remoteToolchainPrefix()} mkdir -p "$HOME"/.dsh; rm -f ${portFile}; cd ${dir} && nohup node ${bin} web --port ${remotePort} > ${portFile} 2>> ${logFile} < /dev/null & echo $! > ${pidFile}`,
+      `${remoteToolchainPrefix()} mkdir -p "$HOME"/.dsh; rm -f ${portFile}; ${startCommand}`,
       { timeoutMs: 20_000 },
     )
     if (start.code !== 0) throw new Error(`远程服务启动失败：${start.lines.join('\n')}`)

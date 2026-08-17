@@ -170,6 +170,8 @@ async function main() {
   const failing = await runCommand({ cmd: '/bin/sh', args: ['-c', 'echo out; echo err >&2; exit 3'] })
   assert.strictEqual(failing.code, 3)
   assert.deepStrictEqual(failing.lines, ['out', 'err'])
+  const noNewline = await runCommand({ cmd: '/bin/sh', args: ['-c', 'printf no-newline'] })
+  assert.deepStrictEqual(noNewline.lines, ['no-newline'])
 
   // window presentation: dock activation must recover hidden and minimized
   // windows, not only recreate an absent one. A minimized window keeps the
