@@ -70,10 +70,11 @@ desktop-shell/
 ```sh
 cd desktop-shell
 bash scripts/build.sh
-bash scripts/install.sh
+bash scripts/install.sh --ssh home2604_v4
+open '/Applications/DeepSeek Harness.app'
 ```
 
-`build.sh` 会执行 npm install、重新生成图标并用 electron-builder 构建应用；`install.sh` 把应用包复制到 /Applications。
+`install.sh` 没有现成 app 时会先自动构建，再复制到 /Applications；带 `--ssh <别名>` 时会把该 SSH 设备预写进正式设置，启动即可用，不需要再点连接设置。
 
 首次启动弹出连接设置：选「本地」（仓库目录 + 端口）或「SSH 远程」（`~/.ssh/config` 主机别名、远程仓库地址、远程目录、远程端口、本地转发端口），点「保存并连接」。当 `apps/cli/lib/bin.js` 不存在时，首次连接会自动执行初始化构建（可 pull 则先 pull → install → build → 启动）。此后日常升级走顶部菜单「更新」。连接设置、更新源与启动自动检查按设备保存：切到新的 SSH 主机或本地时，更新管理只显示该设备自己的 Harness 与插件源，不会沿用上一台设备。
 

@@ -15,13 +15,24 @@
 
 const fs = require('node:fs')
 const path = require('node:path')
+const os = require('node:os')
 const { normalizeUpdate } = require('./components')
 
 /** The shell-owned dsh home used for development/desktop service isolation. */
 const DEV_DEFAULT_DSH_HOME = '~/.dsh-desktop'
 
-/** The harness checkout lives inside the shell product directory. */
-const DEFAULT_LOCAL_REPO_DIR = path.join(__dirname, '..', 'deepseek-harness')
+/** Packaged builds must never point at a read-only path inside the .app. */
+const IS_PACKAGED = typeof process.resourcesPath === 'string' && process.resourcesPath !== ''
+
+/** The harness checkout lives inside the shell product directory in dev. */
+const DEFAULT_LOCAL_REPO_DIR = IS_PACKAGED
+  ? path.join(os.homedir(), 'deepseek-harness')
+  : path.join(__dirname, '..', 'deepseek-harness')
+
+/** A fresh packaged install can clone the official repo without first-run setup. */
+const DEFAULT_LOCAL_REPO_URL = IS_PACKAGED
+  ? 'https://github.com/deepseek-ai/deepseek-harness.git'
+  : ''
 
 /** Defaults every device entry is normalized against. */
 const DEVICE_DEFAULTS = Object.freeze({
@@ -55,7 +66,7 @@ function normalizeLocal(raw) {
   return {
     repoDir: text(source.repoDir) || DEFAULT_LOCAL_REPO_DIR,
     // Optional git URL: cloned into repoDir when it is missing or not a git repo.
-    repoUrl: text(source.repoUrl).trim(),
+    repoUrl: text(source.repoUrl).trim() || DEFAULT_LOCAL_REPO_URL,
     // The instance's OWN dsh home: completely separate from any other dsh
     // process on the machine (no shared sessions/settings/profiles), so two
     // live instances can never corrupt each other's session store.
