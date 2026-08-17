@@ -82,7 +82,8 @@ class Updater {
       ? args => this.remoteGit(args, { timeoutMs: 60_000 })
       : args => this.localRun(args, { timeoutMs: 60_000 })
     const branch = await run(['rev-parse', '--abbrev-ref', 'HEAD'])
-    if (branch.code !== 0) return { gitRepo: false, branch: '', upstream: '', ahead: 0, behind: 0, dirty: false }
+    if (branch.code !== 0) return { gitRepo: false, branch: '', upstream: '', ahead: 0, behind: 0, dirty: false, head: '' }
+    const head = await run(['rev-parse', 'HEAD'])
     const upstream = await run(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}'])
     const dirty = await run(['status', '--porcelain'])
     let ahead = 0
@@ -100,6 +101,7 @@ class Updater {
     return {
       gitRepo: true,
       branch: (branch.lines[0] || '').trim(),
+      head: head.code === 0 ? (head.lines[0] || '').trim() : '',
       upstream: upstream.code === 0 ? (upstream.lines[0] || '').trim() : '',
       ahead,
       behind,
@@ -138,8 +140,137 @@ class Updater {
     return { ...facts, summary: `落后上游 ${facts.behind} 个提交` }
   }
 
+  /** Version token for the build we are about to run. */
+  async buildVersion(settings, facts) {
+    if (facts.head !== '' && !facts.dirty) return facts.head
+    if (settings.mode === 'local') {
+      try {
+        const stat = fs.statSync(path.join(settings.local.repoDir, 'apps/cli/lib/bin.js'))
+        return `dirty:${stat.mtimeMs}`
+      } catch {
+        return `dirty:${Date.now()}`
+      }
+    }
+    const result = await this.connection.remoteRun(
+      settings.ssh.host,
+      `stat -f %m ${remotePath(settings.ssh.remoteRepoDir)}/apps/cli/lib/bin.js 2>/dev/null || echo ${Date.now()}`,
+      { timeoutMs: 15_000 },
+    )
+    return `dirty:${(result.lines[0] || String(Date.now())).trim()}`
+  }
+
+  async localInstallBuild(settings, tools, cwd) {
+    await this.runStep('pnpm install', () => runCommand({
+      cmd: tools.pnpm,
+      args: [...tools.pnpmPrefix, 'install'],
+      cwd,
+      env: tools.env,
+      timeoutMs: LONG_TIMEOUT_MS,
+      onLine: line => this.onLine(line),
+    }))
+    await this.runStep('pnpm run build', () => runCommand({
+      cmd: tools.pnpm,
+      args: [...tools.pnpmPrefix, 'run', 'build'],
+      cwd,
+      env: tools.env,
+      timeoutMs: LONG_TIMEOUT_MS,
+      onLine: line => this.onLine(line),
+    }))
+  }
+
+  async remoteInstallBuild(settings, workDir) {
+    await this.runStep('pnpm install', () => this.connection.remoteRun(
+      settings.ssh.host,
+      `${REMOTE_PREFIX} cd ${workDir} && pnpm install`,
+      { timeoutMs: LONG_TIMEOUT_MS, onLine: line => this.onLine(line) },
+    ))
+    await this.runStep('pnpm run build', () => this.connection.remoteRun(
+      settings.ssh.host,
+      `${REMOTE_PREFIX} cd ${workDir} && pnpm run build`,
+      { timeoutMs: LONG_TIMEOUT_MS, onLine: line => this.onLine(line) },
+    ))
+  }
+
+  async prepareLocalRuntime(settings, facts, tools) {
+    const version = await this.buildVersion(settings, facts)
+    const token = runtimeStore.versionToken(version)
+    const manifest = runtimeStore.readLocalRootManifest(settings)
+    const activeDir = runtimeStore.localActiveRuntimeDir(settings)
+    if (manifest.current === token && activeDir !== null) {
+      this.onLine(`运行时 ${token} 已构建，跳过 staging install/build。`)
+      return { workDir: activeDir, version: token, activated: false, previous: manifest.previous }
+    }
+    if (facts.dirty) {
+      this.onLine('工作区有未提交改动：直接在源目录构建（此模式无上一版本快照）。')
+      await this.localInstallBuild(settings, tools, settings.local.repoDir)
+      return { workDir: settings.local.repoDir, version: token, activated: false, previous: null }
+    }
+    const buildDir = runtimeStore.localVersionDir(settings, version)
+    fs.rmSync(buildDir, { recursive: true, force: true })
+    this.onLine(`准备 staging 构建目录：${buildDir}`)
+    await this.runStep('git worktree add', () => this.localRun(
+      ['worktree', 'add', '--detach', buildDir, facts.head],
+      { timeoutMs: 10 * 60_000, onLine: line => this.onLine(line) },
+    ))
+    try {
+      await this.localInstallBuild(settings, tools, buildDir)
+    } catch (error) {
+      await this.localRun(['worktree', 'remove', '--force', buildDir]).catch(() => {})
+      throw error
+    }
+    runtimeStore.writeLocalRuntimeManifest(settings, version, { sourceVersion: facts.head })
+    const activated = runtimeStore.activateLocalRuntime(settings, version)
+    this.onLine(`已原子切换到运行时 ${activated}（上一版本：${manifest.current ?? '无'}）。`)
+    return {
+      workDir: runtimeStore.localActiveRuntimeDir(settings) ?? buildDir,
+      version: activated,
+      activated: true,
+      previous: manifest.current,
+    }
+  }
+
+  async prepareRemoteRuntime(settings, facts, remoteRun) {
+    const version = await this.buildVersion(settings, facts)
+    const token = runtimeStore.versionToken(version)
+    const manifest = await runtimeStore.readRemoteRootManifest(settings, remoteRun)
+    const activeDir = await runtimeStore.remoteActiveRuntimeDir(settings, remoteRun)
+    if (manifest.current === token && activeDir !== null) {
+      this.onLine(`远端运行时 ${token} 已构建，跳过 staging install/build。`)
+      return { workDir: activeDir, version: token, activated: false, previous: manifest.previous }
+    }
+    if (facts.dirty) {
+      this.onLine('远端工作区有未提交改动：直接在源目录构建（此模式无上一版本快照）。')
+      await this.remoteInstallBuild(settings, remotePath(settings.ssh.remoteRepoDir))
+      return { workDir: remotePath(settings.ssh.remoteRepoDir), version: token, activated: false, previous: null }
+    }
+    const buildDir = runtimeStore.remoteVersionDir(version)
+    const source = remotePath(settings.ssh.remoteRepoDir)
+    this.onLine(`准备远端 staging 构建目录：${buildDir}`)
+    const add = await this.connection.remoteRun(
+      settings.ssh.host,
+      `rm -rf ${buildDir}; cd ${source} && git -c core.hooksPath=/dev/null worktree add --detach ${buildDir} ${facts.head}`,
+      { timeoutMs: 10 * 60_000, onLine: line => this.onLine(line) },
+    )
+    if (add.code !== 0) throw new Error(`远端 git worktree add 失败：${add.lines.join('\n')}`)
+    try {
+      await this.remoteInstallBuild(settings, buildDir)
+    } catch (error) {
+      await this.connection.remoteRun(
+        settings.ssh.host,
+        `cd ${source} && git worktree remove --force ${buildDir} 2>/dev/null || rm -rf ${buildDir}`,
+        { timeoutMs: 30_000 },
+      )
+      throw error
+    }
+    const activated = await runtimeStore.activateRemoteRuntime(settings, remoteRun, version)
+    this.onLine(`已原子切换远端运行时 ${activated}（上一版本：${manifest.current ?? '无'}）。`)
+    return { workDir: await runtimeStore.remoteActiveRuntimeDir(settings, remoteRun) ?? buildDir, version: activated, activated: true, previous: manifest.current }
+  }
+
   /**
-   * Run the update pipeline: pull (optional) → install → build → restart.
+   * Run the update pipeline: pull (optional) → staged install/build →
+   * atomic `current` switch → restart. A failed new runtime automatically
+   * falls back to the previous finished version.
    * @param {object} options - includePull, toleratePullFailure.
    * @returns {Promise<{ok: boolean}>}
    */
@@ -150,83 +281,80 @@ class Updater {
       const remoteRun = (host, inner, options) => this.connection.remoteRun(host, inner, options)
       const executePipeline = async () => {
         let tools = this.connection.resolvedTools()
-      await this.runStep('确保仓库就绪', () => settings.mode === 'ssh'
-        ? this.connection.ensureRemoteRepo(settings)
-        : this.connection.ensureLocalRepo(settings))
-      await this.ensureToolchain(settings)
-      if (settings.mode === 'local') tools = this.connection.resolvedTools({ refresh: true })
-      const facts = await this.gitFacts()
-      if (includePull && facts.gitRepo && facts.upstream !== '') {
-        if (facts.dirty) {
-          this.onLine('工作区有未提交改动，跳过 git pull。')
-        } else {
-          try {
-            await this.runStep('git pull --ff-only', () => settings.mode === 'ssh'
-              ? this.remoteGit(['pull', '--ff-only'], { timeoutMs: 10 * 60_000, onLine: line => this.onLine(line) })
-              : this.localRun(['pull', '--ff-only'], { timeoutMs: 10 * 60_000, onLine: line => this.onLine(line) }))
-          } catch (error) {
-            if (!toleratePullFailure) throw error
-            this.onLine(`git pull 失败（${error.message}），继续安装与构建。`)
+        await this.runStep('确保仓库就绪', () => settings.mode === 'ssh'
+          ? this.connection.ensureRemoteRepo(settings)
+          : this.connection.ensureLocalRepo(settings))
+        await this.ensureToolchain(settings)
+        if (settings.mode === 'local') tools = this.connection.resolvedTools({ refresh: true })
+        const facts = await this.gitFacts()
+        if (includePull && facts.gitRepo && facts.upstream !== '') {
+          if (facts.dirty) {
+            this.onLine('工作区有未提交改动，跳过 git pull。')
+          } else {
+            try {
+              await this.runStep('git pull --ff-only', () => settings.mode === 'ssh'
+                ? this.remoteGit(['pull', '--ff-only'], { timeoutMs: 10 * 60_000, onLine: line => this.onLine(line) })
+                : this.localRun(['pull', '--ff-only'], { timeoutMs: 10 * 60_000, onLine: line => this.onLine(line) }))
+            } catch (error) {
+              if (!toleratePullFailure) throw error
+              this.onLine(`git pull 失败（${error.message}），继续安装与构建。`)
+            }
           }
         }
-      }
-      if (settings.mode === 'ssh') {
-        const toolchain = await this.connection.remoteRun(settings.ssh.host, `${REMOTE_PREFIX} node --version && pnpm --version`, { timeoutMs: 60_000 })
-        if (toolchain.code !== 0) {
-          throw new Error(
-            `远程机器（${settings.ssh.host}）自包含工具链不可用（退出码 ${toolchain.code}）。\n` +
-            '远端 ~/.dsh-tools 引导失败，请打开服务日志查看下载/安装输出。',
-          )
+        if (settings.mode === 'ssh') {
+          const toolchain = await this.connection.remoteRun(settings.ssh.host, `${REMOTE_PREFIX} node --version && pnpm --version`, { timeoutMs: 60_000 })
+          if (toolchain.code !== 0) {
+            throw new Error(
+              `远程机器（${settings.ssh.host}）自包含工具链不可用（退出码 ${toolchain.code}）。\n` +
+              '远端 ~/.dsh-tools 引导失败，请打开服务日志查看下载/安装输出。',
+            )
+          }
+          this.onLine(`远程 node/pnpm：${toolchain.lines.map(line => line.trim()).filter(Boolean).join('，')}`)
+        } else {
+          if (tools.node === '') throw new Error('未找到兼容的 node（需 22.19+ 或 24+）。请安装 Node.js，或在「设置 → 高级」中指定 node 路径。')
+          const nodeVersion = await runCommand({ cmd: tools.node, args: ['--version'], env: tools.env, timeoutMs: 60_000 })
+          if (nodeVersion.code !== 0) throw new Error(`node 不可用（退出码 ${nodeVersion.code}）。`)
+          const pnpmVersion = await runCommand({
+            cmd: tools.pnpm,
+            args: [...tools.pnpmPrefix, '--version'],
+            env: tools.env,
+            cwd: settings.local.repoDir,
+            timeoutMs: 60_000,
+          })
+          if (pnpmVersion.code !== 0) throw new Error(`pnpm 不可用（退出码 ${pnpmVersion.code}）。`)
+          this.onLine(`node：${(nodeVersion.lines[0] || '').trim()}；pnpm：${(pnpmVersion.lines[0] || '').trim()}`)
         }
-        this.onLine(`远程 node/pnpm：${toolchain.lines.map(line => line.trim()).filter(Boolean).join('，')}`)
-      } else {
-        if (tools.node === '') throw new Error('未找到兼容的 node（需 22.19+ 或 24+）。请安装 Node.js，或在「设置 → 高级」中指定 node 路径。')
-        const nodeVersion = await runCommand({ cmd: tools.node, args: ['--version'], env: tools.env, timeoutMs: 60_000 })
-        if (nodeVersion.code !== 0) throw new Error(`node 不可用（退出码 ${nodeVersion.code}）。`)
-        const pnpmVersion = await runCommand({
-          cmd: tools.pnpm,
-          args: [...tools.pnpmPrefix, '--version'],
-          env: tools.env,
-          cwd: settings.local.repoDir,
-          timeoutMs: 60_000,
-        })
-        if (pnpmVersion.code !== 0) throw new Error(`pnpm 不可用（退出码 ${pnpmVersion.code}）。`)
-        this.onLine(`node：${(nodeVersion.lines[0] || '').trim()}；pnpm：${(pnpmVersion.lines[0] || '').trim()}`)
-      }
-      await this.runStep('pnpm install', () => settings.mode === 'ssh'
-        ? this.connection.remoteRun(
-          settings.ssh.host,
-          `${REMOTE_PREFIX} cd ${remotePath(settings.ssh.remoteRepoDir)} && pnpm install`,
-          { timeoutMs: LONG_TIMEOUT_MS, onLine: line => this.onLine(line) },
-        )
-        : runCommand({
-          cmd: tools.pnpm,
-          args: [...tools.pnpmPrefix, 'install'],
-          cwd: settings.local.repoDir,
-          env: tools.env,
-          timeoutMs: LONG_TIMEOUT_MS,
-          onLine: line => this.onLine(line),
-        }))
-      await this.runStep('pnpm run build', () => settings.mode === 'ssh'
-        ? this.connection.remoteRun(
-          settings.ssh.host,
-          `${REMOTE_PREFIX} cd ${remotePath(settings.ssh.remoteRepoDir)} && pnpm run build`,
-          { timeoutMs: LONG_TIMEOUT_MS, onLine: line => this.onLine(line) },
-        )
-        : runCommand({
-          cmd: tools.pnpm,
-          args: [...tools.pnpmPrefix, 'run', 'build'],
-          cwd: settings.local.repoDir,
-          env: tools.env,
-          timeoutMs: LONG_TIMEOUT_MS,
-          onLine: line => this.onLine(line),
-        }))
-      await this.runStep('重启服务', async () => {
-        await this.connection.restartService()
-        return { code: 0, lines: [] }
-      })
-      this.onLine('\n完成：服务已重启。')
-      return { ok: true }
+
+        const prepared = settings.mode === 'ssh'
+          ? await this.prepareRemoteRuntime(settings, facts, remoteRun)
+          : await this.prepareLocalRuntime(settings, facts, tools)
+        this.onLine(`运行时目录：${prepared.workDir}`)
+
+        try {
+          await this.runStep('重启服务', async () => {
+            await this.connection.restartService()
+            return { code: 0, lines: [] }
+          })
+        } catch (error) {
+          if (prepared.activated && prepared.previous !== null && prepared.previous !== '') {
+            const rollbackVersion = settings.mode === 'ssh'
+              ? await runtimeStore.rollbackRemoteRuntime(settings, remoteRun)
+              : runtimeStore.rollbackLocalRuntime(settings)
+            if (rollbackVersion !== null && rollbackVersion !== '') {
+              this.onLine(`新运行时启动失败，已回滚到 ${rollbackVersion}，尝试恢复旧服务…`)
+              try {
+                await this.connection.restartService()
+                this.onLine('旧运行时已恢复，本次更新未生效。')
+                return { ok: false, error, rolledBack: true, rollbackVersion }
+              } catch (rollbackError) {
+                this.onLine(`旧运行时恢复失败：${String(rollbackError.message || rollbackError)}`)
+              }
+            }
+          }
+          throw error
+        }
+        this.onLine('\n完成：服务已重启。')
+        return { ok: true }
       }
 
       const lockName = settings.mode === 'ssh'

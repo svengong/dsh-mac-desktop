@@ -34,6 +34,7 @@ const { resolveTools } = require('./tools')
 const { runCommand } = require('./runner')
 const { sshCommandArgs, parseTarget, listSshHosts, isSshConfigAlias } = require('./ssh')
 const { ConnectionManager } = require('./connection')
+const runtimeStore = require('./runtime-store')
 const { Updater } = require('./update')
 const { UpdateManager } = require('./update-manager')
 const { SetupDialog, ProgressDialog, registerDialogIpc } = require('./dialogs')
@@ -861,6 +862,34 @@ const actions = {
     return target
   },
 
+  async rollbackHarness(workspace) {
+    if (!canStartBusyTask()) return withWorkspace(workspace)
+    const target = withWorkspace(workspace)
+    const session = target.session
+    const settings = settingsViewFor(session.key)
+    try {
+      const previous = settings.mode === 'ssh'
+        ? await runtimeStore.rollbackRemoteRuntime(
+          settings,
+          (host, inner, options) => session.connection.remoteRun(host, inner, options),
+        )
+        : runtimeStore.rollbackLocalRuntime(settings)
+      if (previous === null || previous === '') {
+        dialog.showErrorBox('没有可回滚的版本', '至少成功构建过两个版本后，才会保留上一版本。')
+        return target
+      }
+      routeSessionLine(session, `已回滚 Harness 运行时：current → ${previous}。正在重启后端…`)
+      await session.connection.resetService()
+      target.pendingOpen = true
+      session.autoReconnectAttempts = 0
+      connectSession(session)
+    } catch (error) {
+      routeSessionLine(session, `✗ 回滚 Harness 失败：${String(error.message || error)}`)
+      dialog.showErrorBox('回滚失败', String(error.message || error))
+    }
+    return target
+  },
+
   async checkUpdates(workspace) {
     if (!canStartBusyTask()) return withWorkspace(workspace)
     const target = actions.openUpdates(workspace)
@@ -1271,7 +1300,7 @@ async function runSmoke() {
   })
 
   await check('action surface complete', () => {
-    for (const name of ['newWindow', 'openMain', 'openSettings', 'openUpdates', 'checkUpdates', 'updateAll', 'updateAndRestart', 'resetBackend', 'quit']) {
+    for (const name of ['newWindow', 'openMain', 'openSettings', 'openUpdates', 'checkUpdates', 'updateAll', 'updateAndRestart', 'resetBackend', 'rollbackHarness', 'quit']) {
       if (typeof actions[name] !== 'function') throw new Error(`actions.${name} missing`)
     }
   })
