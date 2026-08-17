@@ -24,6 +24,7 @@ const {
 } = require('./components')
 const { runCommand } = require('./runner')
 const { remotePath, remoteToolchainPrefix, shellQuote } = require('./ssh')
+const runtimeStore = require('./runtime-store')
 
 const LONG_TIMEOUT_MS = 45 * 60 * 1000
 const PLUGIN_TIMEOUT_MS = 10 * 60 * 1000
@@ -731,6 +732,27 @@ class UpdateManager {
     await this.connection.restartService()
   }
 
+  /**
+   * Serialize install/mirror work for one user component across shell
+   * instances. Harness pipelines already take their own build lock.
+   */
+  async withComponentLock(def, task) {
+    const settings = this.getSettings()
+    const name = `update-${def.id}`
+    if (settings.mode === 'ssh') {
+      return runtimeStore.withRemoteLock(
+        settings,
+        (host, inner, options) => this.connection.remoteRun(host, inner, options),
+        name,
+        task,
+        { timeoutMs: PLUGIN_TIMEOUT_MS + 5 * 60_000 },
+      )
+    }
+    return runtimeStore.withLocalLock(settings, name, task, {
+      timeoutMs: PLUGIN_TIMEOUT_MS + 5 * 60_000,
+    })
+  }
+
   /** Update one component; npm/preset updates end with a service restart. */
   async updateOne(id) {
     if (this.busy) throw new Error('已有更新任务执行中')
@@ -744,9 +766,11 @@ class UpdateManager {
         await this.updateHarness()
         return { ok: true, restarted: true }
       }
-      if (def.kind === 'npm') await this.updateNpmComponent(def)
-      else if (def.kind === 'git-preset') await this.updatePresetComponent(def)
-      else throw new Error(`未知组件类型：${def.kind}`)
+      await this.withComponentLock(def, async () => {
+        if (def.kind === 'npm') await this.updateNpmComponent(def)
+        else if (def.kind === 'git-preset') await this.updatePresetComponent(def)
+        else throw new Error(`未知组件类型：${def.kind}`)
+      })
       await this.restartService()
       return { ok: true, restarted: true }
     } finally {
@@ -778,9 +802,11 @@ class UpdateManager {
             restarted = true
             continue
           }
-          if (target.kind === 'npm') await this.updateNpmComponent(target)
-          else if (target.kind === 'git-preset') await this.updatePresetComponent(target)
-          else continue
+          await this.withComponentLock(target, async () => {
+            if (target.kind === 'npm') await this.updateNpmComponent(target)
+            else if (target.kind === 'git-preset') await this.updatePresetComponent(target)
+            else throw new Error(`未知组件类型：${target.kind}`)
+          })
           changed.push(target.id)
         } catch (error) {
           this.patchRow(target.id, { status: 'error', summary: '更新失败', error: error.message })
