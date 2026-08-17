@@ -327,12 +327,18 @@ class UpdateManager {
     }
     const current = `${facts.branch}${facts.dirty ? '（工作区有改动）' : ''}`
     const latest = facts.behind > 0 ? facts.upstream : current
+    const settings = this.getSettings()
+    const activeVersion = await this.connection.serviceVersion(settings)
+    const sourceVersion = await this.connection.currentVersion(settings)
+    const rolledBack = activeVersion !== '' && sourceVersion !== '' && activeVersion !== sourceVersion
     this.patchRow('harness', {
       status: 'ready',
-      current,
+      current: rolledBack ? `${current} · 运行 ${activeVersion.slice(0, 8)}` : current,
       latest,
-      updateAvailable: facts.behind > 0,
-      summary: facts.summary,
+      updateAvailable: facts.behind > 0 || rolledBack,
+      summary: rolledBack
+        ? `当前运行已回滚版本 ${activeVersion.slice(0, 8)}，源仓库为 ${sourceVersion.slice(0, 8)}`
+        : facts.summary,
       error: '',
     })
   }
@@ -623,15 +629,17 @@ class UpdateManager {
     await this.ensureBetterSidebarWorkspace(def)
     const registryEnv = `export npm_config_registry=${shellQuote(registryUrl)};`
     if (settings.mode === 'ssh') {
+      const serviceDir = await this.connection.remoteServiceDir(settings)
       const result = await this.connection.remoteRun(
         settings.ssh.host,
-        `${REMOTE_PREFIX} ${registryEnv} export DSH_HOME="$HOME"/.dsh; cd ${remotePath(settings.ssh.remoteRepoDir)} && node apps/cli/lib/bin.js plugin --profile ${def.profile} add ${shellQuote(spec)}`,
+        `${REMOTE_PREFIX} ${registryEnv} export DSH_HOME="$HOME"/.dsh; cd ${serviceDir} && node apps/cli/lib/bin.js plugin --profile ${def.profile} add ${shellQuote(spec)}`,
         { timeoutMs: PLUGIN_TIMEOUT_MS, onLine: line => this.log(line) },
       )
       if (result.code !== 0) throw new Error(`插件更新失败（退出码 ${result.code}）：${result.lines.slice(-6).join('\n')}`)
     } else {
       const tools = this.connection.resolvedTools({ refresh: true })
-      const binPath = path.join(settings.local.repoDir, 'apps/cli/lib/bin.js')
+      const runtimeDir = runtimeStore.localActiveRuntimeDir(settings) ?? settings.local.repoDir
+      const binPath = path.join(runtimeDir, 'apps/cli/lib/bin.js')
       // `dsh plugin` resolves pnpm from PATH, while the shell's clean env
       // intentionally excludes login-shell dirs; prepend the resolved pnpm's
       // own directory so the official CLI invocation finds the same pnpm.
@@ -717,13 +725,20 @@ class UpdateManager {
   }
 
   async updateHarness() {
-    this.patchRow('harness', { status: 'updating', summary: 'git pull → pnpm install → build → 重启服务', error: '' })
+    this.patchRow('harness', {
+      status: 'updating',
+      summary: 'git pull → staging build → 原子切换 current → 重启服务',
+      error: '',
+    })
     const outcome = await this.harnessUpdater.runPipeline({ includePull: true })
     if (!outcome.ok) {
-      this.patchRow('harness', { status: 'error', summary: '更新失败', error: outcome.error?.message ?? '更新失败' })
-      throw outcome.error ?? new Error('harness 更新失败')
+      const summary = outcome.rolledBack === true
+        ? `新版本启动失败，已回滚到 ${outcome.rollbackVersion}`
+        : '更新失败'
+      this.patchRow('harness', { status: 'error', summary, error: outcome.error?.message ?? summary })
+      throw outcome.error ?? new Error(summary)
     }
-    this.patchRow('harness', { status: 'ready', summary: '已更新并重启', updateAvailable: false })
+    this.patchRow('harness', { status: 'ready', summary: '已更新、原子切换并重启', updateAvailable: false })
     return true
   }
 
