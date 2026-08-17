@@ -239,6 +239,9 @@ async function withRemoteLock(settings, remoteRun, name, task, { timeoutMs = LOC
       { timeoutMs: 20_000 },
     )
     const lines = attempt.lines.map(line => line.trim()).filter(Boolean)
+    if (attempt.code !== 0) {
+      throw new Error(`无法获取远端锁：${lines.slice(-5).join('\n') || `ssh 退出码 ${attempt.code}`}`)
+    }
     if (lines.includes('acquired')) {
       try {
         return await task()
