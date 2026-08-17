@@ -429,7 +429,7 @@ class ConnectionManager extends EventEmitter {
       await waitReady(this.url())
       return
     }
-    const version = this.localVersion ?? await this.serviceVersion(settings)
+    const version = await this.serviceVersion(settings)
     this.localVersion = version
     if (this.localChild !== null) {
       this.log('重启本地服务…')
