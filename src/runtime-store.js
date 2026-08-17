@@ -27,6 +27,12 @@ const REMOTE_PID_FILE = '"$HOME"/.dsh/desktop-web.pid'
 const REMOTE_LOG_FILE = '"$HOME"/.dsh/desktop-web.log'
 const REMOTE_PORT_FILE = '"$HOME"/.dsh/desktop-web.port'
 
+const RUNTIME_DIR = 'runtime'
+const RUNTIME_MANIFEST = 'runtime.json'
+const RUNTIME_ROOT_MANIFEST = 'manifest.json'
+const CURRENT_LINK = 'current'
+const MAX_RUNTIME_VERSIONS = 3
+
 const LOCK_RETRY_MS = 250
 const LOCK_TIMEOUT_MS = 5 * 60 * 1000
 // Must exceed the 45-minute build timeout; a second instance can only reap a
@@ -141,6 +147,228 @@ async function removeRemoteState(settings, remoteRun) {
     'rm -f "$HOME"/.dsh/desktop-web.pid "$HOME"/.dsh/desktop-web.state.json "$HOME"/.dsh/desktop-web.port 2>/dev/null || true',
     { timeoutMs: 15_000 },
   )
+}
+
+// ── versioned runtime directories ──────────────────────────────────────────
+//
+// A successful build is materialized under `<dshHome>/runtime/<version>` (or
+// `~/.dsh/runtime/<version>` on the remote). `current` is a symlink switched
+// only after the staged build finished, so a failed build never affects the
+// running service. The previous version is retained for automatic/manual
+// rollback and older versions are pruned.
+
+function versionToken(version) {
+  return String(version).replace(/[^a-zA-Z0-9._-]/g, '').slice(0, 96) || 'unknown'
+}
+
+function localRuntimeRoot(settings) {
+  return path.join(expandHome(settings.local.dshHome), RUNTIME_DIR)
+}
+
+function localVersionDir(settings, version) {
+  return path.join(localRuntimeRoot(settings), versionToken(version))
+}
+
+function localCurrentLink(settings) {
+  return path.join(localRuntimeRoot(settings), CURRENT_LINK)
+}
+
+function localStagingDir(settings, version) {
+  return path.join(localRuntimeRoot(settings), `.staging-${process.pid}-${versionToken(version)}`)
+}
+
+function readLocalRootManifest(settings) {
+  try {
+    const manifest = JSON.parse(fs.readFileSync(path.join(localRuntimeRoot(settings), RUNTIME_ROOT_MANIFEST), 'utf8'))
+    if (typeof manifest.current !== 'string') return { current: null, previous: null }
+    return {
+      current: typeof manifest.current === 'string' ? manifest.current : null,
+      previous: typeof manifest.previous === 'string' ? manifest.previous : null,
+    }
+  } catch {
+    return { current: null, previous: null }
+  }
+}
+
+function writeLocalRootManifest(settings, manifest) {
+  try {
+    const root = localRuntimeRoot(settings)
+    fs.mkdirSync(root, { recursive: true })
+    const tmp = path.join(root, `.${RUNTIME_ROOT_MANIFEST}.tmp`)
+    fs.writeFileSync(tmp, `${JSON.stringify(manifest, null, 2)}\n`)
+    fs.renameSync(tmp, path.join(root, RUNTIME_ROOT_MANIFEST))
+  } catch {
+    // Best-effort metadata; the current symlink remains authoritative.
+  }
+}
+
+function writeLocalRuntimeManifest(settings, version, meta = {}) {
+  const dir = localVersionDir(settings, version)
+  try {
+    fs.writeFileSync(path.join(dir, RUNTIME_MANIFEST), `${JSON.stringify({
+      version: versionToken(version),
+      sourceVersion: versionToken(version),
+      createdAt: new Date().toISOString(),
+      ...meta,
+    }, null, 2)}\n`)
+  } catch {
+    // Missing metadata only disables this directory's rollback identity.
+  }
+}
+
+/** Atomically point `current` at a finished local runtime directory. */
+function activateLocalRuntime(settings, version) {
+  const root = localRuntimeRoot(settings)
+  const versionDir = localVersionDir(settings, version)
+  if (!fs.existsSync(path.join(versionDir, 'apps/cli/lib/bin.js'))) {
+    throw new Error(`运行时目录未构建完成：${versionDir}`)
+  }
+  const previous = readLocalRootManifest(settings)
+  const token = versionToken(version)
+  const current = path.join(root, CURRENT_LINK)
+  const tmp = path.join(root, `.${CURRENT_LINK}.tmp`)
+  try {
+    fs.rmSync(tmp, { recursive: true, force: true })
+    fs.symlinkSync(token, tmp, 'dir')
+    fs.renameSync(tmp, current)
+  } catch (error) {
+    throw new Error(`切换本地运行时 current 失败：${error.message}`)
+  }
+  writeLocalRootManifest(settings, { current: token, previous: previous.current })
+  writeLocalRuntimeManifest(settings, version)
+  pruneLocalRuntimeVersions(settings, token, previous.current)
+  return token
+}
+
+function localActiveRuntimeDir(settings) {
+  const manifest = readLocalRootManifest(settings)
+  if (manifest.current === null) return null
+  const dir = localVersionDir(settings, manifest.current)
+  try {
+    if (fs.existsSync(path.join(dir, 'apps/cli/lib/bin.js'))) return dir
+  } catch {
+    return null
+  }
+  return null
+}
+
+function localRuntimeVersions(settings) {
+  const root = localRuntimeRoot(settings)
+  try {
+    return fs.readdirSync(root, { withFileTypes: true })
+      .filter(entry => entry.isDirectory() && !entry.name.startsWith('.'))
+      .map(entry => entry.name)
+      .sort()
+  } catch {
+    return []
+  }
+}
+
+function pruneLocalRuntimeVersions(settings, current, previous) {
+  const keep = new Set([current, previous].filter(value => value !== null && value !== ''))
+  const versions = localRuntimeVersions(settings)
+  for (const version of versions) {
+    if (keep.has(version)) continue
+    try {
+      fs.rmSync(path.join(localRuntimeRoot(settings), version), { recursive: true, force: true })
+    } catch {
+      // Best-effort GC.
+    }
+  }
+  if (versions.length <= MAX_RUNTIME_VERSIONS) return
+  for (const version of versions.slice(0, versions.length - MAX_RUNTIME_VERSIONS)) {
+    if (keep.has(version)) continue
+    try {
+      fs.rmSync(path.join(localRuntimeRoot(settings), version), { recursive: true, force: true })
+    } catch {
+      // Best-effort GC.
+    }
+  }
+}
+
+/** Point `current` back to the previous finished version. */
+function rollbackLocalRuntime(settings) {
+  const manifest = readLocalRootManifest(settings)
+  if (manifest.previous === null || manifest.previous === '') return null
+  const dir = localVersionDir(settings, manifest.previous)
+  if (!fs.existsSync(path.join(dir, 'apps/cli/lib/bin.js'))) return null
+  activateLocalRuntime(settings, manifest.previous)
+  return manifest.previous
+}
+
+// Remote runtime layout. Paths are intentionally POSIX strings for the remote
+// login shell; they must never be passed through local path.join.
+
+function remoteRuntimeRoot() {
+  return '"$HOME"/.dsh/runtime'
+}
+
+function remoteVersionDir(version) {
+  return `${remoteRuntimeRoot()}/${versionToken(version)}`
+}
+
+function remoteCurrentDir() {
+  return `${remoteRuntimeRoot()}/${CURRENT_LINK}`
+}
+
+function remoteStagingDir(version) {
+  return `${remoteRuntimeRoot()}/.staging-${process.pid}-${versionToken(version)}`
+}
+
+async function readRemoteRootManifest(settings, remoteRun) {
+  const result = await remoteRun(
+    settings.ssh.host,
+    `cat ${remoteRuntimeRoot()}/${RUNTIME_ROOT_MANIFEST} 2>/dev/null || echo __none__`,
+    { timeoutMs: 15_000 },
+  )
+  const text = result.lines.join('\n').trim()
+  if (result.code !== 0 || text === '' || text === '__none__') return { current: null, previous: null }
+  try {
+    const manifest = JSON.parse(text)
+    return {
+      current: typeof manifest.current === 'string' ? manifest.current : null,
+      previous: typeof manifest.previous === 'string' ? manifest.previous : null,
+    }
+  } catch {
+    return { current: null, previous: null }
+  }
+}
+
+async function activateRemoteRuntime(settings, remoteRun, version) {
+  const root = remoteRuntimeRoot()
+  const versionDir = remoteVersionDir(version)
+  const check = await remoteRun(
+    settings.ssh.host,
+    `test -f ${versionDir}/apps/cli/lib/bin.js && echo ok || echo missing`,
+    { timeoutMs: 20_000 },
+  )
+  if (!check.lines.includes('ok')) throw new Error(`远端运行时目录未构建完成：${versionDir}`)
+  const previous = await readRemoteRootManifest(settings, remoteRun)
+  const token = versionToken(version)
+  const activate = await remoteRun(
+    settings.ssh.host,
+    `cd ${root} && ln -sfn ${token} ${CURRENT_LINK} && printf '{"current":"%s","previous":"%s"}' "${token}" "${previous.current ?? ''}" > ${RUNTIME_ROOT_MANIFEST}`,
+    { timeoutMs: 20_000 },
+  )
+  if (activate.code !== 0) throw new Error(`切换远端运行时 current 失败：${activate.lines.join('\n')}`)
+  return token
+}
+
+async function remoteActiveRuntimeDir(settings, remoteRun) {
+  const result = await remoteRun(
+    settings.ssh.host,
+    `if [ -f ${remoteCurrentDir()}/apps/cli/lib/bin.js ]; then echo ${remoteCurrentDir()}; else echo __none__; fi`,
+    { timeoutMs: 20_000 },
+  )
+  const found = result.lines.map(line => line.trim()).find(Boolean)
+  return found === '__none__' || found === undefined ? null : found
+}
+
+async function rollbackRemoteRuntime(settings, remoteRun) {
+  const manifest = await readRemoteRootManifest(settings, remoteRun)
+  if (manifest.previous === null || manifest.previous === '') return null
+  await activateRemoteRuntime(settings, remoteRun, manifest.previous)
+  return manifest.previous
 }
 
 // ── advisory locks ──────────────────────────────────────────────────────────
@@ -272,18 +500,36 @@ async function withRemoteLock(settings, remoteRun, name, task, { timeoutMs = LOC
 
 module.exports = {
   LOCAL_STATE_FILE,
+  MAX_RUNTIME_VERSIONS,
   REMOTE_LOG_FILE,
   REMOTE_PID_FILE,
   REMOTE_PORT_FILE,
   REMOTE_STATE_FILE,
+  RUNTIME_MANIFEST,
+  RUNTIME_ROOT_MANIFEST,
+  activateLocalRuntime,
+  activateRemoteRuntime,
   expandHome,
   isValidState,
+  localActiveRuntimeDir,
   localStatePath,
+  localStagingDir,
+  localVersionDir,
   parseDshWebUrl,
+  pruneLocalRuntimeVersions,
   readLocalState,
+  readLocalRootManifest,
+  readRemoteRootManifest,
   readRemoteState,
+  remoteActiveRuntimeDir,
+  remoteStagingDir,
+  remoteVersionDir,
   removeLocalState,
   removeRemoteState,
+  rollbackLocalRuntime,
+  rollbackRemoteRuntime,
+  versionToken,
+  writeLocalRuntimeManifest,
   writeLocalState,
   writeRemoteState,
   withLocalLock,

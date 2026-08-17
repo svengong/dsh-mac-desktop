@@ -208,6 +208,27 @@ class ConnectionManager extends EventEmitter {
     return versionToken(line || 'unknown')
   }
 
+  /**
+   * Version of the runtime that is currently active (the `current` symlink),
+   * or the source checkout version when no versioned runtime exists yet.
+   * State reuse and service restarts must use this, not the source HEAD,
+   * otherwise a rolled-back service would be recorded as the newest build.
+   */
+  async serviceVersion(settings) {
+    if (settings.mode === 'local') {
+      const manifest = runtimeStore.readLocalRootManifest(settings)
+      if (manifest.current !== null && runtimeStore.localActiveRuntimeDir(settings) !== null) {
+        return manifest.current
+      }
+      return this.currentVersion(settings)
+    }
+    const remoteRun = (host, inner, options) => this.remoteRun(host, inner, options)
+    const manifest = await runtimeStore.readRemoteRootManifest(settings, remoteRun)
+    const active = await runtimeStore.remoteActiveRuntimeDir(settings, remoteRun)
+    if (manifest.current !== null && active !== null) return manifest.current
+    return this.currentVersion(settings)
+  }
+
   localStatePath(settings) {
     return runtimeStore.localStatePath(settings)
   }
@@ -265,14 +286,20 @@ class ConnectionManager extends EventEmitter {
   async isBuilt() {
     const settings = this.getSettings()
     if (settings.mode === 'local') {
-      try {
-        fs.accessSync(path.join(settings.local.repoDir, 'apps/cli/lib/bin.js'), fs.constants.R_OK)
-        return true
-      } catch {
-        return false
+      const runtimeDir = runtimeStore.localActiveRuntimeDir(settings)
+      for (const dir of [runtimeDir, settings.local.repoDir]) {
+        if (dir === null || dir === '') continue
+        try {
+          fs.accessSync(path.join(dir, 'apps/cli/lib/bin.js'), fs.constants.R_OK)
+          return true
+        } catch {
+          // Fall through to the next candidate.
+        }
       }
+      return false
     }
-    const bin = `${remotePath(settings.ssh.remoteRepoDir)}/apps/cli/lib/bin.js`
+    const dir = await this.remoteServiceDir(settings)
+    const bin = `${dir}/apps/cli/lib/bin.js`
     const result = await this.remoteRun(settings.ssh.host, `test -f ${bin} && echo yes || echo no`)
     // A non-zero exit here is a connectivity/ssh failure, not a "not built"
     // verdict: let the caller surface it as a connection problem.
@@ -402,12 +429,14 @@ class ConnectionManager extends EventEmitter {
       await waitReady(this.url())
       return
     }
+    const version = this.localVersion ?? await this.serviceVersion(settings)
+    this.localVersion = version
     if (this.localChild !== null) {
       this.log('重启本地服务…')
       this.killChild(this.localChild)
       this.localChild = null
       this.localPort = null
-      await this.spawnLocalService(settings, 0)
+      await this.spawnLocalService(settings, 0, version)
       await waitReady(this.url())
       this.localRetries = 0
       return
@@ -418,7 +447,7 @@ class ConnectionManager extends EventEmitter {
       return
     }
     this.localPort = null
-    await this.spawnLocalService(settings, 0)
+    await this.spawnLocalService(settings, 0, version)
     await waitReady(this.url())
   }
 
@@ -430,7 +459,7 @@ class ConnectionManager extends EventEmitter {
       throw new Error('未找到兼容的 node（需 22.19+ 或 24+）。请安装 Node.js，或在「设置 → 高级」中手动指定 node 路径。')
     }
     await this.ensureLocalRepo(settings)
-    const version = await this.currentVersion(settings)
+    const version = await this.serviceVersion(settings)
     const state = this.readLocalState(settings)
 
     // Reuse a previously owned service when it still matches this build: same
@@ -544,7 +573,10 @@ class ConnectionManager extends EventEmitter {
     // that line arrives so url() never returns port 0.
     this.localVersion = serveVersion
     this.localPort = port === 0 ? null : port
-    const binPath = path.join(settings.local.repoDir, 'apps/cli/lib/bin.js')
+    // Serve from the atomically-activated runtime when one exists; otherwise
+    // fall back to the source checkout (first run / dirty-worktree builds).
+    const runtimeDir = runtimeStore.localActiveRuntimeDir(settings) ?? settings.local.repoDir
+    const binPath = path.join(runtimeDir, 'apps/cli/lib/bin.js')
     try {
       fs.accessSync(binPath, fs.constants.R_OK)
     } catch {
@@ -552,7 +584,7 @@ class ConnectionManager extends EventEmitter {
         `仓库尚未构建（缺少 ${binPath}）。请在顶部菜单「更新 → 更新并重启」完成首次构建。`,
       )
     }
-    this.log(`启动 dsh web（${port === 0 ? '由系统分配端口' : `端口 ${port}`}，数据目录 ${settings.local.dshHome}）…`)
+    this.log(`启动 dsh web（${port === 0 ? '由系统分配端口' : `端口 ${port}`}，数据目录 ${settings.local.dshHome}，运行时 ${runtimeDir}）…`)
     this.prepareLocalHome(settings)
 
     let resolvePort
@@ -568,7 +600,7 @@ class ConnectionManager extends EventEmitter {
     const service = spawnService({
       cmd: tools.node,
       args: [binPath, 'web', '--port', String(port)],
-      cwd: settings.local.repoDir,
+      cwd: runtimeDir,
       env: { ...tools.env, DSH_HOME: expandHome(settings.local.dshHome) },
       onLine: line => {
         this.log(`[web] ${line}`)
@@ -637,7 +669,7 @@ class ConnectionManager extends EventEmitter {
       )
     }
     await this.ensureRemoteRepo(settings)
-    const version = await this.currentVersion(settings)
+    const version = await this.serviceVersion(settings)
     const state = await this.readRemoteState(settings)
 
     // Reuse a previously started remote service when its build still matches.
@@ -805,8 +837,16 @@ class ConnectionManager extends EventEmitter {
     throw new Error('隧道建立超时。请检查 SSH 配置后「重新连接」。')
   }
 
+  async remoteServiceDir(settings) {
+    const active = await runtimeStore.remoteActiveRuntimeDir(
+      settings,
+      (host, inner, options) => this.remoteRun(host, inner, options),
+    )
+    return active ?? remotePath(settings.ssh.remoteRepoDir)
+  }
+
   async startRemoteService(settings, remotePort, version) {
-    const dir = remotePath(settings.ssh.remoteRepoDir)
+    const dir = await this.remoteServiceDir(settings)
     const bin = `${dir}/apps/cli/lib/bin.js`
     const check = await this.remoteRun(
       settings.ssh.host,
@@ -827,7 +867,7 @@ class ConnectionManager extends EventEmitter {
    * ~/.dsh/desktop-web.state.json so a later shell can adopt or upgrade it.
    */
   async launchRemoteService(settings, remotePort = 0, version = 'unknown') {
-    const dir = remotePath(settings.ssh.remoteRepoDir)
+    const dir = await this.remoteServiceDir(settings)
     const bin = `${dir}/apps/cli/lib/bin.js`
     const logFile = runtimeStore.REMOTE_LOG_FILE
     const pidFile = runtimeStore.REMOTE_PID_FILE
@@ -875,7 +915,7 @@ class ConnectionManager extends EventEmitter {
       { timeoutMs: 15_000 },
     )
     await sleep(1500)
-    const version = await this.currentVersion(settings)
+    const version = await this.serviceVersion(settings)
     return this.launchRemoteService(settings, 0, version)
   }
 }

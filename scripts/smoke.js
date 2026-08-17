@@ -364,6 +364,41 @@ async function main() {
     await new Promise(resolve => setTimeout(resolve, 10))
   })
   assert.strictEqual(locked, 1)
+  // Versioned runtime switch: activate v1, then build v2, then roll back.
+  const v1 = runtimeStore.localVersionDir(runtimeSettings, 'v1')
+  fs.mkdirSync(path.join(v1, 'apps/cli/lib'), { recursive: true })
+  fs.writeFileSync(path.join(v1, 'apps/cli/lib/bin.js'), 'v1')
+  runtimeStore.activateLocalRuntime(runtimeSettings, 'v1')
+  assert.strictEqual(runtimeStore.readLocalRootManifest(runtimeSettings).current, 'v1')
+  const v2 = runtimeStore.localVersionDir(runtimeSettings, 'v2')
+  fs.mkdirSync(path.join(v2, 'apps/cli/lib'), { recursive: true })
+  fs.writeFileSync(path.join(v2, 'apps/cli/lib/bin.js'), 'v2')
+  runtimeStore.activateLocalRuntime(runtimeSettings, 'v2')
+  assert.strictEqual(runtimeStore.readLocalRootManifest(runtimeSettings).previous, 'v1')
+  assert.strictEqual(runtimeStore.rollbackLocalRuntime(runtimeSettings), 'v1')
+  assert.strictEqual(runtimeStore.readLocalRootManifest(runtimeSettings).current, 'v1')
+  assert.ok((runtimeStore.localActiveRuntimeDir(runtimeSettings) ?? '').endsWith(path.join('runtime', 'v1')))
+  // Remote runtime activation/rollback protocol, mocked without ssh.
+  let remoteManifest = { current: null, previous: null }
+  const remoteRun = async (_host, command) => {
+    if (command.includes('/manifest.json')) {
+      return { code: 0, lines: remoteManifest.current === null ? ['__none__'] : [JSON.stringify(remoteManifest)] }
+    }
+    if (command.includes('test -f ')) return { code: 0, lines: ['ok'] }
+    const activate = /ln -sfn (\S+) current/.exec(command)
+    if (activate !== null) {
+      remoteManifest = { current: activate[1], previous: remoteManifest.current }
+      return { code: 0, lines: [] }
+    }
+    throw new Error(`unexpected remote runtime command: ${command}`)
+  }
+  const remoteSettings = { mode: 'ssh', ssh: { host: 'dev' } }
+  await runtimeStore.activateRemoteRuntime(remoteSettings, remoteRun, 'v1')
+  assert.strictEqual(remoteManifest.current, 'v1')
+  await runtimeStore.activateRemoteRuntime(remoteSettings, remoteRun, 'v2')
+  assert.strictEqual(remoteManifest.previous, 'v1')
+  assert.strictEqual(await runtimeStore.rollbackRemoteRuntime(remoteSettings, remoteRun), 'v1')
+  assert.strictEqual(remoteManifest.current, 'v1')
   runtimeStore.removeLocalState(runtimeSettings)
 
   // window manager: last-active device and bounds survive a reload.
