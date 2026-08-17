@@ -15,7 +15,7 @@ const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000
 
 function linePump(onLine) {
   let buffer = ''
-  return chunk => {
+  const pump = chunk => {
     buffer += chunk.toString('utf8')
     let index
     while ((index = buffer.indexOf('\n')) !== -1) {
@@ -24,6 +24,16 @@ function linePump(onLine) {
       if (onLine) onLine(line)
     }
   }
+  // Commands like `printf '{"pid":...}' > file` are followed by `cat file`
+  // with no trailing newline; flush the final partial line on stream end.
+  pump.flush = () => {
+    if (buffer !== '') {
+      const line = buffer.replace(/\r$/, '')
+      buffer = ''
+      if (onLine) onLine(line)
+    }
+  }
+  return pump
 }
 
 /**
@@ -68,6 +78,7 @@ function runCommand({ cmd, args = [], cwd, env, timeoutMs = DEFAULT_TIMEOUT_MS, 
       if (settled) return
       settled = true
       clearTimeout(timer)
+      pump.flush()
       resolve({ code, signal, timedOut, lines })
     })
   })
