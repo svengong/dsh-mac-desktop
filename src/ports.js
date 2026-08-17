@@ -1,23 +1,19 @@
 'use strict'
 
 /**
- * In-process TCP port allocation.
+ * In-process TCP port allocation for the few places that still need an
+ * explicit local port: SSH local forward ports.
  *
- * A TCP "is the port free?" probe followed by a later `bind`/`ssh -L` is
- * inherently racy: two workspaces can observe the same free port and then
- * collide on it. This module serializes the shell's own allocations:
+ * Local and remote web services now start with `--port 0` and report the
+ * OS-chosen port, so their probe→bind race is gone. An `ssh -L` forward does
+ * not report its allocated port, so we still bracket that allocation:
  *
- * - `findFreePort(start)` probes `127.0.0.1` and skips ports the shell has
- *   already reserved, so a local web service and an SSH forward can never
- *   pick the same fallback port inside one app instance.
- * - `reservePort` / `releasePort` bracket the probe-to-bind window. A caller
- *   MUST release the reservation after the child process stops or fails.
- * - Remote ports get the same treatment with a `ssh:<host>` key, because two
- *   sessions on the same remote host can race on the remote loopback port.
+ * - `findFreePort(start)` probes 127.0.0.1 and skips ports already reserved
+ *   by this shell;
+ * - `reservePort` / `releasePort` cover the probe-to-bind window.
  *
- * This does not (and cannot) reserve against other processes; the existing
- * connect-time probe and "configured port taken → next free port" policy still
- * cover that case.
+ * This does not (and cannot) reserve against other processes; the SSH forward
+ * path still falls back to the next free port when the preferred one is busy.
  */
 
 const net = require('node:net')
@@ -25,9 +21,7 @@ const net = require('node:net')
 const PORT_LIMIT = 65535
 const PORT_SCAN_SPAN = 30
 
-const localReservations = new Set()
-const remoteReservations = new Map()
-const remoteLocks = new Map()
+const reservations = new Set()
 
 function isValidPort(value) {
   const number = Number(value)
@@ -56,92 +50,34 @@ function tcpProbe(port, timeoutMs = 1500) {
 async function findFreePort(start) {
   const base = isValidPort(start) ? start : 1
   for (let port = base; port <= Math.min(base + PORT_SCAN_SPAN, PORT_LIMIT); port += 1) {
-    if (localReservations.has(port)) continue
+    if (reservations.has(port)) continue
     if (!(await tcpProbe(port))) return port
   }
-  throw new Error(`端口 ${base} 起连续 ${PORT_SCAN_SPAN + 1} 个端口都被占用，无法启动服务。`)
+  throw new Error(`端口 ${base} 起连续 ${PORT_SCAN_SPAN + 1} 个端口都被占用，无法建立转发。`)
 }
 
 function reservePort(port) {
   if (!isValidPort(port)) return false
-  if (localReservations.has(port)) return false
-  localReservations.add(port)
+  if (reservations.has(port)) return false
+  reservations.add(port)
   return true
 }
 
 function releasePort(port) {
   if (!isValidPort(port)) return false
-  return localReservations.delete(port)
+  return reservations.delete(port)
 }
 
-/** `findFreePort` for a remote host, skipping this process's own reservations. */
-async function findFreeRemotePort(probeFn, hostKey, start) {
-  const base = isValidPort(start) ? start : 1
-  let slots = remoteReservations.get(hostKey)
-  if (slots === undefined) {
-    slots = new Set()
-    remoteReservations.set(hostKey, slots)
-  }
-  for (let port = base; port <= Math.min(base + PORT_SCAN_SPAN, PORT_LIMIT); port += 1) {
-    if (slots.has(port)) continue
-    const probe = await probeFn(port)
-    if (probe !== undefined && !probe) return port
-    if (probe === undefined) return port
-  }
-  throw new Error(`远程端口 ${base} 起连续 ${PORT_SCAN_SPAN + 1} 个端口都被占用，无法启动服务。`)
-}
-
-function reserveRemotePort(hostKey, port) {
-  if (!isValidPort(port)) return false
-  let slots = remoteReservations.get(hostKey)
-  if (slots === undefined) {
-    slots = new Set()
-    remoteReservations.set(hostKey, slots)
-  }
-  if (slots.has(port)) return false
-  slots.add(port)
-  return true
-}
-
-function reservedRemotePorts(hostKey) {
-  return [...(remoteReservations.get(hostKey) ?? [])].sort((a, b) => a - b)
-}
-
-function releaseRemotePort(hostKey, port) {
-  const slots = remoteReservations.get(hostKey)
-  if (slots === undefined) return false
-  const changed = slots.delete(port)
-  if (slots.size === 0) remoteReservations.delete(hostKey)
-  return changed
-}
-
-/** Serialize asynchronous work for one key (e.g. `ssh:<host>`). */
-async function runExclusive(key, task) {
-  const previous = remoteLocks.get(key) ?? Promise.resolve()
-  const current = previous.catch(() => {}).then(task)
-  remoteLocks.set(key, current)
-  try {
-    return await current
-  } finally {
-    if (remoteLocks.get(key) === current) remoteLocks.delete(key)
-  }
-}
-
-function hasLocalReservation(port) {
-  return localReservations.has(port)
+function hasReservation(port) {
+  return reservations.has(port)
 }
 
 module.exports = {
   PORT_SCAN_SPAN,
   findFreePort,
-  findFreeRemotePort,
   isValidPort,
   releasePort,
-  releaseRemotePort,
   reservePort,
-  reserveRemotePort,
-  reservedRemotePorts,
-  runExclusive,
   tcpProbe,
-  hasLocalReservation,
+  hasReservation,
 }

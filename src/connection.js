@@ -24,9 +24,8 @@ const { EventEmitter } = require('node:events')
 const { runCommand, spawnService } = require('./runner')
 const { sshCommandArgs, tunnelArgs, shellQuote, remotePath, remoteToolchainPrefix, displayLabel } = require('./ssh')
 const { resolveTools } = require('./tools')
-const {
-  findFreePort, releasePort, releaseRemotePort, reservePort, reserveRemotePort, reservedRemotePorts, runExclusive, tcpProbe,
-} = require('./ports')
+const { findFreePort, releasePort, reservePort, tcpProbe } = require('./ports')
+const runtimeStore = require('./runtime-store')
 
 const PROBE_INTERVAL_MS = 750
 const READY_TIMEOUT_MS = 90 * 1000
@@ -119,8 +118,6 @@ class ConnectionManager extends EventEmitter {
     this.remotePort = null
     this.localVersion = null
     this.reservedLocalPort = null
-    this.reservedRemotePort = null
-    this.remoteHostKey = null
   }
 
   url() {
@@ -173,44 +170,8 @@ class ConnectionManager extends EventEmitter {
     }
   }
 
-  /** Find + reserve a free port on one remote host's loopback interface. */
-  async acquireRemotePort(settings, start) {
-    const hostKey = `ssh:${settings.ssh.host}`
-    // One remote probe covers the whole +30 range and is serialized per host,
-    // so two sessions targeting the same host can never both observe the same
-    // free port and race each other to it.
-    return runExclusive(hostKey, async () => {
-      this.releaseReservedRemotePort()
-      const reserved = reservedRemotePorts(hostKey)
-      const skip = reserved.length === 0
-        ? ''
-        : `case " ${reserved.join(' ')} " in *" $p "*) continue ;; esac;`
-      const script = `for p in $(seq ${start} $(( ${start} + 30 ))); do ${skip} if (exec 3<>/dev/tcp/127.0.0.1/$p) 2>/dev/null; then :; else echo $p; break; fi; done`
-      const result = await this.remoteRun(settings.ssh.host, script, { timeoutMs: 20_000 })
-      const found = result.lines.map(line => line.trim()).find(line => /^\d+$/.test(line))
-      if (!found) throw new Error(`远程端口 ${start} 起连续 31 个端口都被占用，无法启动服务。`)
-      const port = Number(found)
-      if (!reserveRemotePort(hostKey, port)) {
-        throw new Error(`远程端口 ${port} 刚被其他工作区预留，请重试连接。`)
-      }
-      this.reservedRemotePort = port
-      this.remoteHostKey = hostKey
-      if (port !== start) this.log(`远程端口 ${start} 已被占用，改用 ${port}。`)
-      return port
-    })
-  }
-
-  releaseReservedRemotePort() {
-    if (this.reservedRemotePort !== null && this.remoteHostKey !== null) {
-      releaseRemotePort(this.remoteHostKey, this.reservedRemotePort)
-    }
-    this.reservedRemotePort = null
-    this.remoteHostKey = null
-  }
-
   releaseReservedPorts() {
     this.releaseReservedLocalPort()
-    this.releaseReservedRemotePort()
   }
 
   /**
@@ -248,54 +209,23 @@ class ConnectionManager extends EventEmitter {
   }
 
   localStatePath(settings) {
-    return path.join(expandHome(settings.local.dshHome), 'desktop-web.state.json')
+    return runtimeStore.localStatePath(settings)
   }
 
   readLocalState(settings) {
-    try {
-      const state = JSON.parse(fs.readFileSync(this.localStatePath(settings), 'utf8'))
-      if (Number.isInteger(state.pid) && Number.isInteger(state.port) && typeof state.version === 'string') return state
-    } catch {
-      // A missing/corrupt state file just means "no previously owned service".
-    }
-    return null
+    return runtimeStore.readLocalState(settings)
   }
 
   writeLocalState(settings, state) {
-    try {
-      fs.writeFileSync(this.localStatePath(settings), JSON.stringify(state, null, 2))
-    } catch {
-      // State persistence is best-effort; a read-only home must not break serving.
-    }
+    runtimeStore.writeLocalState(settings, state)
   }
 
   async readRemoteState(settings) {
-    const stateFile = '"$HOME"/.dsh/desktop-web.state.json'
-    const result = await this.remoteRun(
-      settings.ssh.host,
-      `cat ${stateFile} 2>/dev/null || echo __none__`,
-      { timeoutMs: 15_000 },
-    )
-    if (result.code !== 0) return null
-    const text = result.lines.join('\n').trim()
-    if (text === '' || text === '__none__') return null
-    try {
-      const state = JSON.parse(text)
-      if (Number.isInteger(state.pid) && Number.isInteger(state.port) && typeof state.version === 'string') return state
-    } catch {
-      // A corrupt remote state file degrades to "no service".
-    }
-    return null
+    return runtimeStore.readRemoteState(settings, (host, inner, options) => this.remoteRun(host, inner, options))
   }
 
   async writeRemoteState(settings, state) {
-    const stateFile = '"$HOME"/.dsh/desktop-web.state.json'
-    // versionToken guarantees a JSON/shell-safe token; pid/port are integers.
-    await this.remoteRun(
-      settings.ssh.host,
-      `printf '{"pid":%s,"port":%s,"version":"%s"}' "${state.pid}" "${state.port}" "${versionToken(state.version)}" > ${stateFile}`,
-      { timeoutMs: 15_000 },
-    )
+    return runtimeStore.writeRemoteState(settings, (host, inner, options) => this.remoteRun(host, inner, options), state)
   }
 
   /** Run one remote command through the remote login shell. */
@@ -407,11 +337,7 @@ class ConnectionManager extends EventEmitter {
           { timeoutMs: 15_000 },
         )
       }
-      await this.remoteRun(
-        settings.ssh.host,
-        'rm -f "$HOME"/.dsh/desktop-web.pid "$HOME"/.dsh/desktop-web.state.json 2>/dev/null || true',
-        { timeoutMs: 15_000 },
-      )
+      await runtimeStore.removeRemoteState(settings, (host, inner, options) => this.remoteRun(host, inner, options))
     } else {
       const state = this.readLocalState(settings)
       if (state !== null && pidAlive(state.pid)) {
@@ -422,11 +348,7 @@ class ConnectionManager extends EventEmitter {
           // Already gone.
         }
       }
-      try {
-        fs.rmSync(this.localStatePath(settings), { force: true })
-      } catch {
-        // Best-effort; a read-only home must not block the reset.
-      }
+      runtimeStore.removeLocalState(settings)
     }
 
     this.localChild = null
@@ -473,12 +395,10 @@ class ConnectionManager extends EventEmitter {
   async restartService() {
     const settings = this.getSettings()
     if (settings.mode === 'ssh') {
-      // A first-run pipeline has no tunnel yet; bring one up so the readiness
-      // wait has something to probe through. connect() replaces it afterwards.
-      if (this.tunnelChild === null) {
-        await this.startTunnelOnFreePort(settings)
-      }
+      // Start the new remote service first (it reports the OS-chosen port),
+      // then rebuild the local forward to that exact port.
       await this.restartRemoteService(settings)
+      await this.startTunnelOnFreePort(settings, this.remotePort)
       await waitReady(this.url())
       return
     }
@@ -486,6 +406,8 @@ class ConnectionManager extends EventEmitter {
       this.log('重启本地服务…')
       this.killChild(this.localChild)
       this.localChild = null
+      this.localPort = null
+      await this.spawnLocalService(settings, 0)
       await waitReady(this.url())
       this.localRetries = 0
       return
@@ -495,7 +417,8 @@ class ConnectionManager extends EventEmitter {
       this.log('服务由外部进程托管，跳过重启')
       return
     }
-    await this.spawnLocalService(settings)
+    this.localPort = null
+    await this.spawnLocalService(settings, 0)
     await waitReady(this.url())
   }
 
@@ -535,20 +458,18 @@ class ConnectionManager extends EventEmitter {
       }
     }
 
-    const port = await this.acquireLocalPort(settings.local.port)
-    try {
-      await this.spawnLocalService(settings, port, version)
-    } catch (error) {
-      this.releaseReservedLocalPort()
-      throw error
-    }
+    // Start with `--port 0` and adopt the OS-chosen port reported by the CLI
+    // (`dsh web: http://127.0.0.1:<port>`). There is no probe→bind race and
+    // no +30 scan; the configured port is only a fallback for `url()` while
+    // the service is still starting.
+    await this.spawnLocalService(settings, 0, version)
     const ready = await waitReady(this.url())
     this.localRetries = 0
     this.setStatus({
       state: 'ready',
       url: this.url(),
       detail: ready.isDsh
-        ? (port !== settings.local.port ? `已连接（端口 ${port}）` : '已连接')
+        ? `已连接（端口 ${this.localPort}）`
         : '已连接，但该端口响应的可能不是 DeepSeek Harness',
       serviceOwner: 'self',
     })
@@ -570,18 +491,23 @@ class ConnectionManager extends EventEmitter {
     }
     if (tools.git === '') throw new Error('未找到 git，无法克隆仓库。请在「设置 → 高级」中指定 git 路径。')
     this.log(`克隆 ${settings.local.repoUrl} 到 ${settings.local.repoDir} …`)
-    const result = await runCommand({
-      cmd: tools.git,
-      // Bypass user-global hooks (pre-commit/lfs shims): they assume a full
-      // developer environment and can fail a clean-env clone, and the repo
-      // has no LFS content to materialize.
-      args: ['-c', 'core.hooksPath=/dev/null', 'clone', settings.local.repoUrl, settings.local.repoDir],
-      env: tools.env,
-      timeoutMs: 10 * 60_000,
-      onLine: line => this.log(`[git] ${line}`),
-    })
-    if (result.code !== 0) throw new Error(`本地 git clone 失败：${result.lines.join('\n')}`)
-    return { code: 0, lines: [] }
+    const lockName = `clone-${path.basename(settings.local.repoDir)}`
+    return runtimeStore.withLocalLock(settings, lockName, async () => {
+      // Another process may have won the clone race while we waited.
+      if (isGitRepo(settings.local.repoDir)) return { code: 0, lines: [] }
+      const result = await runCommand({
+        cmd: tools.git,
+        // Bypass user-global hooks (pre-commit/lfs shims): they assume a full
+        // developer environment and can fail a clean-env clone, and the repo
+        // has no LFS content to materialize.
+        args: ['-c', 'core.hooksPath=/dev/null', 'clone', settings.local.repoUrl, settings.local.repoDir],
+        env: tools.env,
+        timeoutMs: 10 * 60_000,
+        onLine: line => this.log(`[git] ${line}`),
+      })
+      if (result.code !== 0) throw new Error(`本地 git clone 失败：${result.lines.join('\n')}`)
+      return { code: 0, lines: [] }
+    }, { timeoutMs: 10 * 60_000 + 30_000 })
   }
 
   /**
@@ -610,12 +536,14 @@ class ConnectionManager extends EventEmitter {
     return home
   }
 
-  async spawnLocalService(settings, port, version) {
+  async spawnLocalService(settings, port = 0, version = null) {
     const tools = this.resolvedTools()
-    const servePort = port ?? this.localPort ?? settings.local.port
     const serveVersion = version ?? this.localVersion ?? 'unknown'
-    this.localPort = servePort
+    // `--port 0` lets the OS choose the port; the CLI prints the real URL on
+    // stdout as `dsh web: http://127.0.0.1:<port>`. Keep localPort null until
+    // that line arrives so url() never returns port 0.
     this.localVersion = serveVersion
+    this.localPort = port === 0 ? null : port
     const binPath = path.join(settings.local.repoDir, 'apps/cli/lib/bin.js')
     try {
       fs.accessSync(binPath, fs.constants.R_OK)
@@ -624,20 +552,36 @@ class ConnectionManager extends EventEmitter {
         `仓库尚未构建（缺少 ${binPath}）。请在顶部菜单「更新 → 更新并重启」完成首次构建。`,
       )
     }
-    this.log(`启动 dsh web（端口 ${servePort}，数据目录 ${settings.local.dshHome}）…`)
+    this.log(`启动 dsh web（${port === 0 ? '由系统分配端口' : `端口 ${port}`}，数据目录 ${settings.local.dshHome}）…`)
     this.prepareLocalHome(settings)
+
+    let resolvePort
+    let rejectPort
+    const portSeen = new Promise((resolve, reject) => {
+      resolvePort = resolve
+      rejectPort = reject
+    })
+    const portTimer = setTimeout(() => {
+      rejectPort(new Error('等待 dsh web 报告实际端口超时。请打开服务日志排查。'))
+    }, 30_000)
+
     const service = spawnService({
       cmd: tools.node,
-      args: [binPath, 'web', '--port', String(servePort)],
+      args: [binPath, 'web', '--port', String(port)],
       cwd: settings.local.repoDir,
       env: { ...tools.env, DSH_HOME: expandHome(settings.local.dshHome) },
-      onLine: line => this.log(`[web] ${line}`),
+      onLine: line => {
+        this.log(`[web] ${line}`)
+        const parsed = runtimeStore.parseDshWebUrl(line)
+        if (parsed !== null && parsed.port > 0) resolvePort(parsed.port)
+      },
     })
     this.localChild = service.child
-    this.writeLocalState(settings, { pid: service.child.pid, port: servePort, version: serveVersion })
-    service.child.on('close', (code, signal) => {
+
+    const closeWatcher = (code, signal) => {
       this.localChild = null
-      if (this.stopped) return
+      rejectPort(new Error(`本地服务启动失败（code=${code} signal=${signal ?? ''}）`))
+      if (this.stopped || service.child._dshStopRequested) return
       if (this.status.state !== 'connecting' && this.status.state !== 'ready') return
       const why = `本地服务退出（code=${code} signal=${signal ?? ''}）`
       this.log(why)
@@ -648,12 +592,28 @@ class ConnectionManager extends EventEmitter {
         setTimeout(() => {
           if (this.stopped) return
           if (this.status.state !== 'connecting' && this.status.state !== 'ready') return
-          this.spawnLocalService(settings).catch(() => {})
+          // Restart with a fresh OS-chosen port; a stale bound port can never
+          // force a crash-loop.
+          this.spawnLocalService(settings, 0, serveVersion).catch(() => {})
         }, delay)
       } else {
-        this.setStatus({ state: 'error', detail: `${why}。请打开服务日志排查，或检查端口是否被占用。` })
+        this.setStatus({ state: 'error', detail: `${why}。请打开服务日志排查。` })
       }
-    })
+    }
+    service.child.on('close', closeWatcher)
+
+    try {
+      const actualPort = await portSeen
+      clearTimeout(portTimer)
+      this.localPort = actualPort
+      this.writeLocalState(settings, { pid: service.child.pid, port: actualPort, version: serveVersion })
+      this.log(`dsh web 已监听端口 ${actualPort}。`)
+    } catch (error) {
+      clearTimeout(portTimer)
+      this.killChild(this.localChild)
+      this.localChild = null
+      throw error
+    }
   }
 
   // ── ssh mode ──────────────────────────────────────────────────────────────
@@ -700,18 +660,12 @@ class ConnectionManager extends EventEmitter {
       await sleep(800)
     }
 
-    // Pick a free port on the remote loopback, then tunnel to it.
-    const remotePort = await this.acquireRemotePort(settings, settings.ssh.remotePort)
+    // Start the remote service with `--port 0`; the CLI reports the real
+    // loopback port, which removes remote-port probing entirely.
+    const remotePort = await this.launchRemoteService(settings, 0, version)
     this.remotePort = remotePort
-    try {
-      await this.startTunnelOnFreePort(settings, remotePort)
-    } catch (error) {
-      this.releaseReservedRemotePort()
-      throw error
-    }
+    await this.startTunnelOnFreePort(settings, remotePort)
     const url = this.url()
-    const probe = await probeOnce(url)
-    if (!probe.up) await this.startRemoteService(settings, remotePort, version)
     const ready = await waitReady(url)
     this.setStatus({
       state: 'ready',
@@ -744,10 +698,25 @@ class ConnectionManager extends EventEmitter {
         )
       }
       this.log(`克隆 ${url} 到远程 ${settings.ssh.remoteRepoDir} …`)
-      const clone = await this.remoteRun(
-        target,
-        `mkdir -p ${dir} && git clone ${shellQuote(url)} ${dir}`,
-        { timeoutMs: 10 * 60_000, onLine: line => this.log(`[git] ${line}`) },
+      const clone = await runtimeStore.withRemoteLock(
+        settings,
+        (host, inner, options) => this.remoteRun(host, inner, options),
+        `clone-${settings.ssh.host}-${settings.ssh.remoteRepoDir}`,
+        async () => {
+          // Re-check inside the lock; another shell may have finished clone.
+          const inside = await this.remoteRun(
+            target,
+            `if [ -d ${dir}/.git ]; then echo repo-ready; else echo repo-missing; fi`,
+            { timeoutMs: 20_000 },
+          )
+          if (inside.lines.includes('repo-ready')) return { code: 0, lines: [] }
+          return this.remoteRun(
+            target,
+            `mkdir -p ${dir} && git -c core.hooksPath=/dev/null clone ${shellQuote(url)} ${dir}`,
+            { timeoutMs: 10 * 60_000, onLine: line => this.log(`[git] ${line}`) },
+          )
+        },
+        { timeoutMs: 10 * 60_000 + 30_000 },
       )
       if (clone.code !== 0) throw new Error(`远程 git clone 失败：${clone.lines.join('\n')}`)
     }
@@ -849,35 +818,55 @@ class ConnectionManager extends EventEmitter {
         `远程仓库尚未构建（${settings.ssh.remoteRepoDir}/apps/cli/lib/bin.js 不存在）。请在顶部菜单「更新 → 更新并重启」完成远程构建。`,
       )
     }
-    await this.launchRemoteService(settings, remotePort, version)
+    return this.launchRemoteService(settings, remotePort ?? 0, version)
   }
 
   /**
-   * Start the remote web service detached, recording its pid in
-   * ~/.dsh/desktop-web.pid and its version/port in ~/.dsh/desktop-web.state.json
-   * so a later shell can adopt or upgrade it.
+   * Start the remote web service detached with `--port 0`, wait for the CLI's
+   * `dsh web: http://127.0.0.1:<port>` line, and record pid/port/version in
+   * ~/.dsh/desktop-web.state.json so a later shell can adopt or upgrade it.
    */
-  async launchRemoteService(settings, remotePort, version) {
+  async launchRemoteService(settings, remotePort = 0, version = 'unknown') {
     const dir = remotePath(settings.ssh.remoteRepoDir)
     const bin = `${dir}/apps/cli/lib/bin.js`
-    const logFile = '"$HOME"/.dsh/desktop-web.log'
-    const pidFile = '"$HOME"/.dsh/desktop-web.pid'
-    const stateFile = '"$HOME"/.dsh/desktop-web.state.json'
-    const port = remotePort ?? this.remotePort ?? settings.ssh.remotePort
-    const token = versionToken(version)
-    this.log(`启动远程 dsh web（端口 ${port}）…`)
-    const result = await this.remoteRun(
+    const logFile = runtimeStore.REMOTE_LOG_FILE
+    const pidFile = runtimeStore.REMOTE_PID_FILE
+    const portFile = runtimeStore.REMOTE_PORT_FILE
+    this.log(remotePort === 0
+      ? '启动远程 dsh web（由系统分配端口）…'
+      : `启动远程 dsh web（端口 ${remotePort}）…`)
+
+    const start = await this.remoteRun(
       settings.ssh.host,
-      // mkdir runs in the foreground first (`;`), so the pid/state redirects
-      // below never race the directory creation.
-      `${remoteToolchainPrefix()} mkdir -p "$HOME"/.dsh; cd ${dir} && exec nohup node ${bin} web --port ${port} >> ${logFile} 2>&1 < /dev/null & pid=$!; echo "$pid" > ${pidFile}; printf '{"pid":%s,"port":%s,"version":"%s"}' "$pid" "${port}" "${token}" > ${stateFile}`,
+      `${remoteToolchainPrefix()} mkdir -p "$HOME"/.dsh; rm -f ${portFile}; cd ${dir} && nohup node ${bin} web --port ${remotePort} > ${portFile} 2>> ${logFile} < /dev/null & echo $! > ${pidFile}`,
       { timeoutMs: 20_000 },
     )
-    if (result.code !== 0) throw new Error(`远程服务启动失败：${result.lines.join('\n')}`)
+    if (start.code !== 0) throw new Error(`远程服务启动失败：${start.lines.join('\n')}`)
+
+    const wait = await this.remoteRun(
+      settings.ssh.host,
+      `pid=$(cat ${pidFile} 2>/dev/null || true); for i in $(seq 1 150); do line=$(tr -d '\\r' < ${portFile} 2>/dev/null | head -1); case "$line" in "dsh web: "*) echo "$line"; exit 0 ;; esac; if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then echo service-exited; tail -n 20 ${logFile} 2>/dev/null; exit 1; fi; sleep 0.2; done; echo port-timeout; exit 1`,
+      { timeoutMs: 60_000 },
+    )
+    const announced = wait.lines.map(line => runtimeStore.parseDshWebUrl(line)).find(Boolean)
+    if (announced === null || announced === undefined) {
+      throw new Error(`远程服务未报告监听端口：${wait.lines.slice(-6).join('\n')}`)
+    }
+    const pidResult = await this.remoteRun(
+      settings.ssh.host,
+      `cat ${pidFile} 2>/dev/null || echo 0`,
+      { timeoutMs: 15_000 },
+    )
+    const pid = Number((pidResult.lines[0] ?? '0').trim())
+    if (!Number.isInteger(pid) || pid <= 0) throw new Error('远程服务 pid 读取失败。')
+    this.remotePort = announced.port
+    await this.writeRemoteState(settings, { pid, port: announced.port, version })
+    this.log(`远程 dsh web 已监听端口 ${announced.port}。`)
+    return announced.port
   }
 
-  async restartRemoteService(settings, remotePort) {
-    const pidFile = '"$HOME"/.dsh/desktop-web.pid'
+  async restartRemoteService(settings) {
+    const pidFile = runtimeStore.REMOTE_PID_FILE
     this.log('停止远程服务…')
     await this.remoteRun(
       settings.ssh.host,
@@ -886,7 +875,7 @@ class ConnectionManager extends EventEmitter {
     )
     await sleep(1500)
     const version = await this.currentVersion(settings)
-    await this.launchRemoteService(settings, remotePort, version)
+    return this.launchRemoteService(settings, 0, version)
   }
 }
 
