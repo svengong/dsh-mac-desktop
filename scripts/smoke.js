@@ -22,6 +22,8 @@ const { parseTarget, shellQuote, remotePath, tunnelArgs, parseSshConfig, listSsh
 const { runCommand } = require('../src/runner')
 const { ConnectionManager } = require('../src/connection')
 const { findFreePort, releasePort, reservePort } = require('../src/ports')
+const runtimeStore = require('../src/runtime-store')
+const { WindowManager } = require('../src/window-manager')
 const { resolveTools, engineOk } = require('../src/tools')
 const { presentWindow } = require('../src/windows')
 
@@ -344,6 +346,53 @@ async function main() {
   assert.ok(diffCommand !== undefined, 'diff command missing')
   assert.ok(diffCommand.includes(`diff -qr "$HOME"/'OpenSoft/preset/preset' "$HOME"/'.dsh/.agent-presets/preset-id'`), diffCommand)
   assert.ok(diffCommand.includes(`'\"$HOME\"'`) === false, `double-wrapped diff target: ${diffCommand}`)
+
+  // runtime store: parse the CLI's OS-chosen port announcement and round-trip
+  // local state. Remote state/locks stay smoke-free here because they need ssh.
+  const announced = runtimeStore.parseDshWebUrl('dsh web: http://127.0.0.1:62513')
+  assert.deepStrictEqual(announced, { url: 'http://127.0.0.1:62513', port: 62513, host: '127.0.0.1' })
+  assert.strictEqual(runtimeStore.parseDshWebUrl('noise'), null)
+  const runtimeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-runtime-store-'))
+  const runtimeSettings = { mode: 'local', local: { repoDir: '', repoUrl: '', dshHome: runtimeHome, port: 3080 }, ssh: {} }
+  assert.strictEqual(runtimeStore.writeLocalState(runtimeSettings, { pid: 1, port: 2, version: 'abc' }), true)
+  assert.strictEqual(runtimeStore.readLocalState(runtimeSettings).port, 2)
+  let locked = 0
+  await runtimeStore.withLocalLock(runtimeSettings, 'smoke-lock', async () => {
+    locked += 1
+    await new Promise(resolve => setTimeout(resolve, 10))
+  })
+  assert.strictEqual(locked, 1)
+  runtimeStore.removeLocalState(runtimeSettings)
+
+  // window manager: last-active device and bounds survive a reload.
+  const windowStateFile = path.join(runtimeHome, 'window-state.json')
+  const wm = new WindowManager(windowStateFile)
+  const fakeWin = { isDestroyed: () => false, getBounds: () => ({ x: 12, y: 24, width: 1100, height: 720 }) }
+  wm.markActive({ id: 7, deviceKey: 'ssh:dev', window: fakeWin, activeView: 'updates' })
+  wm.save()
+  const restoredWm = new WindowManager(windowStateFile)
+  assert.strictEqual(restoredWm.lastActiveDeviceKey(), 'ssh:dev')
+  assert.strictEqual(restoredWm.lastActiveWorkspaceId, 7)
+  assert.strictEqual(restoredWm.boundsFor('ssh:dev').width, 1100)
+  const fakeWorkspace = { id: 7, deviceKey: 'ssh:dev', window: fakeWin, activeView: 'updates' }
+  assert.strictEqual(restoredWm.lastActiveWorkspace(new Map([[7, fakeWorkspace]])), fakeWorkspace)
+
+  // Local `--port 0`: the shell adopts the OS-chosen port from stdout.
+  const repoDir = path.resolve(__dirname, '..', 'deepseek-harness')
+  const portZeroHome = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-port-zero-'))
+  const portZeroSettings = { mode: 'local', local: { repoDir, repoUrl: '', dshHome: portZeroHome, port: 3080 }, ssh: {} }
+  const portZeroConnection = new ConnectionManager({ getSettings: () => portZeroSettings, onLog: () => {} })
+  const portZeroTools = resolveTools({
+    local: { repoDir, repoUrl: '' },
+    toolPaths: { node: '', git: '', pnpm: '', shell: '/bin/zsh' },
+  })
+  portZeroConnection.resolvedTools = () => portZeroTools
+  await portZeroConnection.spawnLocalService(portZeroSettings, 0, 'smoke-port-zero')
+  assert.ok(portZeroConnection.localPort > 0, 'expected an OS-chosen local port')
+  portZeroConnection.stopOwnedChildren()
+  await new Promise(resolve => setTimeout(resolve, 200))
+  fs.rmSync(portZeroHome, { recursive: true, force: true })
+  fs.rmSync(runtimeHome, { recursive: true, force: true })
 
   // port fallback + in-process reservations: a busy port yields the next free
   // one, and a reserved free port is skipped by the shell's own allocator so

@@ -40,6 +40,7 @@ const { SetupDialog, ProgressDialog, registerDialogIpc } = require('./dialogs')
 const { buildMenu } = require('./menu')
 const { createTray } = require('./tray')
 const { presentWindow } = require('./windows')
+const { WindowManager } = require('./window-manager')
 
 const BUILD_DIR = path.join(__dirname, '..', 'build')
 const SHELL_VERSION = '0.1.0'
@@ -78,6 +79,7 @@ app.setName('DeepSeek Harness')
 let settingsStore = null
 let settingsDocument = null
 let trayController = null
+let windowManager = null
 let quitting = false
 let sessionLogFile = ''
 let nextWorkspaceId = 1
@@ -299,13 +301,15 @@ function setWorkspaceView(workspace, view) {
     layoutWorkspaceViews(workspace)
   }
   sendWorkspaceState(workspace)
+  if (windowManager !== null) windowManager.touch(workspace)
   refreshTrayAndMenu()
 }
 
-function createBrowserWindow() {
+function createBrowserWindow(bounds = null) {
   const win = new BrowserWindow({
-    width: 1320,
-    height: 900,
+    width: bounds?.width ?? 1320,
+    height: bounds?.height ?? 900,
+    ...(bounds?.x !== undefined && bounds?.y !== undefined ? { x: bounds.x, y: bounds.y } : {}),
     minWidth: 900,
     minHeight: 600,
     title: 'DSH',
@@ -340,6 +344,10 @@ function activeWorkspace() {
       return workspace
     }
   }
+  if (windowManager !== null) {
+    const lastActive = windowManager.lastActiveWorkspace(workspaces)
+    if (lastActive !== null) return lastActive
+  }
   return workspaces.values().next().value ?? null
 }
 
@@ -368,6 +376,7 @@ function withWorkspace(workspace) {
 function loadAppUrl(workspace) {
   const session = workspace.session
   const url = session.connection.url()
+  workspace.loadedUrl = url
   workspace.harnessView.webContents.loadURL(url)
   workspace.window.setTitle(workspaceTitle(workspace))
   setWorkspaceView(workspace, 'harness')
@@ -396,7 +405,8 @@ function openWorkspaceWindow(workspace) {
 
 function createWorkspace(deviceKey = 'local') {
   const session = sessionFor(deviceKey)
-  const win = createBrowserWindow()
+  const bounds = windowManager === null ? null : windowManager.boundsFor(deviceKey)
+  const win = createBrowserWindow(bounds)
   const harnessView = new WebContentsView({
     webPreferences: {
       contextIsolation: true,
@@ -421,6 +431,7 @@ function createWorkspace(deviceKey = 'local') {
     pendingOpen: true,
     lastProgressAction: '',
     activeView: 'harness',
+    loadedUrl: '',
   }
   nextWorkspaceId += 1
   workspaces.set(workspace.id, workspace)
@@ -430,14 +441,25 @@ function createWorkspace(deviceKey = 'local') {
   win.once('ready-to-show', () => {
     layoutWorkspaceViews(workspace)
     sendWorkspaceState(workspace)
+    if (windowManager !== null) windowManager.touch(workspace)
     win.show()
     openWorkspaceWindow(workspace)
   })
-  win.on('resize', () => layoutWorkspaceViews(workspace))
-  win.on('focus', () => refreshTrayAndMenu())
+  win.on('resize', () => {
+    layoutWorkspaceViews(workspace)
+    if (windowManager !== null) windowManager.touch(workspace)
+  })
+  win.on('move', () => {
+    if (windowManager !== null) windowManager.touch(workspace)
+  })
+  win.on('focus', () => {
+    if (windowManager !== null) windowManager.markActive(workspace)
+    refreshTrayAndMenu()
+  })
   win.on('close', event => {
     if (!quitting) {
       event.preventDefault()
+      if (windowManager !== null) windowManager.touch(workspace)
       win.hide()
     }
   })
@@ -454,6 +476,7 @@ function createWorkspace(deviceKey = 'local') {
 
 function disposeWorkspace(workspace) {
   const session = workspace.session
+  if (windowManager !== null) windowManager.touch(workspace)
   session.windows.delete(workspace)
   workspace.setupDialog.close()
   workspace.progressDialog.close()
@@ -483,9 +506,11 @@ function attachWorkspace(workspace, deviceKey) {
   workspace.deviceKey = deviceKey
   workspace.session = session
   workspace.pendingOpen = true
+  workspace.loadedUrl = ''
   session.windows.add(workspace)
   // Never let a stale device's page flash while the new backend is connecting.
   workspace.harnessView.webContents.loadURL('about:blank')
+  if (windowManager !== null) windowManager.touch(workspace)
   if (workspace.window !== null && !workspace.window.isDestroyed()) {
     workspace.window.setTitle(workspaceTitle(workspace))
     sendWorkspaceState(workspace)
@@ -580,6 +605,11 @@ function onSessionStatus(session, status) {
     if (status.state === 'ready' && workspace.pendingOpen) {
       workspace.pendingOpen = false
       loadAppUrl(workspace)
+    } else if (status.state === 'ready' && workspace.loadedUrl !== '' && workspace.loadedUrl !== status.url) {
+      // A restarted service may report a new OS-chosen port. Reload in place
+      // without yanking focus from the window the user is actually using.
+      workspace.loadedUrl = status.url
+      workspace.harnessView.webContents.loadURL(status.url)
     }
   }
   if (status.state === 'ready') {
@@ -1298,6 +1328,7 @@ if (!gotLock) {
 
     settingsStore = new SettingsStore(path.join(app.getPath('userData'), 'settings.json'))
     settingsDocument = cleanDocument(settingsStore.load())
+    windowManager = new WindowManager(path.join(app.getPath('userData'), 'window-state.json'))
 
     const logsDir = path.join(app.getPath('userData'), 'logs')
     fs.mkdirSync(logsDir, { recursive: true })
@@ -1325,7 +1356,13 @@ if (!gotLock) {
 
     refreshTrayAndMenu()
 
-    const first = createWorkspace(settingsDocument.activeDeviceId)
+    // Restore the device the user last had in front, not just the device that
+    // happened to be persisted by the last settings save.
+    const lastDevice = windowManager.lastActiveDeviceKey()
+    const firstDevice = settingsDocument.devices[lastDevice] !== undefined
+      ? lastDevice
+      : settingsDocument.activeDeviceId
+    const first = createWorkspace(firstDevice)
     const firstView = settingsViewFor(first.deviceKey)
     const complete = firstView.mode === 'local'
       ? firstView.local.repoDir !== ''
@@ -1363,6 +1400,7 @@ if (!gotLock) {
       return
     }
     quitting = true
+    if (windowManager !== null) windowManager.save()
     for (const session of sessions.values()) session.connection.stop()
   })
 
