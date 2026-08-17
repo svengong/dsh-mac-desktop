@@ -96,7 +96,7 @@ BrowserWindow (shell.html 边框)
    `releaseReservedPorts()`。
 4. 本地 clone、远端 clone、build pipeline 都通过 `runtime-store.js` 的原子目录锁：
    - 本地锁 owner 为 `{pid, host, createdAt}`，owner 进程消失即 stale；
-   - 远端锁写 owner JSON，超过 30 分钟视为 stale，可被下一实例回收。
+   - 远端锁写 owner JSON，超过 2 小时视为 stale，可被下一实例回收。
 5. 旧版/残留自管服务通过 `<dshHome>/desktop-web.state.json`
    （远端 `~/.dsh/desktop-web.state.json`）按 `{pid, port, version}` 回收；版本一致且仍响应
    `__DSH_BOOT__` 标记时复用。

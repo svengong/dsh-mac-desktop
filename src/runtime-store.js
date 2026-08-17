@@ -29,7 +29,9 @@ const REMOTE_PORT_FILE = '"$HOME"/.dsh/desktop-web.port'
 
 const LOCK_RETRY_MS = 250
 const LOCK_TIMEOUT_MS = 5 * 60 * 1000
-const REMOTE_LOCK_STALE_MS = 30 * 60 * 1000
+// Must exceed the 45-minute build timeout; a second instance can only reap a
+// remote lock after the longest possible pipeline has safely timed out.
+const REMOTE_LOCK_STALE_MS = 2 * 60 * 60 * 1000
 
 function expandHome(dir) {
   if (dir === '~') return os.homedir()

@@ -15,7 +15,7 @@ Electron macOS 薄壳：主窗口顶部 46px 壳边框，下面是 harness WebCo
 | 开发态隔离 | `src/main.js#configureUserData` | 未打包时 userData=`~/.dsh-desktop`；`DSH_DESKTOP_USER_DATA` 可覆盖 |
 | 端口 0 | `src/runtime-store.js`、`src/connection.js` | 本地/远端 `dsh web --port 0`，解析 `dsh web: URL` 回读真实端口 |
 | 转发端口 | `src/ports.js` | 仅 SSH 本地转发使用优先端口 + 顺延 30 + 进程内预留 |
-| 安装/构建锁 | `src/runtime-store.js`、`src/update.js` | 本地 `mkdir` 锁；远端 owner+30min stale 锁；clone/build 串行 |
+| 安装/构建锁 | `src/runtime-store.js`、`src/update.js` | 本地 `mkdir` 锁；远端 owner+2h stale 锁；clone/build 串行 |
 | 窗口状态 | `src/window-manager.js`、`src/main.js` | `window-state.json` 保存 bounds/active-view/last-active，启动恢复 |
 | 多窗口加固 | `src/main.js` | 保存后重载同设备所有设置面板；全局 busy 阻止并发任务；重连定时器不复活已 stop session |
 | 退出防护 | `src/main.js#actions.quit`、`before-quit` | build/update 中禁止退出 |
@@ -88,7 +88,7 @@ for f in /tmp/settings.html.js /tmp/progress.html.js /tmp/shell.html.js; do node
 5. **窗口关闭是隐藏不是销毁。** 清理逻辑要区分 `close`（hide）与 `closed`（quit）。
 6. **进度窗口关闭不等于任务取消。** 关闭按钮只隐藏窗口；任务继续，退出另有 busy 拦截。
 7. **设置面板是懒创建且常驻。** 修改共享设置后必须 reload，否则旧 form 会被另一个窗口保存回去。
-8. **端口 0 不再合法。** 用户输入 0/非法值回退 3080；不要引入新的 `>=0` 判断。
+8. **设置里的端口 0 不合法。** 0 只用于内部 `dsh web --port 0`；用户输入 0/非法值回退 3080。
 
 ## 7. 文档同步要求
 
