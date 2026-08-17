@@ -20,6 +20,7 @@ const path = require('node:path')
 const { runCommand } = require('./runner')
 const { remotePath, shellQuote, remoteToolchainPrefix } = require('./ssh')
 const { engineOk } = require('./tools')
+const runtimeStore = require('./runtime-store')
 
 const LONG_TIMEOUT_MS = 45 * 60 * 1000
 const REMOTE_PREFIX = remoteToolchainPrefix()
@@ -146,7 +147,9 @@ class Updater {
     this.setBusy(true)
     try {
       const settings = this.getSettings()
-      let tools = this.connection.resolvedTools()
+      const remoteRun = (host, inner, options) => this.connection.remoteRun(host, inner, options)
+      const executePipeline = async () => {
+        let tools = this.connection.resolvedTools()
       await this.runStep('确保仓库就绪', () => settings.mode === 'ssh'
         ? this.connection.ensureRemoteRepo(settings)
         : this.connection.ensureLocalRepo(settings))
@@ -224,6 +227,19 @@ class Updater {
       })
       this.onLine('\n完成：服务已重启。')
       return { ok: true }
+      }
+
+      const lockName = settings.mode === 'ssh'
+        ? `build-${settings.ssh.host}-${settings.ssh.remoteRepoDir}`
+        : `build-${path.basename(settings.local.repoDir)}`
+      if (settings.mode === 'ssh') {
+        return await runtimeStore.withRemoteLock(settings, remoteRun, lockName, executePipeline, {
+          timeoutMs: LONG_TIMEOUT_MS + 5 * 60_000,
+        })
+      }
+      return await runtimeStore.withLocalLock(settings, lockName, executePipeline, {
+        timeoutMs: LONG_TIMEOUT_MS + 5 * 60_000,
+      })
     } catch (error) {
       this.onLine(`\n✗ ${String(error.message || error)}`)
       if (String(error.message || error).includes('pnpm install')) {

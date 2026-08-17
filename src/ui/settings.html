@@ -77,7 +77,7 @@
                 <input id="local-home" class="input" type="text" value="~/.dsh-desktop">
               </div>
               <div class="field">
-                <label class="field-label" for="local-port">本地端口 <small>（占用时自动顺延 30 个端口）</small></label>
+                <label class="field-label" for="local-port">本地端口 <small>（实际端口由 dsh web --port 0 分配，此值仅作回退）</small></label>
                 <input id="local-port" class="input" type="number" min="1" max="65535" step="1" value="3080">
               </div>
             </section>
@@ -101,8 +101,8 @@
                 <div class="field"><label class="field-label" for="ssh-dir">远程仓库目录</label><input id="ssh-dir" class="input" type="text" value="~/deepseek-harness"></div>
               </div>
               <div class="row-grid" style="margin-top:12px">
-                <div class="field"><label class="field-label" for="ssh-remote-port">远端服务端口 <small>（占用时自动顺延）</small></label><input id="ssh-remote-port" class="input" type="number" min="1" max="65535" step="1" value="3080"></div>
-                <div class="field"><label class="field-label" for="ssh-local-port">本机转发端口 <small>（占用时自动顺延）</small></label><input id="ssh-local-port" class="input" type="number" min="1" max="65535" step="1" value="3080"></div>
+                <div class="field"><label class="field-label" for="ssh-remote-port">远端端口 <small>（新版由系统分配，旧值仅兼容）</small></label><input id="ssh-remote-port" class="input" type="number" min="1" max="65535" step="1" value="3080"></div>
+                <div class="field"><label class="field-label" for="ssh-local-port">本机转发端口 <small>（占用时自动顺延 30 个端口）</small></label><input id="ssh-local-port" class="input" type="number" min="1" max="65535" step="1" value="3080"></div>
               </div>
             </section>
           </div>
