@@ -334,6 +334,20 @@ async function readRemoteRootManifest(settings, remoteRun) {
   }
 }
 
+async function pruneRemoteRuntimeVersions(settings, remoteRun, current, previous) {
+  const keep = new Set([current, previous].filter(value => value !== null && value !== ''))
+  const list = await remoteRun(
+    settings.ssh.host,
+    `find ${remoteRuntimeRoot()} -mindepth 1 -maxdepth 1 -type d -not -name '.*' -not -name ${CURRENT_LINK} -exec basename {} \\; 2>/dev/null`,
+    { timeoutMs: 20_000 },
+  )
+  const versions = list.lines.map(line => line.trim()).filter(line => /^[a-zA-Z0-9._-]+$/.test(line))
+  for (const version of versions) {
+    if (keep.has(version)) continue
+    await remoteRun(settings.ssh.host, `rm -rf ${remoteVersionDir(version)} 2>/dev/null || true`, { timeoutMs: 60_000 })
+  }
+}
+
 async function activateRemoteRuntime(settings, remoteRun, version) {
   const root = remoteRuntimeRoot()
   const versionDir = remoteVersionDir(version)
@@ -351,6 +365,7 @@ async function activateRemoteRuntime(settings, remoteRun, version) {
     { timeoutMs: 20_000 },
   )
   if (activate.code !== 0) throw new Error(`切换远端运行时 current 失败：${activate.lines.join('\n')}`)
+  await pruneRemoteRuntimeVersions(settings, remoteRun, token, previous.current)
   return token
 }
 

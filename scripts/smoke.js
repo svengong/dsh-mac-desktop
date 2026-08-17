@@ -385,6 +385,8 @@ async function main() {
       return { code: 0, lines: remoteManifest.current === null ? ['__none__'] : [JSON.stringify(remoteManifest)] }
     }
     if (command.includes('test -f ')) return { code: 0, lines: ['ok'] }
+    if (command.includes('find ')) return { code: 0, lines: [] }
+    if (command.includes('rm -rf ')) return { code: 0, lines: [] }
     const activate = /ln -sfn (\S+) current/.exec(command)
     if (activate !== null) {
       remoteManifest = { current: activate[1], previous: remoteManifest.current }
