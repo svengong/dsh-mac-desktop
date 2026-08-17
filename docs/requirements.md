@@ -81,6 +81,8 @@ VS Code Remote——用户可以选择本机 checkout 或 SSH 远程主机运行
 | FR-4.6 | 检查全部时单行失败不得中断其他行，且每行必须有 error 状态。 |
 | FR-4.7 | 更新完成后 Harness 管道自动重启服务；插件/预设更新需要显式重启服务。 |
 | FR-4.8 | 更新管理 tab 的日志放在最后，固定高度（176px），进入时回填最近日志并滚动到最新。 |
+| FR-4.9 | Harness 更新必须在 `<dshHome>/runtime/<version>`（远端 `~/.dsh/runtime/<version>`）完成 staging install/build，成功后原子切换 `current`；上一版本保留。 |
+| FR-4.10 | 新 runtime 启动失败时自动回滚上一版本并重启；更新菜单提供手动「回滚 Harness」。 |
 
 ### FR-5 macOS 壳 UI
 
@@ -118,6 +120,9 @@ VS Code Remote——用户可以选择本机 checkout 或 SSH 远程主机运行
 | 隧道建立超时 | 杀死本次超时子进程后再报错，防止半死隧道占端口。 |
 | 更新管理 tab 晚打开 | `updates:get-log` 回填 connection log ring 并滚动到底。 |
 | 插件是 `github:owner/repo` 或 `file:./plugin` | 不查询 npm `/latest`，按原 spec 执行安装；检查时提示“自定义安装源”。 |
+| staging build 失败 | current 不被切换，失败 worktree 被移除，旧服务继续运行。 |
+| 新 runtime 启动失败 | 自动切回 manifest.previous 并重启旧 runtime，更新行显示回滚状态。 |
+| 用户手动回滚 | 菜单「回滚 Harness…」切回上一版本并重置/重连后端。 |
 
 ## 5. 验收标准
 
@@ -129,3 +134,4 @@ VS Code Remote——用户可以选择本机 checkout 或 SSH 远程主机运行
 - 更新管理 tab 滚动顺序为：运行组件 → 更新源 → 固定高度日志。
 - 新建 npm 插件时，直接粘贴 `dsh plugin --profile web add github:owner/repo` 可保存并执行。
 - smoke 实际启动 `dsh web --port 0`，断言回读端口 > 0；`window-state.json` 可恢复 last-active 设备与 bounds。
+- `scripts/e2e-local.js` 与 `scripts/e2e-ssh.js` 都完成 staging build、原子切换、端口 0 启动和 `__DSH_BOOT__` 探测。

@@ -23,6 +23,7 @@ DeepSeek Harness Web 应用的 macOS 桌面壳，交互模型参考 VS Code Remo
 - **程序坞唤醒**：点击程序坞图标先显示短暂的按下态图标，再遵循 macOS 窗口还原行为——最小化窗口以系统动画还原，关闭后隐藏会重新显示，尚未打开则重新创建。
 - **工作区边框**：主窗口顶部有固定 DSH 边框，可在 Harness、连接、更新管理、高级之间直接切换；设置作为嵌入面板打开，后续新增管理页只需向边框注册一个栏目。
 - **npm 插件安装兼容 pnpm add 全语法**：更新源中可直接粘贴完整官方命令 `dsh plugin --profile web add <spec>`，也可以只填 `<spec>`；裸 npm 包、`@scope/pkg@tag`、`github:owner/repo`、`file:./plugin`、tarball 等都会经官方 CLI 安装，自定义 registry 同时作用于版本检查和安装。
+- **版本化运行时与回滚**：Harness 更新先在 `<dshHome>/runtime/<version>`（远端 `~/.dsh/runtime/<version>`）做 staging build，成功后原子切换 `current`，旧版本保留；新版本启动失败自动回滚，更新菜单也可手动「回滚 Harness」。
 - **开发态完全隔离**：`npm start` / `electron .` 的开发实例把 Electron userData 固定为 `~/.dsh-desktop`（与服务数据目录一致），不会读写已安装应用的 `~/Library/Application Support/DeepSeek Harness`；需要时用 `DSH_DESKTOP_USER_DATA` 覆盖。本地端口、SSH 本地转发端口与远端端口均为优先端口，占用时自动顺延，壳内探测会做进程内预留，避免多窗口同时抢同一回退端口。
 - **每个窗口独立的 macOS 风格设置**：连接、更新管理、高级工具路径作为嵌入面板绑定到所属主窗口，并使用与 macOS 一致的浅色/深色外观（`prefers-color-scheme`）。连接设置、更新源与自动检查按设备隔离：切换窗口连接的新设备就从该设备自己的设置开始，不会带上另一台设备的插件或通知状态。
 

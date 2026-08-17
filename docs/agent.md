@@ -14,6 +14,7 @@ Electron macOS 薄壳：主窗口顶部 46px 壳边框，下面是 harness WebCo
 |---|---|---|
 | 开发态隔离 | `src/main.js#configureUserData` | 未打包时 userData=`~/.dsh-desktop`；`DSH_DESKTOP_USER_DATA` 可覆盖 |
 | 端口 0 | `src/runtime-store.js`、`src/connection.js` | 本地/远端 `dsh web --port 0`，解析 `dsh web: URL` 回读真实端口 |
+| 版本化运行时 | `src/runtime-store.js`、`src/update.js` | staging git worktree build → 原子 `current` → 自动/手动回滚 |
 | 转发端口 | `src/ports.js` | 仅 SSH 本地转发使用优先端口 + 顺延 30 + 进程内预留 |
 | 安装/构建锁 | `src/runtime-store.js`、`src/update.js` | 本地 `mkdir` 锁；远端 owner+2h stale 锁；clone/build 串行 |
 | 窗口状态 | `src/window-manager.js`、`src/main.js` | `window-state.json` 保存 bounds/active-view/last-active，启动恢复 |
@@ -89,6 +90,10 @@ for f in /tmp/settings.html.js /tmp/progress.html.js /tmp/shell.html.js; do node
 6. **进度窗口关闭不等于任务取消。** 关闭按钮只隐藏窗口；任务继续，退出另有 busy 拦截。
 7. **设置面板是懒创建且常驻。** 修改共享设置后必须 reload，否则旧 form 会被另一个窗口保存回去。
 8. **设置里的端口 0 不合法。** 0 只用于内部 `dsh web --port 0`；用户输入 0/非法值回退 3080。
+9. **dirty 工作区不建 runtime 快照。** staging 只对 clean HEAD 使用 git worktree；
+   dirty 构建仍发生在源目录，因此回滚菜单对该模式会提示无上一版本。
+10. **serviceVersion ≠ currentVersion。** 状态复用必须用 active runtime 的 `serviceVersion`；
+    直接比较源 HEAD 会让回滚后的服务在下一次连接时被误杀重建。
 
 ## 7. 文档同步要求
 
