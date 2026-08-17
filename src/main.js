@@ -1043,6 +1043,7 @@ function registerIpc() {
       // settings view with the pre-save form; reload every panel so a
       // multi-window save can never be overwritten from a stale copy.
       for (const attached of session.windows) attached.setupDialog.reload()
+      if (windowManager !== null) windowManager.markActive(workspace)
       setWorkspaceView(workspace, 'harness')
       startWithSettings(workspace)
       return { ok: true }
