@@ -32,9 +32,10 @@ async function main() {
   const repoUrl = process.env.E2E_REPO_URL || `file://${repoRoot}`
   const port = Number(process.env.E2E_PORT || 3199)
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-e2e-'))
+  const dshHome = `${dir}-home`
   const settings = {
     mode: 'local',
-    local: { repoDir: dir, repoUrl, port },
+    local: { repoDir: dir, repoUrl, dshHome, port },
     ssh: { host: '', remoteRepoUrl: '', remoteRepoDir: '~/deepseek-harness', remotePort: 3080, localPort: 3080 },
     toolPaths: { node: '', git: '', pnpm: '', shell: '/bin/zsh' },
   }
@@ -62,6 +63,7 @@ async function main() {
   console.log(`E2E OK: ${connection.url()} serves the harness UI`)
   connection.stop()
   fs.rmSync(dir, { recursive: true, force: true })
+  fs.rmSync(dshHome, { recursive: true, force: true })
   process.exit(0)
 }
 
