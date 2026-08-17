@@ -76,10 +76,6 @@
                 <label class="field-label" for="local-home">数据目录（dsh home）</label>
                 <input id="local-home" class="input" type="text" value="~/.dsh-desktop">
               </div>
-              <div class="field">
-                <label class="field-label" for="local-port">本地端口 <small>（实际端口由 dsh web --port 0 分配，此值仅作回退）</small></label>
-                <input id="local-port" class="input" type="number" min="1" max="65535" step="1" value="3080">
-              </div>
             </section>
 
             <section id="ssh-fields" class="hidden">
@@ -99,10 +95,6 @@
               <div class="row-grid">
                 <div class="field"><label class="field-label" for="ssh-url">远程仓库地址</label><input id="ssh-url" class="input" type="text" placeholder="https://github.com/deepseek-ai/deepseek-harness.git"></div>
                 <div class="field"><label class="field-label" for="ssh-dir">远程仓库目录</label><input id="ssh-dir" class="input" type="text" value="~/deepseek-harness"></div>
-              </div>
-              <div class="row-grid" style="margin-top:12px">
-                <div class="field"><label class="field-label" for="ssh-remote-port">远端端口 <small>（新版由系统分配，旧值仅兼容）</small></label><input id="ssh-remote-port" class="input" type="number" min="1" max="65535" step="1" value="3080"></div>
-                <div class="field"><label class="field-label" for="ssh-local-port">本机转发端口 <small>（占用时自动顺延 30 个端口）</small></label><input id="ssh-local-port" class="input" type="number" min="1" max="65535" step="1" value="3080"></div>
               </div>
             </section>
           </div>
@@ -606,26 +598,15 @@ api.updates.onState(state => { updateState = state; renderUpdates() })
 
 // ── save connection / advanced settings ────────────────────────────────────
 
-function portValue(id, fallback = 3080) {
-  const raw = $(id).value.trim()
-  if (raw === '') return fallback
-  return Number(raw)
-}
-function isValidPort(value) {
-  return Number.isInteger(value) && value >= 1 && value <= 65535
-}
 async function saveSettings() {
   const mode = currentMode()
-  const localPort = portValue('local-port')
-  const sshRemotePort = portValue('ssh-remote-port')
-  const sshLocalPort = portValue('ssh-local-port')
-  if (!isValidPort(localPort)) { status('本地端口需为 1–65535 的整数', false); return }
-  if (!isValidPort(sshRemotePort)) { status('远端服务端口需为 1–65535 的整数', false); return }
-  if (!isValidPort(sshLocalPort)) { status('本机转发端口需为 1–65535 的整数', false); return }
   const raw = {
     mode,
-    local: { repoDir: $('local-repo').value.trim(), repoUrl: $('local-url').value.trim(), dshHome: $('local-home').value.trim(), port: localPort },
-    ssh: { host: selectedSshHost(), remoteRepoUrl: $('ssh-url').value.trim(), remoteRepoDir: $('ssh-dir').value.trim(), remotePort: sshRemotePort, localPort: sshLocalPort },
+    // Ports are managed automatically (`dsh web --port 0`, SSH forward +30
+    // fallback). Preserve previously persisted values for compatibility, but
+    // never ask the user to fill them in.
+    local: { repoDir: $('local-repo').value.trim(), repoUrl: $('local-url').value.trim(), dshHome: $('local-home').value.trim(), port: savedSettings?.local?.port ?? 3080 },
+    ssh: { host: selectedSshHost(), remoteRepoUrl: $('ssh-url').value.trim(), remoteRepoDir: $('ssh-dir').value.trim(), remotePort: savedSettings?.ssh?.remotePort ?? 3080, localPort: savedSettings?.ssh?.localPort ?? 3080 },
     toolPaths: { node: $('tool-node').value.trim(), git: $('tool-git').value.trim(), pnpm: $('tool-pnpm').value.trim(), shell: $('tool-shell').value.trim() },
   }
   if (mode === 'local' && raw.local.repoDir === '') { status('请填写仓库目录', false); return }
@@ -658,10 +639,7 @@ api.getState().then(state => {
   for (const button of document.querySelectorAll('#mode-switch button')) button.classList.toggle('active', button.dataset.mode === s.mode)
   $('local-repo').value = s.local?.repoDir ?? ''; $('local-url').value = s.local?.repoUrl ?? ''
   $('local-home').value = s.local?.dshHome ?? '~/.dsh-desktop'
-  $('local-port').value = s.local?.port ?? 3080
   $('ssh-url').value = s.ssh?.remoteRepoUrl ?? ''; $('ssh-dir').value = s.ssh?.remoteRepoDir ?? '~/deepseek-harness'
-  $('ssh-remote-port').value = s.ssh?.remotePort ?? 3080
-  $('ssh-local-port').value = s.ssh?.localPort ?? 3080
   $('tool-node').value = s.toolPaths?.node ?? ''; $('tool-git').value = s.toolPaths?.git ?? ''
   $('tool-pnpm').value = s.toolPaths?.pnpm ?? ''; $('tool-shell').value = s.toolPaths?.shell ?? '/bin/zsh'
   const update = s.update ?? {}
