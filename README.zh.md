@@ -37,12 +37,15 @@ desktop-shell/
 ├── src/
 │   ├── main.js            main process: lifecycle, workspace frame wiring, IPC handlers
 │   ├── settings.js        settings store (userData/settings.json)
+│   ├── window-manager.js  window bounds/active-view/last-active persistence
+│   ├── runtime-store.js   local/remote service state, URL/port parsing, clone/build locks
+│   ├── ports.js           SSH local-forward port reservation + TCP probe
 │   ├── labels.js          shared DSH-[终端] labels for titles/menus/tray
 │   ├── shell-preload.js   preload for the local workspace frame
 │   ├── dialogs.js         embedded settings panel + progress windows
 │   ├── components.js      update-component catalog + version/hash helpers
 │   ├── update-manager.js  unified check/update logic for all components
-│   ├── connection.js      local + ssh connection lifecycle, port fallback, tunnel, remote service
+│   ├── connection.js      local + ssh connection lifecycle, port-0 service, tunnel, remote service
 │   ├── update.js          harness check / update-and-restart pipeline, .dsh-tools pnpm bootstrap
 │   ├── runner.js          foreground command runner + detached service spawner
 │   ├── ssh.js             ssh target parsing, quoting, remote-path rendering
@@ -73,7 +76,7 @@ bash scripts/install.sh
 
 首次启动弹出连接设置：选「本地」（仓库目录 + 端口）或「SSH 远程」（`~/.ssh/config` 主机别名、远程仓库地址、远程目录、远程端口、本地转发端口），点「保存并连接」。当 `apps/cli/lib/bin.js` 不存在时，首次连接会自动执行初始化构建（可 pull 则先 pull → install → build → 启动）。此后日常升级走顶部菜单「更新」。连接设置、更新源与启动自动检查按设备保存：切到新的 SSH 主机或本地时，更新管理只显示该设备自己的 Harness 与插件源，不会沿用上一台设备。
 
-端口说明：本地模式的端口是**优先端口**——空闲则监听它，被占用（例如终端里已有 dsh web）则自动回退到下一个空闲端口；壳始终把实际端口作为 `--port` 传给 `dsh web`，覆盖 web profile 里的 `webserver.port`，主窗口始终跟随实际端口。SSH 模式的本地转发端口完全由壳持有，远程端口须与远端 web profile 一致。
+端口说明：本地和远端 `dsh web` 都由壳传 `--port 0`，由 OS 分配端口；CLI 打印 `dsh web: http://127.0.0.1:<端口>`，壳解析后写 state 并让主窗口跟随实际端口，因此不再有“配置端口被占用”的探测竞态。SSH 模式的本地转发端口仍由壳持有：优先用设置的 `localPort`，占用时自动顺延；远程服务端口旧设置仅作兼容保留。
 
 ## 升级不改壳的契约
 

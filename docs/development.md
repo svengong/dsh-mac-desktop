@@ -40,7 +40,9 @@ DSH_DESKTOP_USER_DATA=~/tmp/dsh-shell-dev npm start
 src/
 ├── main.js           主进程：userData 隔离、窗口/会话生命周期、IPC、菜单/托盘装配
 ├── settings.js       设备级设置归一化与原子保存；默认 dshHome 和端口
-├── ports.js          进程内端口预留、远端分配锁、TCP 探测
+├── window-manager.js 窗口 bounds/active-view/last-active 持久化与恢复
+├── runtime-store.js  local/remote runtime state、`dsh web` URL 解析、原子 clone/build 锁
+├── ports.js          SSH 本地转发端口的进程内预留与 TCP 探测
 ├── connection.js     本地服务/SSH 隧道连接、state 复用、服务重置、日志 ring
 ├── update.js         Harness pipeline：git → pnpm install → build → 重启
 ├── update-manager.js 组件检查/更新：harness、npm 插件、git preset
@@ -79,31 +81,35 @@ BrowserWindow (shell.html 边框)
   `local` session 常驻以支持多开。
 - 任何窗口保存连接设置后，主进程重载该设备所有窗口的设置 WebContentsView，
   防止“旧表单被另一个窗口重新保存”。
+- `window-manager.js` 持久化 `window-state.json`：bounds、active view、last-active
+  workspace/device；启动先恢复 last-active 设备，IPC fallback 不再只靠焦点扫描。
 
 ## 4. 端口与冲突策略
 
 ### 4.1 规则
 
-1. 设置中的端口都是**优先端口**，默认 3080。
-2. 探测 `127.0.0.1:<port>`；被占用或已被本进程预留则向后顺延，最多 30 个。
-3. 所有“探测 → 绑定”窗口用 `src/ports.js` 的 reservation 括起来：
-   - 本地服务：`acquireLocalPort()`。
-   - SSH 本地转发：`startTunnelOnFreePort()`。
-   - SSH 远端端口：`acquireRemotePort()`，同一 `ssh:<host>` 用 `runExclusive`
-     串行探测，并在远端探测命令中跳过已预留端口。
-4. 子进程停止或连接失败后必须 `releaseReservedPorts()`；定时重启沿用同一端口时保持预留。
-5. 外部进程占用由 TCP 探测处理，壳不会杀死非自管服务。
-6. 旧版/残留自管服务通过 `~/.dsh-desktop/desktop-web.state.json`
+1. 本地和远端 `dsh web` 统一使用 `--port 0`；CLI 打印
+   `dsh web: http://127.0.0.1:<port>`，壳解析后写入 state。
+2. SSH 本地转发不能由 ssh 汇报端口，所以仍使用**优先端口 + 顺延 30**：
+   设置中的 `localPort` 空闲则用，否则 `src/ports.js` 探测下一个空闲端口。
+3. 转发端口的“探测 → 绑定”窗口用 `reservePort/releasePort` 括起来；停止/连接失败必须
+   `releaseReservedPorts()`。
+4. 本地 clone、远端 clone、build pipeline 都通过 `runtime-store.js` 的原子目录锁：
+   - 本地锁 owner 为 `{pid, host, createdAt}`，owner 进程消失即 stale；
+   - 远端锁写 owner JSON，超过 30 分钟视为 stale，可被下一实例回收。
+5. 旧版/残留自管服务通过 `<dshHome>/desktop-web.state.json`
    （远端 `~/.dsh/desktop-web.state.json`）按 `{pid, port, version}` 回收；版本一致且仍响应
    `__DSH_BOOT__` 标记时复用。
+6. 服务重启后如果 URL 端口变化，`onSessionStatus` 会让已打开窗口原地 reload，不抢焦点。
 
 ### 4.2 典型场景
 
 | 场景 | 结果 |
 |---|---|
-| 本地开发版与已安装版都在运行 | 先到者占 3080，后到者自动用 3081 起空闲端口；开发版数据互不干扰。 |
-| 两个 SSH 窗口同时连不同主机，均配置 3080 | 两个本地转发端口由 reservation 串行分配，不会同时选同一个回退口。 |
-| 两个窗口连同一 SSH 主机 | `runExclusive` 保证远端探测串行，后分配者跳过已预留远端端口。 |
+| 本地开发版与已安装版都在运行 | web 服务均由 OS 分配端口；转发端口仍自动顺延。 |
+| 两个 SSH 窗口同时连不同主机，均配置 3080 本地转发 | 两个本地转发端口由 reservation 串行分配，不会同时选同一个回退口。 |
+| 两个窗口连同一 SSH 主机 | 远端服务由 OS 分配端口；clone/build 由远端锁串行化。 |
+| 两个壳实例同时 clone/build | 本地 `mkdir` 锁或远端 owner+stale 锁保证串行。 |
 | 隧道超时 | 先杀掉本次超时子进程，再进入错误/重试路径。 |
 
 ## 5. 连接生命周期
@@ -176,6 +182,9 @@ DSH_DESKTOP_SMOKE=1 npx electron .       # Electron 冒烟（菜单/Dock/actions
 
 - `normalizeSettings` / `normalizeUserComponent` / npm spec 解析。
 - `findFreePort` + reservation 的跳端口行为。
+- `parseDshWebUrl` + 实际启动 `dsh web --port 0` 并回读端口。
+- `runtimeStore` local state round-trip 与本地锁。
+- `WindowManager` 保存/恢复 last-active device 与 bounds。
 - ssh quoting、remotePath、tunnelArgs。
 - UpdateManager 非网络快照与 preset checkout 路径。
 
