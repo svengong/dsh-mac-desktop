@@ -10,7 +10,7 @@
 2. 仓库入口 `apps/cli/lib/bin.js web --port <n>`（已构建的 CLI 入口），
 3. git + pnpm 工具链。
 
-前端产物、插件组合、预设如何变化都不影响壳。壳自身没有自更新框架——壳要改时从产品目录重建重装即可。
+前端产物、插件组合、预设如何变化都不影响壳。壳自身没有运行时自动更新；壳发版走 `scripts/release.js` + GitHub Actions 发布流程（tag `v*` → 双架构构建 → Release）。
 
 ## 2. 目录与模块
 
@@ -97,7 +97,7 @@ BrowserWindow (shell.html 边框)
 
 ## 8. 打包与发布
 
-- 产物命名遵循 GitHub Release 约定 `<name>-<version>-<os>-<arch>.<ext>`：`dsh-desktop-0.1.1-macos-arm64.dmg`（`package.json#build.artifactName`）。版本号唯一来源 `package.json#version`。
+- 产物命名遵循 GitHub Release 约定 `<name>-<version>-<os>-<arch>.<ext>`：`dsh-mac-desktop-0.1.1-macos-arm64.dmg`（`package.json#build.artifactName`）。版本号唯一来源 `package.json#version`。
 - `npm run dist`（app 目录）/ `npm run dist:dmg`（DMG+ZIP）/ `npm run dist:publish`（`GH_TOKEN=<token>` 直发 GitHub）。
 - 推送 `v*` 标签触发 `.github/workflows/release.yml`：校验标签与版本一致 → 双架构（arm64/x64）构建（`--publish never`，发布交给 action-gh-release）→ 上传 DMG/ZIP/latest-mac.yml → 创建 GitHub Release。
 - 产物未签名/未公证（`identity: null`）。

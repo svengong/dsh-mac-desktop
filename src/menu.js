@@ -33,14 +33,14 @@ function buildMenu({ actions, getStatus, getSettings, isBusy, getUpdateSummary }
     {
       label: `DSH-[${terminal}]`,
       submenu: [
-        { label: '关于 DSH', click: () => actions.showAbout() },
+        { label: '关于 dsh-mac-desktop', click: () => actions.showAbout() },
         { type: 'separator' },
         { label: '连接设置…', accelerator: 'CmdOrCtrl+,', click: () => actions.openSettings() },
         { type: 'separator' },
         { label: '新建窗口', accelerator: 'CmdOrCtrl+N', click: () => actions.newWindow() },
         { label: '打开 Harness', accelerator: 'CmdOrCtrl+O', click: () => actions.openMain() },
         { type: 'separator' },
-        { role: 'quit', label: '退出 DSH' },
+        { role: 'quit', label: '退出 dsh-mac-desktop' },
       ],
     },
     {

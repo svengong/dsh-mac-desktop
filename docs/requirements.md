@@ -1,12 +1,12 @@
 # DSH 桌面壳需求文档
 
 > 状态：已实现
-> 版本：0.1.0
+> 版本：跟随 `package.json#version`（当前 0.1.1）
 > 更新日期：2026-08-16
 
 ## 1. 产品目标
 
-DeepSeek Harness 桌面壳（dsh-desktop-shell）是 macOS 上的薄桌面壳：把
+DeepSeek Harness 桌面壳（dsh-mac-desktop）是 macOS 上的薄桌面壳：把
 DeepSeek Harness Web UI 稳定地暴露在 `http://127.0.0.1:<端口>`。业务形态参考
 VS Code Remote——用户可以选择本机 checkout 或 SSH 远程主机运行 Harness，壳只
 负责连接、构建、更新和启动，不承载任何产品页面逻辑。
@@ -28,7 +28,7 @@ VS Code Remote——用户可以选择本机 checkout 或 SSH 远程主机运行
 
 - 非 macOS 平台。
 - 密码交互式 SSH（只支持免密登录）。
-- 壳自身自更新（升级 harness 不需要升级壳）。
+- 壳的运行时自动更新（壳发版走手动发布的 release 流程；升级 harness 不需要升级壳）。
 - 任意 shell 脚本执行（用户自定义组件只允许 `dsh plugin add <spec>` 与 Git 预设两类）。
 
 ## 3. 核心需求

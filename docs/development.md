@@ -229,7 +229,7 @@ DSH_DESKTOP_SMOKE=1 npx electron .       # Electron 冒烟（菜单/Dock/actions
 ## 9. 打包与发布
 
 - 产物命名遵循 GitHub Release 约定 `<name>-<version>-<os>-<arch>.<ext>`：
-  `dsh-desktop-0.1.0-macos-arm64.dmg` / `dsh-desktop-0.1.0-macos-arm64.zip`
+  `dsh-mac-desktop-0.1.1-macos-arm64.dmg` / `dsh-mac-desktop-0.1.1-macos-arm64.zip`
   （`package.json#build.artifactName`，小写连字符、无空格、含版本与架构）。
 - 版本号唯一来源是 `package.json#version`（semver）；打包时请先 `npm version`
   或手工提升版本，再打 `v<version>` 标签推送，GitHub Actions 自动构建并发布。

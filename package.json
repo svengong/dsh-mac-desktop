@@ -1,5 +1,5 @@
 {
-  "name": "dsh-desktop-shell",
+  "name": "dsh-mac-desktop",
   "version": "0.1.1",
   "private": true,
   "description": "macOS desktop shell for the DeepSeek Harness web app: local or SSH-remote connections with an in-menu update flow",
@@ -19,7 +19,7 @@
   "build": {
     "appId": "com.deepseek.harness.desktop",
     "productName": "DeepSeek Harness",
-    "artifactName": "dsh-desktop-${version}-macos-${arch}.${ext}",
+    "artifactName": "dsh-mac-desktop-${version}-macos-${arch}.${ext}",
     "publish": [
       {
         "provider": "github",

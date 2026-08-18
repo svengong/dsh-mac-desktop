@@ -1,4 +1,4 @@
-# DeepSeek Harness Desktop Shell
+# dsh-mac-desktop
 
 English | [中文](README.zh.md)
 
@@ -45,6 +45,7 @@ First launch opens connection settings: pick **本地** (local) or **SSH 远程*
 - [Requirements](docs/requirements.md) — functional requirements, edge cases, acceptance criteria.
 - [Development](docs/development.md) — development conventions, testing, release verification.
 - [Agent](docs/agent.md) — invariants and pitfalls for coding agents.
+- [Roadmap](docs/roadmap.md) — phase overview; mobile (phone-over-SSH to Linux) plan.
 
 ## Known limitations
 

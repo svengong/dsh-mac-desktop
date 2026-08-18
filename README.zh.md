@@ -1,4 +1,4 @@
-# DeepSeek Harness 桌面壳
+# dsh-mac-desktop
 
 [English](README.md) | 中文
 
@@ -45,6 +45,7 @@ open '/Applications/DeepSeek Harness.app'
 - [需求文档](docs/requirements.md)——功能需求、边缘场景、验收标准。
 - [开发文档](docs/development.md)——开发约定、测试、新版本发布验证。
 - [Agent 文档](docs/agent.md)——后续编码 Agent 的不变量、速查与常见坑。
+- [开发计划](docs/roadmap.md)——阶段总览；移动端（手机 SSH 连 Linux）分阶段计划。
 
 ## 已知限制
 
