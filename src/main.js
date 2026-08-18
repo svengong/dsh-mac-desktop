@@ -1,7 +1,7 @@
 'use strict'
 
 /**
- * dsh-desktop-shell — main process.
+ * dsh-mac-desktop — main process.
  *
  * The shell owns exactly three stable contracts with the product:
  * the fixed URL `http://127.0.0.1:<port>`, the `apps/cli/lib/bin.js web`
@@ -45,7 +45,9 @@ const { presentWindow } = require('./windows')
 const { WindowManager } = require('./window-manager')
 
 const BUILD_DIR = path.join(__dirname, '..', 'build')
-const SHELL_VERSION = '0.1.0'
+// Single source of truth: the shell version always follows package.json (and
+// therefore the bundled Info.plist CFBundleShortVersionString). Never hardcode.
+const SHELL_VERSION = require('../package.json').version
 /**
  * The highest harness version this shell is known to be compatible with,
  * keyed on the harness's own `apps/cli` package version. The shell is a thin
@@ -1452,9 +1454,17 @@ const actions = {
 
   showAbout() {
     app.setAboutPanelOptions({
-      applicationName: 'DSH 桌面壳',
-      applicationVersion: `桌面壳 ${SHELL_VERSION}`,
-      credits: 'DSH 桌面壳只加载 http://127.0.0.1:<端口> 的 DeepSeek Harness Web 服务；产品升级不需要改动壳。',
+      applicationName: 'dsh-mac-desktop',
+      applicationVersion: `v${SHELL_VERSION}`,
+      credits: [
+        'dsh-mac-desktop — DeepSeek Harness 的 macOS 桌面壳',
+        '',
+        '· 本地 / SSH 远程静默部署并自动升级 harness 驻留程序',
+        '· 多窗口（VS Code Remote 风格），每个窗口可切换任意 SSH 终端',
+        '· 官方预构建产物优先更新，版本化运行时原子切换 + 自动回滚',
+        '',
+        'https://github.com/svengong/dsh-mac-desktop',
+      ].join('\n'),
     })
     app.showAboutPanel()
   },
