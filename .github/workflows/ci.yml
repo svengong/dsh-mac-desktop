@@ -1,0 +1,61 @@
+name: CI
+
+# 日常检查：PR 与 main 分支推送时跑冒烟测试 + 打包预检，防止合并前破坏打包链路。
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    name: Smoke tests
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Smoke tests
+        run: npm run smoke
+
+  package:
+    name: Package check (arm64)
+    runs-on: macos-14
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build app bundle (dir)
+        run: npm run dist -- --arm64
+
+      - name: Assert versioned artifact naming
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          ls dist/mac-arm64/DeepSeek Harness.app >/dev/null
+          echo "bundle ok for v${VERSION}"
