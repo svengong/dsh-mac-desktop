@@ -22,6 +22,10 @@ const os = require('node:os')
 const { shellQuote } = require('./ssh')
 
 const LOCAL_STATE_FILE = 'desktop-web.state.json'
+// Local ssh-tunnel bookkeeping, kept separate from the web-service state so a
+// tunnel reap never mistakes a stale web-service pid for a tunnel pid (or the
+// reverse). The tunnel runs on the local machine even in ssh mode.
+const LOCAL_TUNNEL_STATE_FILE = 'desktop-tunnel.state.json'
 const REMOTE_STATE_FILE = '"$HOME"/.dsh/desktop-web.state.json'
 const REMOTE_PID_FILE = '"$HOME"/.dsh/desktop-web.pid'
 const REMOTE_LOG_FILE = '"$HOME"/.dsh/desktop-web.log'
@@ -109,6 +113,47 @@ function removeLocalState(settings) {
     fs.rmSync(localStatePath(settings), { force: true })
   } catch {
     // Best-effort; a read-only home must not block reset.
+  }
+}
+
+/** The local machine's ssh-tunnel state file path (independent of web service). */
+function localTunnelStatePath(settings) {
+  return path.join(expandHome(settings.local.dshHome), LOCAL_TUNNEL_STATE_FILE)
+}
+
+function isValidTunnelState(state) {
+  return state !== null
+    && typeof state === 'object'
+    && Number.isInteger(state.pid)
+    && state.pid > 0
+}
+
+function readLocalTunnelState(settings) {
+  try {
+    const state = JSON.parse(fs.readFileSync(localTunnelStatePath(settings), 'utf8'))
+    return isValidTunnelState(state) ? state : null
+  } catch {
+    return null
+  }
+}
+
+function writeLocalTunnelState(settings, state) {
+  if (!isValidTunnelState(state)) return false
+  try {
+    const file = localTunnelStatePath(settings)
+    fs.mkdirSync(path.dirname(file), { recursive: true })
+    fs.writeFileSync(file, JSON.stringify(state, null, 2))
+    return true
+  } catch {
+    return false
+  }
+}
+
+function removeLocalTunnelState(settings) {
+  try {
+    fs.rmSync(localTunnelStatePath(settings), { force: true })
+  } catch {
+    // Best-effort.
   }
 }
 
@@ -515,6 +560,7 @@ async function withRemoteLock(settings, remoteRun, name, task, { timeoutMs = LOC
 
 module.exports = {
   LOCAL_STATE_FILE,
+  LOCAL_TUNNEL_STATE_FILE,
   MAX_RUNTIME_VERSIONS,
   REMOTE_LOG_FILE,
   REMOTE_PID_FILE,
@@ -529,23 +575,27 @@ module.exports = {
   localActiveRuntimeDir,
   localStatePath,
   localStagingDir,
+  localTunnelStatePath,
   localVersionDir,
   parseDshWebUrl,
   pruneLocalRuntimeVersions,
   readLocalState,
   readLocalRootManifest,
+  readLocalTunnelState,
   readRemoteRootManifest,
   readRemoteState,
   remoteActiveRuntimeDir,
   remoteStagingDir,
   remoteVersionDir,
   removeLocalState,
+  removeLocalTunnelState,
   removeRemoteState,
   rollbackLocalRuntime,
   rollbackRemoteRuntime,
   versionToken,
   writeLocalRuntimeManifest,
   writeLocalState,
+  writeLocalTunnelState,
   writeRemoteState,
   withLocalLock,
   withRemoteLock,
