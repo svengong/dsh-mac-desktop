@@ -2,121 +2,52 @@
 
 [English](README.md) | 中文
 
-DeepSeek Harness Web 应用的 macOS 桌面壳，交互模型参考 VS Code Remote：双击图标，壳让 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的 Web UI 在 `http://127.0.0.1:<端口>` 可访问——要么来自本机检出，要么通过 SSH 隧道来自远程机器。
+[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) Web 应用的 macOS 桌面壳，交互模型参考 VS Code Remote：双击图标，Harness Web UI 即可在 `http://127.0.0.1:<端口>` 访问——来自**本机检出**或**SSH 远程机器**。
 
-壳是**薄包装**：只加载固定 URL、只对仓库执行 git/pnpm。升级 harness 源码永远不碰壳，更新后壳只需刷新页面。
+壳是**薄包装**：只加载固定 URL，只对 harness 仓库执行 git/pnpm。升级 harness 永远不碰壳——更新后只需刷新页面。
 
-本目录是桌面壳的产品目录；本地模式默认使用本目录下的 `deepseek-harness/` 检出（该目录是 harness 的独立 clone），不再把壳代码放在 harness 仓库里。
+## 核心特色
+
+- **本地 / SSH 远程静默部署驻留程序**——连上即自动把 harness 驻留服务（`dsh web`）部署并保持在最新版本：自动克隆/拉取、构建、启停、每次重连自动升级到当前版本，全程无需登录服务器、无需手工步骤。**远程不需要系统工具链**：缺 node/pnpm 时自动在远端 `~/.dsh-tools` 引导便携版工具链。
+- **完全自包含与隔离**——独立 dsh home（默认 `~/.dsh-dev`）、干净的子进程环境、按设备保存设置；不触碰你真实的 `~/.dsh` 与已安装应用数据。
+- **多窗口，VS Code Remote 风格**——一个窗口一个工作区；同设备窗口共享一个后端；任意窗口可切换到任意 SSH 主机。
+- **更新友好**——官方预构建产物优先、源码构建兜底；版本化运行时原子切换 + 启动失败自动回滚；更新经独立进程执行，**关掉壳也会继续完成**，崩溃后可续跑。
 
 ## 功能
 
-- **本地模式**：默认使用本产品目录下的 `deepseek-harness/` 检出；壳**总是启动自己的** `apps/cli/lib/bin.js web` 实例——端口由 OS 分配（`--port 0`）——且使用**独立的数据目录**（默认 `~/.dsh-dev`）：会话、设置、profiles、凭据与本机其他 harness 实例完全隔离（首次使用时从 `~/.dsh` 播种凭据）。可填「仓库地址」（git URL）：目录不存在或不是 git 仓库时自动克隆。所有本地子进程使用壳自建的环境变量（见下），不依赖 launchservices PATH。
-- **SSH 远程模式**：在设置里直接下拉选择 `~/.ssh/config` 的主机别名（HostName/User/Port/IdentityFile/ProxyJump 全部自动生效，`Include` 也会被解析），或输入自定义 `[user@]host[:port]`；远程目录不存在时壳在远端 git clone，隧道 `ssh -N -L` 自动保活重连，远程 web 服务经 ssh 启停。要求免密登录。**远程不需要系统工具链**：缺少或不兼容时，壳会在远端 `~/.dsh-tools` 引导便携版 node 和仓库 pin 版本的 pnpm。
-- **多窗口**：菜单栏、程序坞右键菜单和托盘均可新建窗口；新窗口默认打开本地工作区（同设备窗口共享一个后端，像多开一个 Web 标签），每个窗口可在连接设置中切换到任意 SSH 设备；不同窗口连接不同设备时各自持有独立的隧道/服务与更新状态，互不干扰。
+- **本地模式**：从本机检出提供服务（缺失时自动克隆），使用独立隔离的 dsh home。
+- **SSH 远程模式**：直接选 `~/.ssh/config` 主机别名（HostName/User/Port/IdentityFile/ProxyJump/Include 全部生效）或输入 `[user@]host[:port]`；自动克隆、`ssh -N -L` 隧道自动保活重连、经 ssh 启停远端服务。要求免密登录。
+- **壳内加载面板**：连接/构建/更新期间实时状态与日志，失败可在面板内重试。
+- **菜单栏托盘 + 程序坞**：不开窗口也能看状态、待更新数、做更新管理。
+- **macOS 原生体验**：工作区边框 + 嵌入设置面板，浅/深色跟随系统，设置与更新源按设备隔离。
+- **启动自动检查**：发现更新发 macOS 通知（每轮启动去重一次，按设备保存）。
 
-
-  - **启动自动检查**：默认开启；连接就绪后壳在后台检查该设备自己的所有组件，发现更新时发 macOS 通知，同一批更新在本轮启动内只提示一次，开关与去重状态按设备分别保存。
-
-- **自包含工具链**：node 候选按仓库 engine 范围（^22.19 || >=24）过滤，过期的 brew node 不会误选；没有兼容 node 时下载便携版 node 到 `<仓库>/.dsh-tools/node`；没有可用 pnpm 时用 npm 把仓库 pin 的 pnpm 装进 `<仓库>/.dsh-tools`。本地子进程的 `PATH = node 目录 + .dsh-tools + 仓库 node_modules/.bin + 系统基础目录`，与登录环境无关；远程在 `~/.dsh-tools` 做同样的引导。
-- **状态可见**：主窗口标题统一为 `DSH-[终端]-地址`（如 `DSH-[本地]-http://127.0.0.1:3080`、`DSH-[ubuntu]-…`），设置页与顶部菜单同样带终端标识，托盘常驻状态。连接/加载/构建/更新期间，主窗口显示内置加载面板（跑马灯 + 状态 + 实时日志），失败时在面板内给出重试按钮，日志同时落盘。
-- **菜单栏托盘**：常驻状态（模式/地址/详情）与待更新数量，不开主窗口也能打开更新管理/检查/更新全部/仅更新 Harness/退出。
-- **程序坞唤醒**：点击程序坞图标先显示短暂的按下态图标，再遵循 macOS 窗口还原行为——最小化窗口以系统动画还原，关闭后隐藏会重新显示，尚未打开则重新创建。
-- **工作区边框**：主窗口顶部有固定 DSH 边框，可在 Harness、连接、更新管理之间直接切换；设置作为嵌入面板打开，后续新增管理页只需向边框注册一个栏目。
-- **npm 插件安装兼容 pnpm add 全语法**：更新源中可直接粘贴完整官方命令 `dsh plugin --profile web add <spec>`，也可以只填 `<spec>`；裸 npm 包、`@scope/pkg@tag`、`github:owner/repo`、`file:./plugin`、tarball 等都会经官方 CLI 安装，自定义 registry 同时作用于版本检查和安装。
-- **版本化运行时与回滚**：Harness 更新先在 `<dshHome>/runtime/<version>`（远端 `~/.dsh/runtime/<version>`）做 staging build，成功后原子切换 `current`，旧版本保留；新版本启动失败自动回滚，更新菜单也可手动「回滚 Harness」。
-- **开发态完全隔离**：`npm start` / `electron .` 的开发实例把 Electron userData 固定为 `~/.dsh-dev`（目录不存在时自动创建，与服务数据目录一致），不会读写已安装应用的 `~/Library/Application Support/DeepSeek Harness`；需要时用 `DSH_DESKTOP_USER_DATA` 覆盖。web 服务端口由 OS 分配；SSH 本地转发端口以设置为优先、占用时自动顺延，壳内探测会做进程内预留，避免多窗口同时抢同一回退端口。
-- **每个窗口独立的 macOS 风格设置**：连接、更新管理作为嵌入面板绑定到所属主窗口，并使用与 macOS 一致的浅色/深色外观（`prefers-color-scheme`）。连接设置、更新源与自动检查按设备隔离：切换窗口连接的新设备就从该设备自己的设置开始，不会带上另一台设备的插件或通知状态。
-
-
-- 关闭窗口只是隐藏（macOS 习惯）；Cmd+Q 退出时只停掉壳自己拉起的服务。
-
-## 布局
-
-```
-desktop-shell/
-├── deepseek-harness/    本地 harness 检出（独立 clone，默认 repoDir）
-├── src/
-│   ├── main.js            main process: lifecycle, workspace frame wiring, IPC handlers
-│   ├── settings.js        settings store (userData/settings.json)
-│   ├── window-manager.js  window bounds/active-view/last-active persistence
-│   ├── runtime-store.js   local/remote service state, URL/port parsing, clone/build locks
-│   ├── ports.js           SSH local-forward port reservation + TCP probe
-│   ├── labels.js          shared DSH-[终端] labels for titles/menus/tray
-│   ├── shell-preload.js   preload for the local workspace frame
-│   ├── dialogs.js         embedded settings panel
-│   ├── components.js      update-component catalog + version/hash helpers
-│   ├── update-manager.js  unified check/update logic for all components
-│   ├── connection.js      local + ssh connection lifecycle, port-0 service, tunnel, remote service
-│   ├── update.js          harness check / update-and-restart pipeline, .dsh-tools pnpm bootstrap
-│   ├── runner.js          foreground command runner + detached service spawner
-│   ├── ssh.js             ssh target parsing, quoting, remote-path rendering
-│   ├── tools.js           engine-aware node/pnpm discovery + clean child environment
-│   └── ui/                shell.html (workspace frame + loading panel), settings.html, shell.css
-
-├── build/                 icon.icns, icon.png, iconPressed.png, tray template icons (committed)
-└── scripts/               gen-icons.sh, build.sh, install.sh, smoke.js, e2e-local.js, e2e-ssh.js
-```
-
-本目录独立于 harness 仓库，保留自己的 npm install，产品依赖图不受影响。
-
-## 先决条件
-
-- macOS（壳仅支持 macOS：菜单、托盘、应用包）。
-- **不要求**本机或远端预装 Node.js 22.19+ 与 pnpm：缺失或不兼容时，壳会自动在 `.dsh-tools` 引导便携版 node 与仓库 pin 版 pnpm。
-- SSH 模式：必须免密登录远端（`ssh <目标>` 必须能无提示直接成功）；`StrictHostKeyChecking=accept-new` 会记录新主机密钥，但密钥变化仍会拒绝。macOS 15+ 首次连局域网设备会弹「本地网络」权限提示，需点允许，否则局域网 ssh 报 "No route to host"。
-
-## 使用
+## 快速开始
 
 ```sh
 cd desktop-shell
 bash scripts/build.sh
-bash scripts/install.sh          # 默认本地模式：首次启动在连接设置里选「本地」即可
+bash scripts/install.sh
 open '/Applications/DeepSeek Harness.app'
 ```
 
-> 远程模式（可选）：把 `<你的ssh别名>` 换成 `~/.ssh/config` 里的别名后再执行，即可把该 SSH 设备预写进正式设置，首次启动免配置：
+首次启动弹出连接设置：选「本地」或「SSH 远程」，点「保存并连接」。首次连接自动执行初始化构建（pull → install → build → 启动）；日常升级走顶部菜单「更新」。
+
+> 预写一个 SSH 设备，首次启动免配置：
 >
 > ```sh
 > bash scripts/install.sh --ssh <你的ssh别名>
 > ```
 
-`install.sh` 没有现成 app 时会先自动构建，再复制到 /Applications；**不带 `--ssh` 就是本地模式（默认）**，带 `--ssh <别名>` 时才预写 SSH 设备。
-
-首次启动弹出连接设置：选「本地」（仓库目录/仓库地址/数据目录）或「SSH 远程」（`~/.ssh/config` 主机别名、远程仓库地址、远程目录），点「保存并连接」。端口不再需要填写：web 服务由 OS 分配端口，SSH 转发端口占用时自动顺延。当 `apps/cli/lib/bin.js` 不存在时，首次连接会自动执行初始化构建（可 pull 则先 pull → install → build → 启动）。此后日常升级走顶部菜单「更新」。连接设置、更新源与启动自动检查按设备保存：切到新的 SSH 主机或本地时，更新管理只显示该设备自己的 Harness 与插件源，不会沿用上一台设备。
-
-端口说明：本地和远端 `dsh web` 都由壳传 `--port 0`，由 OS 分配端口；CLI 打印 `dsh web: http://127.0.0.1:<端口>`，壳解析后写 state 并让主窗口跟随实际端口，因此不再有“配置端口被占用”的探测竞态。SSH 模式的本地转发端口仍由壳持有：优先用设置的 `localPort`，占用时自动顺延；远程服务端口旧设置仅作兼容保留。
-
-## 打包与发布
-
-产物命名遵循 GitHub Release 约定 `<name>-<version>-<os>-<arch>.<ext>`——小写连字符、无空格、版本与架构都进文件名，例如 `dsh-desktop-0.1.0-macos-arm64.dmg` / `dsh-desktop-0.1.0-macos-arm64.zip`（配置见 `package.json#build.artifactName`）。版本号唯一来源是 `package.json#version`（semver），同时写入应用包的 `CFBundleShortVersionString`。
-
-```sh
-npm run dist        # app 目录（供 scripts/install.sh 安装）
-npm run dist:dmg    # 带版本号的 .dmg + .zip
-```
-
-推送 `v*` 标签会触发[发布流水线](.github/workflows/release.yml)：校验标签与 `package.json#version` 一致 → 在 GitHub 托管的 macOS runner 上同时构建 **arm64 与 x64** → 把 DMG/ZIP/`latest-mac.yml` 发布为带自动生成 Release Notes 的 GitHub Release；也可在 Actions → Release → Run workflow 手动触发（填写要发布的标签）。本机直接发布：`GH_TOKEN=<token> npm run dist:publish`。产物未签名（本地自用），未配置签名/公证。
-
-## 升级不改壳的契约
-
-壳只依赖三个稳定产品面：
-
-1. 固定 URL `http://127.0.0.1:<端口>`（Web 应用的服务契约），
-2. 仓库入口 `apps/cli/lib/bin.js web --port <n>`（已构建的 CLI 入口），
-3. git + pnpm 工具链。
-
-前端产物、插件组合、预设如何变化都不影响壳。壳自身没有自更新框架——万一壳本身要改，从本目录重建重装即可。
-
 ## 文档
 
-- [需求文档](docs/requirements.md)：功能需求、边缘场景、验收标准。
-- [开发文档](docs/development.md)：模块架构、端口策略、测试与提交约定。
-- [Agent 文档](docs/agent.md)：后续编码 Agent 的不变量、速查与常见坑。
+- [架构文档](docs/architecture.md)——模块地图、端口与进程策略、驻留程序自动升级、打包发布。
+- [需求文档](docs/requirements.md)——功能需求、边缘场景、验收标准。
+- [开发文档](docs/development.md)——开发约定、测试、新版本发布验证。
+- [Agent 文档](docs/agent.md)——后续编码 Agent 的不变量、速查与常见坑。
 
 ## 已知限制
 
-- 仅 macOS；未做签名/公证（本地自用，首次启动 macOS 可能要求确认）。
+- 仅 macOS；产物未签名（首次启动 macOS 可能要求确认）。
 - SSH 模式必须免密登录；没有终端，密码交互无法工作。
-- 本地模式的「服务日志」只覆盖壳自管进程；外部启动的服务日志在别处。
-- 托盘图标即 favicon 鲸鱼（黑色模板图，跟随菜单栏深浅色），与网页标签一致。
-- 重新生成图标（`scripts/gen-icons.sh`）需要 Chrome/Edge 做透明 SVG 栅格化；仓库已提交成品图标，不重跑也能用。
+- 本地模式的「服务日志」只覆盖壳自管进程。
