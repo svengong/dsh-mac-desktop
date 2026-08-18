@@ -62,5 +62,5 @@ jobs:
       - name: Assert versioned artifact naming
         run: |
           VERSION="$(node -p "require('./package.json').version")"
-          ls dist/mac-arm64/DeepSeek Harness.app >/dev/null
+          ls "dist/mac-arm64/DeepSeek Harness.app" >/dev/null
           echo "bundle ok for v${VERSION}"
