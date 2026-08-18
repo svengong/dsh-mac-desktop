@@ -26,6 +26,7 @@ const fs = require('node:fs')
 const os = require('node:os')
 const { ConnectionManager, probeOnce } = require('../src/connection')
 const { Updater } = require('../src/update')
+const { runCommand } = require('../src/runner')
 
 async function main() {
   const repoRoot = path.resolve(__dirname, '..', 'deepseek-harness')
@@ -48,6 +49,18 @@ async function main() {
     connection,
     onLine: line => console.log(line),
   })
+  // Dirty the source checkout (an uncommitted change) so the pipeline builds
+  // in the source dir — the state a user-modified checkout leaves. A clean
+  // checkout builds into a versioned staging runtime and has no servable
+  // source build, which is a different (covered) path.
+  await connection.ensureLocalRepo(settings)
+  fs.writeFileSync(path.join(dir, 'e2e-dirty'), 'x')
+  const dirtyMark = await runCommand({ cmd: '/usr/bin/git', args: ['-C', dir, 'add', 'e2e-dirty'] })
+  if (dirtyMark.code !== 0) {
+    console.error(`E2E FAILED: cannot dirty the checkout: ${dirtyMark.lines.join('\n')}`)
+    connection.stop()
+    process.exit(1)
+  }
   const result = await updater.runPipeline({ includePull: true, toleratePullFailure: true })
   if (!result.ok) {
     console.error('E2E FAILED: pipeline did not complete')
@@ -61,7 +74,112 @@ async function main() {
     process.exit(1)
   }
   console.log(`E2E OK: ${connection.url()} serves the harness UI`)
+
+  // ── resident-program auto-upgrade on reconnect ───────────────────────────
+  // Two scenarios, both with zero manual steps:
+  //  A) crash recovery: the service is killed behind the shell's back; a
+  //     fresh shell instance must restart it automatically.
+  //  B) new version: the built bin gets a new mtime (a rebuilt checkout),
+  //     so the version fingerprint changes; a fresh shell instance must
+  //     REAP the still-running OLD service and serve the NEW fingerprint.
+  const { versionToken } = require('../src/runtime-store')
+  const stateBefore = connection.readLocalState(settings)
+  const binPath = path.join(dir, 'apps', 'cli', 'lib', 'bin.js')
+  if (stateBefore === null || !Number.isInteger(stateBefore.pid) || stateBefore.pid <= 0) {
+    console.error('E2E FAILED: no local state after pipeline')
+    connection.stop()
+    process.exit(1)
+  }
+
+  // A) crash recovery: kill the resident service, reconnect must relaunch it.
+  let sawRestartA = false
+  const second = new ConnectionManager({
+    getSettings: () => settings,
+    onLog: line => {
+      console.log(`[conn2] ${line}`)
+      if (line.includes('dsh web 已监听端口')) sawRestartA = true
+    },
+  })
+  await new Promise(resolve => setTimeout(resolve, 200))
+  try {
+    process.kill(stateBefore.pid, 'SIGKILL')
+  } catch {
+    // Already gone.
+  }
+  await new Promise(resolve => setTimeout(resolve, 1200))
+  await second.connect()
+  if (second.status.state !== 'ready') {
+    console.error(`E2E FAILED: crash recovery did not become ready: ${second.status.detail}`)
+    second.stop()
+    connection.stop()
+    process.exit(1)
+  }
+  const probeA = await probeOnce(second.url())
+  if (!probeA.up || !probeA.isDsh) {
+    console.error(`E2E FAILED: crash recovery probe ${second.url()} → up=${probeA.up} isDsh=${probeA.isDsh}`)
+    second.stop()
+    connection.stop()
+    process.exit(1)
+  }
+  if (!sawRestartA) {
+    console.error('E2E FAILED: crash recovery did not relaunch the resident service')
+    second.stop()
+    connection.stop()
+    process.exit(1)
+  }
+  console.log('E2E OK: reconnect auto-relaunched the killed resident service')
+
+  // B) new version: bump the built bin mtime (a rebuilt checkout) — the
+  //    version fingerprint changes, so the next connect must reap the old
+  //    service and serve the new fingerprint.
+  const stamp = new Date()
+  fs.utimesSync(binPath, stamp, stamp)
+  let sawReapB = false
+  const third = new ConnectionManager({
+    getSettings: () => settings,
+    onLog: line => {
+      console.log(`[conn3] ${line}`)
+      if (line.includes('旧版/残留服务')) sawReapB = true
+    },
+  })
+  await third.connect()
+  if (third.status.state !== 'ready') {
+    console.error(`E2E FAILED: upgrade connect failed: ${third.status.detail}`)
+    third.stop()
+    second.stop()
+    connection.stop()
+    process.exit(1)
+  }
+  const probeB = await probeOnce(third.url())
+  if (!probeB.up || !probeB.isDsh) {
+    console.error(`E2E FAILED: upgrade probe ${third.url()} → up=${probeB.up} isDsh=${probeB.isDsh}`)
+    third.stop()
+    second.stop()
+    connection.stop()
+    process.exit(1)
+  }
+  if (!sawReapB) {
+    console.error('E2E FAILED: the old resident service was not reaped on version change')
+    third.stop()
+    second.stop()
+    connection.stop()
+    process.exit(1)
+  }
+  const stateAfter = third.readLocalState(settings)
+  // mtimeMs may carry sub-millisecond precision; read the actual stat, not
+  // the timestamp we wrote, so the expected token matches exactly.
+  const expectedToken = versionToken(`dirty:${fs.statSync(binPath).mtimeMs}`)
+  if (stateAfter === null || stateAfter.version !== expectedToken) {
+    console.error(`E2E FAILED: resident not upgraded (state ${stateAfter === null ? 'null' : stateAfter.version}, expected ${expectedToken})`)
+    third.stop()
+    second.stop()
+    connection.stop()
+    process.exit(1)
+  }
+  console.log('E2E OK: reconnect auto-upgraded the resident service to the new build fingerprint')
   connection.stop()
+  second.stop()
+  third.stop()
   fs.rmSync(dir, { recursive: true, force: true })
   fs.rmSync(dshHome, { recursive: true, force: true })
   process.exit(0)

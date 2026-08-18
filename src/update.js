@@ -215,9 +215,13 @@ class Updater {
         return `dirty:${Date.now()}`
       }
     }
+    // stat -c %Y is GNU (Linux), stat -f %m is BSD (macOS). GNU stat's
+    // `-f %m` prints a filesystem-info block to STDOUT and exits 1, which
+    // would pollute the first line — so GNU must be tried FIRST (it fails
+    // silently on macOS, whose BSD stat writes errors to stderr only).
     const result = await this.connection.remoteRun(
       settings.ssh.host,
-      `stat -f %m ${remotePath(settings.ssh.remoteRepoDir)}/apps/cli/lib/bin.js 2>/dev/null || echo ${Date.now()}`,
+      `stat -c %Y ${remotePath(settings.ssh.remoteRepoDir)}/apps/cli/lib/bin.js 2>/dev/null || stat -f %m ${remotePath(settings.ssh.remoteRepoDir)}/apps/cli/lib/bin.js 2>/dev/null || echo ${Date.now()}`,
       { timeoutMs: 15_000 },
     )
     return `dirty:${(result.lines[0] || String(Date.now())).trim()}`

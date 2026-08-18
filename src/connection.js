@@ -45,6 +45,42 @@ const LOG_RING_LINES = 300
 const PAYLOAD_BEGIN = `__DSH_PAYLOAD_BEGIN_${randomUUID().replace(/-/g, '')}__`
 const PAYLOAD_END = `__DSH_PAYLOAD_END_${randomUUID().replace(/-/g, '')}__`
 
+/**
+ * Extract the payload between BEGIN and END markers from command output
+ * lines. Markers are matched as substrings (not only whole lines) so a
+ * newline-less command output that fuses with a marker still parses:
+ * payload pieces that share a line with BEGIN or END are split off.
+ */
+function extractPayload(lines, beginMarker, endMarker) {
+  const payload = []
+  let inPayload = false
+  for (const line of lines) {
+    if (!inPayload) {
+      const beginPos = line.indexOf(beginMarker)
+      if (beginPos === -1) continue
+      inPayload = true
+      const rest = line.slice(beginPos + beginMarker.length)
+      if (rest === '') continue
+      const endPos = rest.indexOf(endMarker)
+      if (endPos >= 0) {
+        if (rest.slice(0, endPos) !== '') payload.push(rest.slice(0, endPos))
+        return payload
+      }
+      payload.push(rest)
+      continue
+    }
+    const endPos = line.indexOf(endMarker)
+    if (endPos >= 0) {
+      if (line.slice(0, endPos) !== '') payload.push(line.slice(0, endPos))
+      return payload
+    }
+    payload.push(line)
+  }
+  // No END marker seen: fall back to the raw lines so callers still get
+  // the output (banner isolation degrades, not data).
+  return lines
+}
+
 /** Probe a URL once; `isDsh` checks for the boot marker in the served HTML. */
 function probeOnce(url) {
   return new Promise(resolve => {
@@ -268,20 +304,43 @@ class ConnectionManager extends EventEmitter {
   async currentVersion(settings) {
     if (settings.mode === 'local') {
       const tools = this.resolvedTools()
+      let head = ''
       if (tools.git !== '') {
         const result = await runCommand({
           cmd: tools.git,
           args: ['-C', settings.local.repoDir, 'rev-parse', 'HEAD'],
           timeoutMs: 10_000,
         })
-        const head = result.code === 0 ? result.lines.map(line => line.trim()).find(Boolean) : ''
-        if (head) return versionToken(head)
+        head = result.code === 0 ? result.lines.map(line => line.trim()).find(Boolean) : ''
       }
       const activeDir = runtimeStore.localActiveRuntimeDir(settings) ?? settings.local.repoDir
       // An npm-layout runtime's installed package version IS its identity;
       // there is no git HEAD or built bin.js to fingerprint.
       const npmVersion = npmArtifactVersion(activeDir)
-      if (npmVersion !== '') return npmVersion
+      if (npmVersion !== '') return versionToken(npmVersion)
+      if (head !== '') {
+        // A dirty worktree's build identity is the built bin's mtime: a
+        // rebuild changes it while HEAD stays put, and a connection must
+        // restart the resident service onto the rebuilt code instead of
+        // reusing the stale process by HEAD. Only a clean worktree is its
+        // HEAD. Untracked files never count as dirty (same rule as the
+        // update pipeline's gitFacts).
+        const dirty = await runCommand({
+          cmd: tools.git,
+          args: ['-C', settings.local.repoDir, 'status', '--porcelain'],
+          timeoutMs: 10_000,
+        })
+        const hasTrackedChanges = dirty.code === 0 && dirty.lines.some(line => !line.startsWith('??'))
+        if (hasTrackedChanges) {
+          try {
+            const stat = fs.statSync(path.join(settings.local.repoDir, 'apps/cli/lib/bin.js'))
+            return versionToken(`dirty:${stat.mtimeMs}`)
+          } catch {
+            return versionToken(head)
+          }
+        }
+        return versionToken(head)
+      }
       try {
         const stat = fs.statSync(path.join(settings.local.repoDir, 'apps/cli/lib/bin.js'))
         return `mtime:${stat.mtimeMs}`
@@ -292,7 +351,7 @@ class ConnectionManager extends EventEmitter {
     const dir = remotePath(settings.ssh.remoteRepoDir)
     const result = await this.remoteRun(
       settings.ssh.host,
-      `git -C ${dir} rev-parse HEAD 2>/dev/null || stat -f %m ${dir}/apps/cli/lib/bin.js 2>/dev/null || echo unknown`,
+      `dirty=$(git -C ${dir} status --porcelain 2>/dev/null | grep -v '^??' | head -1); if [ -n "$dirty" ]; then echo dirty:$(stat -c %Y ${dir}/apps/cli/lib/bin.js 2>/dev/null || stat -f %m ${dir}/apps/cli/lib/bin.js 2>/dev/null || echo unknown); else git -C ${dir} rev-parse HEAD 2>/dev/null || echo unknown; fi`,
       { timeoutMs: 15_000 },
     )
     // remoteRun already isolates the payload from any gateway banner, so the
@@ -373,9 +432,13 @@ class ConnectionManager extends EventEmitter {
       timeoutMs,
       onLine: filteredOnLine,
     })
-    const begin = result.lines.indexOf(PAYLOAD_BEGIN)
-    const end = begin >= 0 ? result.lines.indexOf(PAYLOAD_END, begin + 1) : -1
-    const lines = begin >= 0 && end > begin ? result.lines.slice(begin + 1, end) : result.lines
+    // Substring-aware marker extraction: a command whose final line has no
+    
+    // trailing newline (e.g. `printf ... > file` followed by `cat file`)
+    // fuses that output with the END marker on one line. Match markers
+    // inside lines, not only as whole lines, so the payload still comes
+    // out clean.
+    const lines = extractPayload(result.lines, PAYLOAD_BEGIN, PAYLOAD_END)
     return { ...result, lines }
   }
 
@@ -777,9 +840,15 @@ class ConnectionManager extends EventEmitter {
           if (epoch !== this.connectEpoch) return
           if (this.stopped) return
           if (this.status.state !== 'connecting' && this.status.state !== 'ready') return
-          // Restart with a fresh OS-chosen port; a stale bound port can never
-          // force a crash-loop.
-          this.spawnLocalService(settings, 0, serveVersion).catch(error => {
+          // Re-resolve the version BEFORE respawning: a peer shell instance
+          // may have upgraded the runtime while this service was down, and
+          // restarting the OLD captured version would silently roll the
+          // device back. Restart with a fresh OS-chosen port as well; a
+          // stale bound port can never force a crash-loop.
+          Promise.resolve(this.serviceVersion(settings)).then(version => {
+            if (this.stopped) return
+            return this.spawnLocalService(settings, 0, version || serveVersion)
+          }).catch(error => {
             if (this.stopped) return
             this.log(`本地服务重启失败：${String(error.message || error)}`)
             this.setStatus({ state: 'error', detail: String(error.message || error) })
@@ -903,7 +972,19 @@ class ConnectionManager extends EventEmitter {
       `service-${settings.ssh.host}`,
       async () => {
         const fresh = await this.readRemoteState(settings)
-        if (fresh !== null && fresh.version === version) return fresh.port
+        if (fresh !== null && fresh.version === version) {
+          // The state matches, but the service may have died (crash, remote
+          // reboot) while the state stayed intact. Reuse only a LIVE service;
+          // otherwise reap and relaunch instead of building a tunnel to a
+          // dead port and timing out in waitReady.
+          const alive = await this.remoteRun(
+            settings.ssh.host,
+            `node -e "fetch('http://127.0.0.1:${fresh.port}/').then(r=>r.text()).then(t=>process.stdout.write(t.includes('__DSH_BOOT__')?'yes':'no')).catch(()=>process.stdout.write('no'))" 2>/dev/null || echo no`,
+            { timeoutMs: 10_000 },
+          )
+          if (alive.code === 0 && alive.lines.includes('yes')) return fresh.port
+          this.log(`远端服务已退出（端口 ${fresh.port}），自动重启…`)
+        }
         await this.reapRemoteService(settings, fresh ?? state)
         return this.launchRemoteService(settings, 0, version)
       },
@@ -1206,9 +1287,16 @@ class ConnectionManager extends EventEmitter {
   async restartRemoteService(settings) {
     const pidFile = runtimeStore.REMOTE_PID_FILE
     this.log('停止远程服务…')
+    // The state-recorded pid is authoritative for this device (it survives
+    // launches by other shell instances); the pid file is the fallback when
+    // the state is missing or stale.
+    const state = await this.readRemoteState(settings)
+    const pid = state !== null && Number.isInteger(state.pid) && state.pid > 0
+      ? state.pid
+      : `$(cat ${pidFile} 2>/dev/null)`
     await this.remoteRun(
       settings.ssh.host,
-      `kill $(cat ${pidFile} 2>/dev/null) 2>/dev/null || true`,
+      `kill ${pid} 2>/dev/null || true`,
       { timeoutMs: 15_000 },
     )
     await sleep(1500)

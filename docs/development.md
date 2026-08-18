@@ -235,7 +235,47 @@ DSH_DESKTOP_SMOKE=1 npx electron .       # Electron 冒烟（菜单/Dock/actions
   （arm64/x64）构建 → 上传 DMG/ZIP/latest-mac.yml → 创建 GitHub Release。
 - 未签名/未公证（`identity: null`），发布为正式 Release 即可，首次启动由 macOS 确认。
 
-## 10. 提交约定
+## 10. 新版本发布约定：驻留程序自动升级验证
+
+开发新版本（harness 更新）后、发布前，必须验证「访问本地/远端 → 驻留程序
+自动升级」闭环。这是本产品的核心契约：**驻留程序（dsh web 服务）永远可以被
+新的访问自动接管到当前版本**，用户无感、零手工步骤。
+
+### 两层升级语义（先理解，再验证）
+
+1. **连接时自动升级（reap → launch）**：连接时对比 state 记录的 version 与当前
+   serviceVersion。不匹配 → 自动清理旧驻留程序（kill 记录 pid / lsof 兜底）→ 以
+   当前版本重新启动。版本身份：runtime `current` 优先；无 runtime 时 clean 工作区
+   用 git HEAD，**dirty 工作区用已构建 bin 的 mtime**（重建后 HEAD 不变，但连接
+   必须重启到新构建，不能按 HEAD 复用旧进程）；npm 布局用包版本。所有 token 统一
+   经 `versionToken` 归一。
+2. **获取新版本（更新管线）**：git pull → staging build → 原子切换 current →
+   重启。连接只负责「升级到 current」，不负责「获取新版本」——runtime 化后
+   source HEAD 的变化**不会**触发连接升级（复用旧 runtime），这是设计语义，
+   不要改回「连接即比对 HEAD」。
+
+### 验证步骤（每次新版本必做）
+
+1. `node scripts/smoke.js` + `DSH_DESKTOP_SMOKE=1 npx electron .` 全绿。
+2. `node scripts/e2e-local.js`：构建 → 服务启动 → 空提交模拟新版本 → 重连自动
+   reap 旧服务并升级（含崩溃重试不回退旧版本）。约几分钟。
+3. `node scripts/e2e-ssh.js <ssh-host>`：远端构建（dirty 模式）→ 远端服务被外部
+   kill 后重连自动 relaunch（锁内探活，修复了死端口空等 90s 的旧缺口）→ bin
+   mtime 变化（重建）后重连自动 reap + 升级远端驻留程序。需要一台免密 SSH 目标。
+4. 手工冒烟（推荐）：旧版本壳保持连接 → 另一实例触发升级 → 确认旧壳窗口不会
+   把版本拉回旧值（多实例防回退：closeWatcher 重启前重解析 serviceVersion）。
+5. 回滚验证：新版本启动失败 → 自动回滚 previous 并恢复旧服务。
+
+### 检查点速查
+
+- 本地：日志出现「清理旧版/残留服务」；`<dshHome>/desktop-web.state.json` 的
+  version == 新 token（git HEAD 或 npm:<ver>）。
+- 远端：`~/.dsh/desktop-web.state.json` version 更新；`desktop-web.log` 有新版本
+  启动记录；隧道重建后页面就绪（`__DSH_BOOT__` 探测通过）。
+- 多实例：两个壳同时连接时，最终 state 必须指向新版本（无旧版本回退）。
+- 远端服务被杀（崩溃/远端重启）后重连：自动 relaunch，不出现 90s 死端口等待。
+
+## 11. 提交约定
 
 按功能拆 commit，建议前缀：
 
