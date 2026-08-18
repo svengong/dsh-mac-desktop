@@ -10,7 +10,7 @@ DeepSeek Harness Web 应用的 macOS 桌面壳，交互模型参考 VS Code Remo
 
 ## 功能
 
-- **本地模式**：默认使用本产品目录下的 `deepseek-harness/` 检出；壳**总是启动自己的** `apps/cli/lib/bin.js web` 实例——配置端口空闲就用它，被占用则自动用下一个空闲端口——且使用**独立的数据目录**（默认 `~/.dsh-desktop`）：会话、设置、profiles、凭据与本机其他 harness 实例完全隔离（首次使用时从 `~/.dsh` 播种凭据）。可填「仓库地址」（git URL）：目录不存在或不是 git 仓库时自动克隆。所有本地子进程使用壳自建的环境变量（见下），不依赖 launchservices PATH。
+- **本地模式**：默认使用本产品目录下的 `deepseek-harness/` 检出；壳**总是启动自己的** `apps/cli/lib/bin.js web` 实例——端口由 OS 分配（`--port 0`）——且使用**独立的数据目录**（默认 `~/.dsh-desktop`）：会话、设置、profiles、凭据与本机其他 harness 实例完全隔离（首次使用时从 `~/.dsh` 播种凭据）。可填「仓库地址」（git URL）：目录不存在或不是 git 仓库时自动克隆。所有本地子进程使用壳自建的环境变量（见下），不依赖 launchservices PATH。
 - **SSH 远程模式**：在设置里直接下拉选择 `~/.ssh/config` 的主机别名（HostName/User/Port/IdentityFile/ProxyJump 全部自动生效，`Include` 也会被解析），或输入自定义 `[user@]host[:port]`；远程目录不存在时壳在远端 git clone，隧道 `ssh -N -L` 自动保活重连，远程 web 服务经 ssh 启停。要求免密登录。**远程不需要系统工具链**：缺少或不兼容时，壳会在远端 `~/.dsh-tools` 引导便携版 node 和仓库 pin 版本的 pnpm。
 - **多窗口**：菜单栏、程序坞右键菜单和托盘均可新建窗口；新窗口默认打开本地工作区（同设备窗口共享一个后端，像多开一个 Web 标签），每个窗口可在连接设置中切换到任意 SSH 设备；不同窗口连接不同设备时各自持有独立的隧道/服务与更新状态，互不干扰。
 
@@ -18,14 +18,14 @@ DeepSeek Harness Web 应用的 macOS 桌面壳，交互模型参考 VS Code Remo
   - **启动自动检查**：默认开启；连接就绪后壳在后台检查该设备自己的所有组件，发现更新时发 macOS 通知，同一批更新在本轮启动内只提示一次，开关与去重状态按设备分别保存。
 
 - **自包含工具链**：node 候选按仓库 engine 范围（^22.19 || >=24）过滤，过期的 brew node 不会误选；没有兼容 node 时下载便携版 node 到 `<仓库>/.dsh-tools/node`；没有可用 pnpm 时用 npm 把仓库 pin 的 pnpm 装进 `<仓库>/.dsh-tools`。本地子进程的 `PATH = node 目录 + .dsh-tools + 仓库 node_modules/.bin + 系统基础目录`，与登录环境无关；远程在 `~/.dsh-tools` 做同样的引导。
-- **状态可见**：主窗口标题统一为 `DSH-[终端]-地址`（如 `DSH-[本地]-http://127.0.0.1:3080`、`DSH-[ubuntu]-…`），设置页与顶部菜单同样带终端标识，托盘常驻状态。更新/初始化构建窗口成功后自动关闭（日志已落盘），失败则保留窗口并附重试/复制按钮。
+- **状态可见**：主窗口标题统一为 `DSH-[终端]-地址`（如 `DSH-[本地]-http://127.0.0.1:3080`、`DSH-[ubuntu]-…`），设置页与顶部菜单同样带终端标识，托盘常驻状态。连接/加载/构建/更新期间，主窗口显示内置加载面板（跑马灯 + 状态 + 实时日志），失败时在面板内给出重试按钮，日志同时落盘。
 - **菜单栏托盘**：常驻状态（模式/地址/详情）与待更新数量，不开主窗口也能打开更新管理/检查/更新全部/仅更新 Harness/退出。
 - **程序坞唤醒**：点击程序坞图标先显示短暂的按下态图标，再遵循 macOS 窗口还原行为——最小化窗口以系统动画还原，关闭后隐藏会重新显示，尚未打开则重新创建。
-- **工作区边框**：主窗口顶部有固定 DSH 边框，可在 Harness、连接、更新管理、高级之间直接切换；设置作为嵌入面板打开，后续新增管理页只需向边框注册一个栏目。
+- **工作区边框**：主窗口顶部有固定 DSH 边框，可在 Harness、连接、更新管理之间直接切换；设置作为嵌入面板打开，后续新增管理页只需向边框注册一个栏目。
 - **npm 插件安装兼容 pnpm add 全语法**：更新源中可直接粘贴完整官方命令 `dsh plugin --profile web add <spec>`，也可以只填 `<spec>`；裸 npm 包、`@scope/pkg@tag`、`github:owner/repo`、`file:./plugin`、tarball 等都会经官方 CLI 安装，自定义 registry 同时作用于版本检查和安装。
 - **版本化运行时与回滚**：Harness 更新先在 `<dshHome>/runtime/<version>`（远端 `~/.dsh/runtime/<version>`）做 staging build，成功后原子切换 `current`，旧版本保留；新版本启动失败自动回滚，更新菜单也可手动「回滚 Harness」。
-- **开发态完全隔离**：`npm start` / `electron .` 的开发实例把 Electron userData 固定为 `~/.dsh-desktop`（与服务数据目录一致），不会读写已安装应用的 `~/Library/Application Support/DeepSeek Harness`；需要时用 `DSH_DESKTOP_USER_DATA` 覆盖。本地端口、SSH 本地转发端口与远端端口均为优先端口，占用时自动顺延，壳内探测会做进程内预留，避免多窗口同时抢同一回退端口。
-- **每个窗口独立的 macOS 风格设置**：连接、更新管理、高级工具路径作为嵌入面板绑定到所属主窗口，并使用与 macOS 一致的浅色/深色外观（`prefers-color-scheme`）。连接设置、更新源与自动检查按设备隔离：切换窗口连接的新设备就从该设备自己的设置开始，不会带上另一台设备的插件或通知状态。
+- **开发态完全隔离**：`npm start` / `electron .` 的开发实例把 Electron userData 固定为 `~/.dsh-desktop`（与服务数据目录一致），不会读写已安装应用的 `~/Library/Application Support/DeepSeek Harness`；需要时用 `DSH_DESKTOP_USER_DATA` 覆盖。web 服务端口由 OS 分配；SSH 本地转发端口以设置为优先、占用时自动顺延，壳内探测会做进程内预留，避免多窗口同时抢同一回退端口。
+- **每个窗口独立的 macOS 风格设置**：连接、更新管理作为嵌入面板绑定到所属主窗口，并使用与 macOS 一致的浅色/深色外观（`prefers-color-scheme`）。连接设置、更新源与自动检查按设备隔离：切换窗口连接的新设备就从该设备自己的设置开始，不会带上另一台设备的插件或通知状态。
 
 
 - 关闭窗口只是隐藏（macOS 习惯）；Cmd+Q 退出时只停掉壳自己拉起的服务。
@@ -43,7 +43,7 @@ desktop-shell/
 │   ├── ports.js           SSH local-forward port reservation + TCP probe
 │   ├── labels.js          shared DSH-[终端] labels for titles/menus/tray
 │   ├── shell-preload.js   preload for the local workspace frame
-│   ├── dialogs.js         embedded settings panel + progress windows
+│   ├── dialogs.js         embedded settings panel
 │   ├── components.js      update-component catalog + version/hash helpers
 │   ├── update-manager.js  unified check/update logic for all components
 │   ├── connection.js      local + ssh connection lifecycle, port-0 service, tunnel, remote service
@@ -51,7 +51,7 @@ desktop-shell/
 │   ├── runner.js          foreground command runner + detached service spawner
 │   ├── ssh.js             ssh target parsing, quoting, remote-path rendering
 │   ├── tools.js           engine-aware node/pnpm discovery + clean child environment
-│   └── ui/                shell.html (workspace frame), settings.html, progress.html, shell.css
+│   └── ui/                shell.html (workspace frame + loading panel), settings.html, shell.css
 
 ├── build/                 icon.icns, icon.png, iconPressed.png, tray template icons (committed)
 └── scripts/               gen-icons.sh, build.sh, install.sh, smoke.js, e2e-local.js, e2e-ssh.js
@@ -70,7 +70,7 @@ desktop-shell/
 ```sh
 cd desktop-shell
 bash scripts/build.sh
-bash scripts/install.sh --ssh home2604_v4
+bash scripts/install.sh --ssh <your-ssh-alias>
 open '/Applications/DeepSeek Harness.app'
 ```
 

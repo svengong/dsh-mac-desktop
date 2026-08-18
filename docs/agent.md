@@ -18,11 +18,15 @@ Electron macOS 薄壳：主窗口顶部 46px 壳边框，下面是 harness WebCo
 | 转发端口 | `src/ports.js` | 仅 SSH 本地转发使用优先端口 + 顺延 30 + 进程内预留 |
 | 安装/构建锁 | `src/runtime-store.js`、`src/update.js` | 本地 `mkdir` 锁；远端 owner+2h stale 锁；clone/build 串行 |
 | 窗口状态 | `src/window-manager.js`、`src/main.js` | `window-state.json` 保存 bounds/active-view/last-active，启动恢复 |
-| 多窗口加固 | `src/main.js` | 保存后重载同设备所有设置面板；全局 busy 阻止并发任务；重连定时器不复活已 stop session |
-| 退出防护 | `src/main.js#actions.quit`、`before-quit` | build/update 中禁止退出 |
+| 多窗口加固 | `src/main.js` | 保存后重载同设备所有设置面板；按终端 busy 阻止同设备并发任务；重连定时器不复活已 stop session |
+| 退出防护 | `src/main.js#before-quit` | 退出直接 teardown 子进程；staging 与运行服务隔离，杀 build 安全 |
 | 日志面板 | `src/ui/settings.html` | 日志在 tab 最后、固定 176px、`updates:get-log` 回填最新 |
 | macOS UI | `src/main.js#createBrowserWindow`、`src/ui/shell.css` | hiddenInset + trafficLightPosition；系统字体与浅/深色变量 |
 | npm 插件 | `src/components.js`、`src/update-manager.js`、`src/ui/settings.html` | `installSpec` 支持 pnpm `add` 全语法；可直接粘贴完整命令 |
+| 终端身份 | `src/settings.js`、`src/connection.js`、`src/main.js` | 远程机器身份用 `~/.dsh/.desktop-machine-id`，设备键归一为 `machine:<id>`，不同 ssh 别名指向同一机器时合并 |
+| SSH banner 隔离 | `src/connection.js#remoteRun` | 远程命令用随机 sentinel 包裹，网关登录 banner（`authz success` 等）被隔离在 payload 之外 |
+| 加载面板 | `src/main.js`、`src/ui/shell.html`、`src/ui/shell.css` | 连接/加载/构建/更新期间用主窗口内置面板展示 spinner + 状态 + 实时日志，替代独立进度窗口 |
+| 移除进度窗口 | `src/dialogs.js`、`src/ui/progress.html` | ProgressDialog 已删除；进度经 `shell:state` / `shell:log` 进加载面板，重试走 `shell:action` |
 
 ## 3. 必须遵守的不变量
 
@@ -34,9 +38,9 @@ Electron macOS 薄壳：主窗口顶部 46px 壳边框，下面是 harness WebCo
    转发端口使用 `acquireLocalPort()`，停止/失败路径调 `releaseReservedPorts()`。
 5. **clone/build 必须过 runtime-store 锁。** 新增任何仓库写入或 pnpm build 路径时，
    先判断是否会被第二个壳实例并发执行。
-6. **busy 任务全局互斥。** 新增任何 pnpm install/build/plugin update 路径前，先经过
-   `busySession()` / `canStartBusyTask()` 语义（或复用 `Updater.runPipeline` /
-   `UpdateManager.update*`）。
+6. **busy 任务按终端互斥。** 新增任何 pnpm install/build/plugin update 路径前，先经过
+   `isSessionBusy()` / `canStartBusyTask()` 语义（或复用 `Updater.runPipeline` /
+   `UpdateManager.update*`）；不同终端的构建互不阻塞。
 7. **多窗口设置不能有第二事实源。** 连接设置保存后必须 `setupDialog.reload()` 同设备窗口；
    更新状态用 `broadcastSession` 推送。
 8. **标题与菜单统一走 `labels.js`。** 不要手写第二份 `DSH-[终端]`。
@@ -58,11 +62,11 @@ UI 改动额外检查：
 ```sh
 python3 - <<'PY'
 import re, pathlib
-for name in ['settings.html','progress.html','shell.html']:
+for name in ['settings.html','shell.html']:
     text = pathlib.Path('src/ui/' + name).read_text()
     open('/tmp/%s.js' % name, 'w').write('\n'.join(re.findall(r'<script>(.*?)</script>', text, re.S)))
 PY
-for f in /tmp/settings.html.js /tmp/progress.html.js /tmp/shell.html.js; do node --check "$f"; done
+for f in /tmp/settings.html.js /tmp/shell.html.js; do node --check "$f"; done
 ```
 
 ## 5. 改哪里：速查
@@ -87,9 +91,9 @@ for f in /tmp/settings.html.js /tmp/progress.html.js /tmp/shell.html.js; do node
    不要手拼裸字符串。
 4. **`tcpProbe` 成功 ≠ 端口是 DSH。** 本地复用只认 state.version + `__DSH_BOOT__` 标记。
 5. **窗口关闭是隐藏不是销毁。** 清理逻辑要区分 `close`（hide）与 `closed`（quit）。
-6. **进度窗口关闭不等于任务取消。** 关闭按钮只隐藏窗口；任务继续，退出另有 busy 拦截。
+6. **退出不阻塞构建。** 退出直接 teardown 子进程；staging 目录与运行服务隔离，杀 build 安全，下次启动重建。
 7. **设置面板是懒创建且常驻。** 修改共享设置后必须 reload，否则旧 form 会被另一个窗口保存回去。
-8. **设置里的端口 0 不合法。** 0 只用于内部 `dsh web --port 0`；用户输入 0/非法值回退 3080。
+8. **端口不再暴露给用户。** 内部 `dsh web --port 0`；SSH 本地转发 `localPort` 仅作优先值、占用时顺延，settings 里的 `remotePort` 仅作兼容保留。
 9. **dirty 工作区不建 runtime 快照。** staging 只对 clean HEAD 使用 git worktree；
    dirty 构建仍发生在源目录，因此回滚菜单对该模式会提示无上一版本。
 10. **serviceVersion ≠ currentVersion。** 状态复用必须用 active runtime 的 `serviceVersion`；
