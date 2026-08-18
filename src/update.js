@@ -25,6 +25,20 @@ const runtimeStore = require('./runtime-store')
 const LONG_TIMEOUT_MS = 45 * 60 * 1000
 const REMOTE_PREFIX = remoteToolchainPrefix()
 
+/**
+ * Return the first non-empty line of a remote command's output that satisfies
+ * `predicate`, or '' when none matches. `remoteRun` already isolates the
+ * command payload from any login-shell banner, so this only has to pick the
+ * one reporting line (e.g. the node version) out of a command's own output.
+ */
+function firstLineMatching(lines, predicate) {
+  for (const line of lines) {
+    const trimmed = line.trim()
+    if (trimmed !== '' && predicate(trimmed)) return trimmed
+  }
+  return ''
+}
+
 class Updater {
   constructor({ getSettings, connection, onLine, onBusyChange }) {
     this.getSettings = getSettings
@@ -105,7 +119,13 @@ class Updater {
       upstream: upstream.code === 0 ? (upstream.lines[0] || '').trim() : '',
       ahead,
       behind,
-      dirty: dirty.code === 0 && dirty.lines.length > 0,
+      // `dirty` means "a tracked file is modified, which would block a
+      // fast-forward pull". Untracked files (`?? ` in --porcelain) do NOT
+      // block `git pull --ff-only` and are deliberately excluded — otherwise
+      // incidental untracked files (agent notes, scratch output) would pin the
+      // checkout to its old HEAD forever and make every "update" a silent
+      // no-op that keeps reporting "behind".
+      dirty: dirty.code === 0 && dirty.lines.some(line => !line.startsWith('??')),
     }
   }
 
@@ -454,10 +474,10 @@ class Updater {
   async ensureRemoteToolchain(settings) {
     const target = settings.ssh.host
     const nodeProbe = await this.connection.remoteRun(target, `${REMOTE_PREFIX} node --version`, { timeoutMs: 60_000 })
-    const nodeLine = (nodeProbe.lines[0] || '').trim()
-    if (nodeProbe.code !== 0 || !engineOk(nodeLine)) {
+    const nodeLine = firstLineMatching(nodeProbe.lines, engineOk)
+    if (nodeProbe.code !== 0 || nodeLine === '') {
       const archOut = await this.connection.remoteRun(target, 'uname -m', { timeoutMs: 30_000 })
-      const rawArch = (archOut.lines[0] || '').trim()
+      const rawArch = firstLineMatching(archOut.lines, line => /^(aarch64|arm64|x86_64|x64|amd64)$/.test(line))
       const arch = rawArch === 'aarch64' || rawArch === 'arm64' ? 'arm64' : 'x64'
       const version = '22.19.0'
       const url = `https://nodejs.org/dist/v${version}/node-v${version}-linux-${arch}.tar.gz`
@@ -487,7 +507,7 @@ class Updater {
       if (pnpmInstall.code !== 0) throw new Error(`远程 pnpm 安装失败：${pnpmInstall.lines.join('\n')}`)
     }
     const verify = await this.connection.remoteRun(target, `${REMOTE_PREFIX} node --version && pnpm --version`, { timeoutMs: 60_000 })
-    if (verify.code !== 0 || !engineOk(verify.lines[0] || '')) {
+    if (verify.code !== 0 || firstLineMatching(verify.lines, engineOk) === '') {
       throw new Error(`远程自包含工具链安装后仍不可用：${verify.lines.join('\n')}`)
     }
     this.onLine(`远程自包含工具链就绪：${verify.lines.map(line => line.trim()).filter(Boolean).join('，')}`)
