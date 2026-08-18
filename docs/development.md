@@ -38,6 +38,8 @@ DSH_DESKTOP_USER_DATA=~/tmp/dsh-shell-dev npm start
 
 ## 2. 目录与模块
 
+> 模块地图与数据流的技术总览见 [架构文档](architecture.md)（README 只保留产品介绍）。
+
 ```
 src/
 ├── main.js           主进程：userData 隔离、窗口/会话生命周期、IPC、菜单/托盘装配
@@ -86,6 +88,8 @@ BrowserWindow (shell.html 边框)
   workspace/device；启动先恢复 last-active 设备，IPC fallback 不再只靠焦点扫描。
 
 ## 4. 端口与冲突策略
+
+> 端口/进程策略的技术总览见 [架构文档](architecture.md)。
 
 ### 4.1 规则
 
