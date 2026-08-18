@@ -12,7 +12,7 @@ Electron macOS 薄壳：主窗口顶部 46px 壳边框，下面是 harness WebCo
 
 | 主题 | 位置 | 关键点 |
 |---|---|---|
-| 开发态隔离 | `src/main.js#configureUserData` | 未打包时 userData=`~/.dsh-desktop`；`DSH_DESKTOP_USER_DATA` 可覆盖 |
+| 开发态隔离 | `src/main.js#configureUserData` | 未打包时 userData=`~/.dsh-dev`（自动创建）；`DSH_DESKTOP_USER_DATA` 可覆盖 |
 | 端口 0 | `src/runtime-store.js`、`src/connection.js` | 本地/远端 `dsh web --port 0`，解析 `dsh web: URL` 回读真实端口 |
 | 版本化运行时 | `src/runtime-store.js`、`src/update.js` | staging git worktree build → 原子 `current` → 自动/手动回滚 |
 | 转发端口 | `src/ports.js` | 仅 SSH 本地转发使用优先端口 + 顺延 30 + 进程内预留 |

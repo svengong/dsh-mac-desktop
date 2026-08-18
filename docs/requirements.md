@@ -63,9 +63,9 @@ VS Code Remote——用户可以选择本机 checkout 或 SSH 远程主机运行
 
 | 编号 | 需求 |
 |---|---|
-| FR-3.1 | 开发态（`electron .` / `npm start`）Electron userData 固定为 `~/.dsh-desktop`，不读写已安装应用的 `~/Library/Application Support/DeepSeek Harness`。 |
+| FR-3.1 | 开发态（`electron .` / `npm start`）Electron userData 固定为 `~/.dsh-dev`（不存在时自动创建），不读写已安装应用的 `~/Library/Application Support/DeepSeek Harness`。 |
 | FR-3.2 | 可通过 `DSH_DESKTOP_USER_DATA` 覆盖 userData（支持 `~/...`）。 |
-| FR-3.3 | 本地服务默认 `DSH_HOME=~/.dsh-desktop`，与终端用户常用 `~/.dsh` 完全分离。 |
+| FR-3.3 | 本地服务默认 `DSH_HOME=~/.dsh-dev`，与终端用户常用 `~/.dsh` 完全分离。 |
 | FR-3.4 | 每次启动写入独立日志文件到 `<userData>/logs/desktop-<时间戳>.log`。 |
 | FR-3.5 | 已安装应用与开发应用使用不同的单实例锁，允许同时运行。 |
 
@@ -110,7 +110,7 @@ VS Code Remote——用户可以选择本机 checkout 或 SSH 远程主机运行
 | 场景 | 处理 |
 |---|---|
 | 两个窗口同时连接不同 SSH 设备，均配置 3080 本地转发 | 转发端口通过进程内预留顺延，远端服务本身由 OS 分配端口。 |
-| 开发版与已安装版同时运行 | 开发版 userData 与 DSH_HOME 均在 `~/.dsh-desktop`，web 服务使用 `--port 0`，无固定端口争用。 |
+| 开发版与已安装版同时运行 | 开发版 userData 与 DSH_HOME 均在 `~/.dsh-dev`，web 服务使用 `--port 0`，无固定端口争用。 |
 | 窗口 A 保存本地 repo 后，窗口 B 再打开设置 | 保存后重载该设备所有窗口的设置面板，防止旧表单回写。 |
 | 启动时恢复窗口 | 从 `window-state.json` 恢复上次活跃设备和 bounds，不影响 settings 里的 activeDeviceId。 |
 | 两个壳实例同时 clone/build 同一仓库 | 本地 `mkdir` 锁；远端 owner+时间戳锁，stale 后回收。 |
@@ -128,7 +128,7 @@ VS Code Remote——用户可以选择本机 checkout 或 SSH 远程主机运行
 
 - `node scripts/smoke.js` 全部通过。
 - `DSH_DESKTOP_SMOKE=1 npx electron .` 输出 `ok:true`。
-- `npm start` 后 `~/.dsh-desktop/settings.json` 与 `~/.dsh-desktop/logs/` 正常生成，不触碰
+- `npm start` 后 `~/.dsh-dev/settings.json` 与 `~/.dsh-dev/logs/` 正常生成，不触碰
   `~/Library/Application Support/DeepSeek Harness`。
 - 主窗口顶部 46px 工具栏可见红黄绿按钮，未与品牌区重叠。
 - 更新管理 tab 滚动顺序为：运行组件 → 更新源 → 固定高度日志。

@@ -6,7 +6,7 @@
 # 安装依赖（Electron 35 + electron-builder）
 npm install
 
-# 开发模式：userData 固定在 ~/.dsh-desktop，不影响已安装应用
+# 开发模式：userData 固定在 ~/.dsh-dev，不影响已安装应用
 npm start
 
 # Electron-free 模块测试
@@ -15,7 +15,7 @@ npm run smoke
 # Electron 内冒烟（菜单/托盘/Dock 等）
 DSH_DESKTOP_SMOKE=1 npx electron .
 
-# 构建 macOS 应用目录 / DMG
+# 构建 macOS 应用目录 / DMG + ZIP（产物带版本号，见「9. 打包与发布」）
 npm run dist
 npm run dist:dmg
 ```
@@ -23,8 +23,10 @@ npm run dist:dmg
 ### 1.1 开发态数据隔离
 
 - 开发态（`app.isPackaged === false`）自动执行
-  `app.setPath('userData', '~/.dsh-desktop')`，settings.json、logs、单实例锁都在这里。
-- 本地服务的 `DSH_HOME` 默认也是 `~/.dsh-desktop`，与用户常规 `~/.dsh` 分离。
+  `app.setPath('userData', '~/.dsh-dev')`，settings.json、logs、单实例锁都在这里；
+  目录不存在时启动即自动创建（约定：开发过程中一律使用 `~/.dsh-dev`，
+  防止与用户空间 `~/.dsh` 或已安装应用数据冲突）。
+- 本地服务的 `DSH_HOME` 默认也是 `~/.dsh-dev`，与用户常规 `~/.dsh` 分离。
 - 需要特殊隔离时设置环境变量：
 
 ```sh
@@ -198,7 +200,20 @@ DSH_DESKTOP_SMOKE=1 npx electron .       # Electron 冒烟（菜单/Dock/actions
 - ssh quoting、remotePath、tunnelArgs。
 - UpdateManager 非网络快照与 preset checkout 路径。
 
-## 9. 提交约定
+## 9. 打包与发布
+
+- 产物命名遵循 GitHub Release 约定 `<name>-<version>-<os>-<arch>.<ext>`：
+  `dsh-desktop-0.1.0-macos-arm64.dmg` / `dsh-desktop-0.1.0-macos-arm64.zip`
+  （`package.json#build.artifactName`，小写连字符、无空格、含版本与架构）。
+- 版本号唯一来源是 `package.json#version`（semver）；打包时请先 `npm version`
+  或手工提升版本，再打 `v<version>` 标签推送，GitHub Actions 自动构建并发布。
+- 本地打包：`npm run dist`（app 目录，供 install.sh 安装）、`npm run dist:dmg`
+  （DMG + ZIP）。直接发布到 GitHub Releases：`GH_TOKEN=<token> npm run dist:publish`。
+- 自动发布流水线见 `.github/workflows/release.yml`：tag `v*` → 双架构
+  （arm64/x64）构建 → 上传 DMG/ZIP/latest-mac.yml → 创建 GitHub Release。
+- 未签名/未公证（`identity: null`），发布为正式 Release 即可，首次启动由 macOS 确认。
+
+## 10. 提交约定
 
 按功能拆 commit，建议前缀：
 
