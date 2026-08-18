@@ -4,7 +4,7 @@
 # fully hands-off.
 #
 #   bash scripts/install.sh
-#   bash scripts/install.sh --ssh home2604_v4
+#   bash scripts/install.sh --ssh <your-ssh-alias>
 #
 set -euo pipefail
 cd "$(dirname "$0")/.."

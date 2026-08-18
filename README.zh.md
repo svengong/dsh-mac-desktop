@@ -70,11 +70,17 @@ desktop-shell/
 ```sh
 cd desktop-shell
 bash scripts/build.sh
-bash scripts/install.sh --ssh <your-ssh-alias>
+bash scripts/install.sh          # 默认本地模式：首次启动在连接设置里选「本地」即可
 open '/Applications/DeepSeek Harness.app'
 ```
 
-`install.sh` 没有现成 app 时会先自动构建，再复制到 /Applications；带 `--ssh <别名>` 时会把该 SSH 设备预写进正式设置，启动即可用，不需要再点连接设置。
+> 远程模式（可选）：把 `<你的ssh别名>` 换成 `~/.ssh/config` 里的别名后再执行，即可把该 SSH 设备预写进正式设置，首次启动免配置：
+>
+> ```sh
+> bash scripts/install.sh --ssh <你的ssh别名>
+> ```
+
+`install.sh` 没有现成 app 时会先自动构建，再复制到 /Applications；**不带 `--ssh` 就是本地模式（默认）**，带 `--ssh <别名>` 时才预写 SSH 设备。
 
 首次启动弹出连接设置：选「本地」（仓库目录/仓库地址/数据目录）或「SSH 远程」（`~/.ssh/config` 主机别名、远程仓库地址、远程目录），点「保存并连接」。端口不再需要填写：web 服务由 OS 分配端口，SSH 转发端口占用时自动顺延。当 `apps/cli/lib/bin.js` 不存在时，首次连接会自动执行初始化构建（可 pull 则先 pull → install → build → 启动）。此后日常升级走顶部菜单「更新」。连接设置、更新源与启动自动检查按设备保存：切到新的 SSH 主机或本地时，更新管理只显示该设备自己的 Harness 与插件源，不会沿用上一台设备。
 
