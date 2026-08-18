@@ -29,6 +29,7 @@ const {
 const {
   SettingsStore, normalizeSettings, deviceKeyOf, DEV_DEFAULT_DSH_HOME,
 } = require('./settings')
+const { mergeUpdates, sameHostUpdates } = require('./device-merge')
 const { terminalLabel } = require('./labels')
 const { resolveTools } = require('./tools')
 const { runCommand, killActiveChildren, spawnDetached } = require('./runner')
@@ -706,37 +707,6 @@ async function checkHostCompatibility(session) {
   }
 }
 
-/**
- * Merge two `update` sections after two ssh aliases resolve to one machine.
- * Components are deduplicated by identity (`packageName` for npm, `presetId`
- * for git presets); the check timestamps keep the newer value.
- */
-function mergeUpdates(primary, secondary) {
-  const left = primary ?? {}
-  const right = secondary ?? {}
-  const seen = new Set()
-  const components = []
-  const leftComponents = Array.isArray(left.components) ? left.components : []
-  const rightComponents = Array.isArray(right.components) ? right.components : []
-  for (const def of [...leftComponents, ...rightComponents]) {
-    if (def === null || typeof def !== 'object') continue
-    const key = def.kind === 'git-preset'
-      ? `preset:${def.presetId ?? def.id}`
-      : `npm:${def.packageName ?? def.installSpec ?? def.id}`
-    if (seen.has(key)) continue
-    seen.add(key)
-    components.push(def)
-  }
-  const leftTime = left.lastCheckAt ?? ''
-  const rightTime = right.lastCheckAt ?? ''
-  const newerIsLeft = String(leftTime).localeCompare(String(rightTime)) >= 0
-  return {
-    autoCheckOnLaunch: left.autoCheckOnLaunch !== undefined ? left.autoCheckOnLaunch : right.autoCheckOnLaunch,
-    lastCheckAt: newerIsLeft ? leftTime : rightTime,
-    lastNotifiedKey: newerIsLeft ? (left.lastNotifiedKey ?? '') : (right.lastNotifiedKey ?? ''),
-    components,
-  }
-}
 
 /**
  * Merge one ssh alias device into its machine identity device. When the
@@ -756,6 +726,17 @@ function mergeAliasIntoMachine(aliasKey, machineId) {
   const devices = { ...settingsDocument.devices }
   delete devices[aliasKey]
 
+  // Machine identity drift: when the remote ~/.dsh/.desktop-machine-id is
+  // rebuilt (file deleted, remote home reset), every configured component
+  // stays under the OLD machine:<id> device and the new machine device would
+  // start with only the harness row. Fold in the update sections of ALL ssh
+  // devices pointing at the same host (old machine ids, other aliases) so
+  // the plugin/preset list survives an id change. Deduplication in
+  // mergeUpdates makes this idempotent across reconnects.
+  const host = current.ssh?.host ?? ''
+  const sameHost = sameHostUpdates(devices, host, [targetKey])
+  const mergedSameHost = sameHost.reduce((acc, update) => mergeUpdates(acc, update), current.update)
+
   if (existing !== undefined) {
     devices[targetKey] = {
       ...existing,
@@ -767,10 +748,10 @@ function mergeAliasIntoMachine(aliasKey, machineId) {
       // public `home4`) while the user actually connected over LAN (`ubuntu`)
       // would point every follow-up ssh at an unreachable address.
       ssh: { ...existing.ssh, ...current.ssh },
-      update: mergeUpdates(existing.update, current.update),
+      update: mergeUpdates(existing.update, mergedSameHost),
     }
   } else {
-    devices[targetKey] = { ...current, machineId }
+    devices[targetKey] = { ...current, machineId, update: mergedSameHost }
   }
 
   const activeDeviceId = settingsDocument.activeDeviceId === aliasKey
