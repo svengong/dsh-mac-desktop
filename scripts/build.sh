@@ -10,3 +10,4 @@ bash scripts/gen-icons.sh
 CSC_IDENTITY_AUTO_DISCOVERY=false npx electron-builder --mac dir
 echo
 echo "Built: $(find dist -maxdepth 3 -name 'DeepSeek Harness.app' -print -quit)"
+echo "Versioned DMG/ZIP (GitHub Release artifacts): npm run dist:dmg"

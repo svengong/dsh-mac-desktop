@@ -1,0 +1,116 @@
+name: Release
+
+# 自动发布：推送 v* 标签时构建双架构（arm64/x64）DMG + ZIP 并发布 GitHub Release；
+# 也可手动触发（Actions → Release → Run workflow），此时必须填写要发布的 tag。
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要发布的标签，如 v0.1.0（须与 package.json#version 一致）'
+        required: false
+        type: string
+      draft:
+        description: '创建为草稿（draft）'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref_name }}-${{ github.event.inputs.tag }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build ${{ matrix.arch }}
+    # 单台 arm64 runner 交叉构建两种架构：macos-13 (x64) 已退役，勿用。
+    runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            flag: --arm64
+          - arch: x64
+            flag: --x64
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false' # 未签名构建，绝不误选钥匙串身份
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Resolve and verify version
+        id: version
+        run: |
+          PKG="$(node -p "require('./package.json').version")"
+          REF="${{ inputs.tag || github.ref_name }}"
+          if [[ "${REF}" == v* ]]; then
+            TAG="${REF#v}"
+            if [ "${TAG}" != "${PKG}" ]; then
+              echo "::error::Tag ${REF} does not match package.json version ${PKG}. Bump package.json first, then retag."
+              exit 1
+            fi
+          fi
+          echo "version=${PKG}" >> "$GITHUB_OUTPUT"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Smoke tests
+        run: npm run smoke
+
+      - name: Package DMG + ZIP (${{ matrix.arch }})
+        run: npm run dist:dmg -- ${{ matrix.flag }}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsh-desktop-macos-${{ matrix.arch }}
+          path: |
+            dist/*.dmg
+            dist/*.zip
+            dist/latest-mac.yml
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Determine tag
+        id: tag
+        run: |
+          TAG="${{ inputs.tag || github.ref_name }}"
+          echo "ref=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Releasing ${TAG}"
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: List assets
+        run: ls -lh release-assets
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.ref }}
+          draft: ${{ inputs.draft }}
+          generate_release_notes: true
+          fail_on_unmatched_globs: true
+          files: release-assets/*

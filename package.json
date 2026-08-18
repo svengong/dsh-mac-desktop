@@ -9,7 +9,8 @@
     "smoke": "node scripts/smoke.js",
     "icons": "bash scripts/gen-icons.sh",
     "dist": "electron-builder --mac dir",
-    "dist:dmg": "electron-builder --mac dmg"
+    "dist:dmg": "electron-builder --mac dmg zip",
+    "dist:publish": "electron-builder --mac dmg zip --publish always"
   },
   "devDependencies": {
     "electron": "^35.0.0",
@@ -18,7 +19,14 @@
   "build": {
     "appId": "com.deepseek.harness.desktop",
     "productName": "DeepSeek Harness",
-    "artifactName": "${productName}-${version}-${arch}.${ext}",
+    "artifactName": "dsh-desktop-${version}-macos-${arch}.${ext}",
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "svengong",
+        "repo": "dsh-mac-desktop"
+      }
+    ],
     "directories": {
       "output": "dist"
     },
@@ -37,7 +45,8 @@
       },
       "target": [
         "dir",
-        "dmg"
+        "dmg",
+        "zip"
       ]
     }
   },

@@ -3,3 +3,4 @@ dist/
 deepseek-harness/
 *.log
 .pnpm-store/
+.cache/
