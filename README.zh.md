@@ -10,7 +10,7 @@ DeepSeek Harness Web 应用的 macOS 桌面壳，交互模型参考 VS Code Remo
 
 ## 功能
 
-- **本地模式**：默认使用本产品目录下的 `deepseek-harness/` 检出；壳**总是启动自己的** `apps/cli/lib/bin.js web` 实例——端口由 OS 分配（`--port 0`）——且使用**独立的数据目录**（默认 `~/.dsh-desktop`）：会话、设置、profiles、凭据与本机其他 harness 实例完全隔离（首次使用时从 `~/.dsh` 播种凭据）。可填「仓库地址」（git URL）：目录不存在或不是 git 仓库时自动克隆。所有本地子进程使用壳自建的环境变量（见下），不依赖 launchservices PATH。
+- **本地模式**：默认使用本产品目录下的 `deepseek-harness/` 检出；壳**总是启动自己的** `apps/cli/lib/bin.js web` 实例——端口由 OS 分配（`--port 0`）——且使用**独立的数据目录**（默认 `~/.dsh-dev`）：会话、设置、profiles、凭据与本机其他 harness 实例完全隔离（首次使用时从 `~/.dsh` 播种凭据）。可填「仓库地址」（git URL）：目录不存在或不是 git 仓库时自动克隆。所有本地子进程使用壳自建的环境变量（见下），不依赖 launchservices PATH。
 - **SSH 远程模式**：在设置里直接下拉选择 `~/.ssh/config` 的主机别名（HostName/User/Port/IdentityFile/ProxyJump 全部自动生效，`Include` 也会被解析），或输入自定义 `[user@]host[:port]`；远程目录不存在时壳在远端 git clone，隧道 `ssh -N -L` 自动保活重连，远程 web 服务经 ssh 启停。要求免密登录。**远程不需要系统工具链**：缺少或不兼容时，壳会在远端 `~/.dsh-tools` 引导便携版 node 和仓库 pin 版本的 pnpm。
 - **多窗口**：菜单栏、程序坞右键菜单和托盘均可新建窗口；新窗口默认打开本地工作区（同设备窗口共享一个后端，像多开一个 Web 标签），每个窗口可在连接设置中切换到任意 SSH 设备；不同窗口连接不同设备时各自持有独立的隧道/服务与更新状态，互不干扰。
 
@@ -24,7 +24,7 @@ DeepSeek Harness Web 应用的 macOS 桌面壳，交互模型参考 VS Code Remo
 - **工作区边框**：主窗口顶部有固定 DSH 边框，可在 Harness、连接、更新管理之间直接切换；设置作为嵌入面板打开，后续新增管理页只需向边框注册一个栏目。
 - **npm 插件安装兼容 pnpm add 全语法**：更新源中可直接粘贴完整官方命令 `dsh plugin --profile web add <spec>`，也可以只填 `<spec>`；裸 npm 包、`@scope/pkg@tag`、`github:owner/repo`、`file:./plugin`、tarball 等都会经官方 CLI 安装，自定义 registry 同时作用于版本检查和安装。
 - **版本化运行时与回滚**：Harness 更新先在 `<dshHome>/runtime/<version>`（远端 `~/.dsh/runtime/<version>`）做 staging build，成功后原子切换 `current`，旧版本保留；新版本启动失败自动回滚，更新菜单也可手动「回滚 Harness」。
-- **开发态完全隔离**：`npm start` / `electron .` 的开发实例把 Electron userData 固定为 `~/.dsh-desktop`（与服务数据目录一致），不会读写已安装应用的 `~/Library/Application Support/DeepSeek Harness`；需要时用 `DSH_DESKTOP_USER_DATA` 覆盖。web 服务端口由 OS 分配；SSH 本地转发端口以设置为优先、占用时自动顺延，壳内探测会做进程内预留，避免多窗口同时抢同一回退端口。
+- **开发态完全隔离**：`npm start` / `electron .` 的开发实例把 Electron userData 固定为 `~/.dsh-dev`（目录不存在时自动创建，与服务数据目录一致），不会读写已安装应用的 `~/Library/Application Support/DeepSeek Harness`；需要时用 `DSH_DESKTOP_USER_DATA` 覆盖。web 服务端口由 OS 分配；SSH 本地转发端口以设置为优先、占用时自动顺延，壳内探测会做进程内预留，避免多窗口同时抢同一回退端口。
 - **每个窗口独立的 macOS 风格设置**：连接、更新管理作为嵌入面板绑定到所属主窗口，并使用与 macOS 一致的浅色/深色外观（`prefers-color-scheme`）。连接设置、更新源与自动检查按设备隔离：切换窗口连接的新设备就从该设备自己的设置开始，不会带上另一台设备的插件或通知状态。
 
 
@@ -85,6 +85,17 @@ open '/Applications/DeepSeek Harness.app'
 首次启动弹出连接设置：选「本地」（仓库目录/仓库地址/数据目录）或「SSH 远程」（`~/.ssh/config` 主机别名、远程仓库地址、远程目录），点「保存并连接」。端口不再需要填写：web 服务由 OS 分配端口，SSH 转发端口占用时自动顺延。当 `apps/cli/lib/bin.js` 不存在时，首次连接会自动执行初始化构建（可 pull 则先 pull → install → build → 启动）。此后日常升级走顶部菜单「更新」。连接设置、更新源与启动自动检查按设备保存：切到新的 SSH 主机或本地时，更新管理只显示该设备自己的 Harness 与插件源，不会沿用上一台设备。
 
 端口说明：本地和远端 `dsh web` 都由壳传 `--port 0`，由 OS 分配端口；CLI 打印 `dsh web: http://127.0.0.1:<端口>`，壳解析后写 state 并让主窗口跟随实际端口，因此不再有“配置端口被占用”的探测竞态。SSH 模式的本地转发端口仍由壳持有：优先用设置的 `localPort`，占用时自动顺延；远程服务端口旧设置仅作兼容保留。
+
+## 打包与发布
+
+产物命名遵循 GitHub Release 约定 `<name>-<version>-<os>-<arch>.<ext>`——小写连字符、无空格、版本与架构都进文件名，例如 `dsh-desktop-0.1.0-macos-arm64.dmg` / `dsh-desktop-0.1.0-macos-arm64.zip`（配置见 `package.json#build.artifactName`）。版本号唯一来源是 `package.json#version`（semver），同时写入应用包的 `CFBundleShortVersionString`。
+
+```sh
+npm run dist        # app 目录（供 scripts/install.sh 安装）
+npm run dist:dmg    # 带版本号的 .dmg + .zip
+```
+
+推送 `v*` 标签会触发[发布流水线](.github/workflows/release.yml)：校验标签与 `package.json#version` 一致 → 在 GitHub 托管的 macOS runner 上同时构建 **arm64 与 x64** → 把 DMG/ZIP/`latest-mac.yml` 发布为带自动生成 Release Notes 的 GitHub Release；也可在 Actions → Release → Run workflow 手动触发（填写要发布的标签）。本机直接发布：`GH_TOKEN=<token> npm run dist:publish`。产物未签名（本地自用），未配置签名/公证。
 
 ## 升级不改壳的契约
 

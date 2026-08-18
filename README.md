@@ -10,7 +10,7 @@ This directory is the desktop-shell product directory. Local mode defaults to th
 
 ## Features
 
-- **Local mode**: defaults to the `deepseek-harness/` checkout under this product directory; the shell always starts its own `apps/cli/lib/bin.js web --port 0` instance (the OS chooses the port) under its **own dsh home** (default `~/.dsh-desktop`): sessions, settings, profiles, and credentials are completely isolated from any other harness instance on the machine (seeded from `~/.dsh` on first use). An optional repo URL makes the shell clone the repo into the directory when it is missing or not a git repo. All local children run under a clean, self-built environment (see below), independent of the launchservices PATH.
+- **Local mode**: defaults to the `deepseek-harness/` checkout under this product directory; the shell always starts its own `apps/cli/lib/bin.js web --port 0` instance (the OS chooses the port) under its **own dsh home** (default `~/.dsh-dev`): sessions, settings, profiles, and credentials are completely isolated from any other harness instance on the machine (seeded from `~/.dsh` on first use). An optional repo URL makes the shell clone the repo into the directory when it is missing or not a git repo. All local children run under a clean, self-built environment (see below), independent of the launchservices PATH.
 - **SSH remote mode** (VS Code Remote style): pick a host alias from `~/.ssh/config` in the settings dialog (HostName/User/Port/IdentityFile/ProxyJump all apply automatically, `Include` is followed), or enter a custom `[user@]host[:port]`; the shell clones the repo on the remote when missing, keeps a `ssh -N -L` tunnel alive, and starts/restarts the remote web service over ssh. Requires key-based (passwordless) ssh login. The remote needs no system toolchain: the shell bootstraps a portable node and the repo-pinned pnpm into `~/.dsh-tools` on the remote when they are missing or incompatible.
 - **Multi-window**: the app menu, Dock menu, and tray can create a new window; new windows start on the local workspace (windows on the same device share one backend, like opening another web tab), and each window can switch to any SSH device from its connection settings. Windows on different devices own independent tunnels, services, and update state.
 
@@ -71,6 +71,17 @@ bash scripts/install.sh
 First launch opens the connection settings dialog. Pick 本地 (repo dir + port) or SSH 远程 (a host alias from `~/.ssh/config`, remote repo url, remote dir, ports), then 保存并连接. The first connection runs an initialization build (pull if possible → install → build → start) when `apps/cli/lib/bin.js` is missing. After that the top menu 「更新」 handles routine upgrades. Connection settings, update sources, and startup auto-check are stored per device: switching to a new SSH host or to local starts 更新管理 from that device's own harness row and plugin sources, never from the previous device.
 
 Ports: local and remote `dsh web` are started with `--port 0`; the CLI prints `dsh web: http://127.0.0.1:<port>`, the shell records that port in runtime state, and every window follows the actual URL. SSH local forward ports remain shell-owned and use the configured 本地转发端口 as a preference with a +30 fallback; the remote service port setting is kept only for compatibility.
+
+## Build & Release
+
+Artifacts follow the GitHub Release naming convention `<name>-<version>-<os>-<arch>.<ext>` — lowercase, no spaces, version and architecture embedded, e.g. `dsh-desktop-0.1.0-macos-arm64.dmg` / `dsh-desktop-0.1.0-macos-arm64.zip` (`package.json#build.artifactName`). The single source of truth for the version is `package.json#version` (semver); it also lands in the app bundle's `CFBundleShortVersionString`.
+
+```sh
+npm run dist        # app directory under dist/ (for scripts/install.sh)
+npm run dist:dmg    # versioned .dmg + .zip under dist/
+```
+
+Pushing a `v*` tag triggers the [release workflow](.github/workflows/release.yml): it verifies the tag matches `package.json#version`, builds **both architectures** (arm64 + x64) on GitHub-hosted macOS runners, and publishes the DMG/ZIP/`latest-mac.yml` assets to a GitHub Release with auto-generated release notes. Manual runs are supported via **Actions → Release → Run workflow** (enter the tag to release). To publish from a laptop instead: `GH_TOKEN=<token> npm run dist:publish`. Builds are unsigned (local use); no signing/notarization is configured.
 
 ## Design contract (why upgrades never touch the shell)
 
