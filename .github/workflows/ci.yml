@@ -57,7 +57,9 @@ jobs:
         run: npm ci
 
       - name: Build app bundle (dir)
-        run: npm run dist -- --arm64
+        # --publish never: a v* tag on HEAD makes electron-builder try to
+        # upload to GitHub; CI has no GH_TOKEN and only checks the build.
+        run: npm run dist -- --arm64 --publish never
 
       - name: Assert versioned artifact naming
         run: |
