@@ -512,7 +512,7 @@ function remoteLockIsStale(owner) {
   return !Number.isFinite(createdAt) || Date.now() - createdAt > REMOTE_LOCK_STALE_MS
 }
 
-/** Run `task()` while holding a remote `mkdir` lock, stale after 30 minutes. */
+/** Run `task()` while holding a remote `mkdir` lock, stale after REMOTE_LOCK_STALE_MS (2h). */
 async function withRemoteLock(settings, remoteRun, name, task, { timeoutMs = LOCK_TIMEOUT_MS } = {}) {
   const lockDir = remoteLockDir(name)
   const ownerFile = `${lockDir}/owner.json`
