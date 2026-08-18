@@ -237,6 +237,11 @@ DSH_DESKTOP_SMOKE=1 npx electron .       # Electron 冒烟（菜单/Dock/actions
   （DMG + ZIP）。直接发布到 GitHub Releases：`GH_TOKEN=<token> npm run dist:publish`。
 - 自动发布流水线见 `.github/workflows/release.yml`：tag `v*` → 双架构
   （arm64/x64）构建 → 上传 DMG/ZIP/latest-mac.yml → 创建 GitHub Release。
+- **一键发布**：`node scripts/release.js`——分析自上次 tag 以来的提交
+  （conventional commits：breaking→major / feat→minor / fix→patch / 仅文档→不发），
+  检查当前版本是否已发布（远端 tag 是否存在：已发布→bump 新版本；未发布→直接
+  发当前版本），确认后自动 `npm version` + push main + push tag 触发流水线。
+  选项：`--dry-run` 只分析；`--yes` 跳过确认；`--bump <type>` 强制版本类型。
 - 未签名/未公证（`identity: null`），发布为正式 Release 即可，首次启动由 macOS 确认。
 
 ## 10. 新版本发布约定：驻留程序自动升级验证
