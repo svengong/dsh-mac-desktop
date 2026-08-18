@@ -48,6 +48,15 @@ Electron macOS 薄壳：主窗口顶部 46px 壳边框，下面是 harness WebCo
 10. **开发态不要碰生产数据。** 不要绕过 `configureUserData` 或写死
    `~/Library/Application Support/DeepSeek Harness`。
 11. **每个功能提交一次 git，并在提交前跑两条 smoke。** 见下。
+12. **子进程引用必须做身份校验，禁用无条件覆盖。** `ConnectionManager` 的
+    `connectEpoch` 是连接代数：close 处理器与重试定时器先比对代数再动作
+    （陈旧回调不得再 spawn 或清引用）；`this.localChild === service.child`
+    之类身份检查防止跨代误杀/误清。新增任何子进程回调都按此模式。
+13. **退出必须杀光所有子进程。** 所有 spawn 都经 `runner.js` 的进程登记表
+    （trackChild），`before-quit` 调 `killActiveChildren()` 组杀；不要让
+    在途 git/pnpm 构建在应用退出后继续运行。
+14. **超时杀进程必须连进程组一起杀。** `runCommand` 一律 `detached: true`，
+    超时用 `process.kill(-pid, 'SIGKILL')`，否则 pnpm/npm 的孙进程会孤儿化。
 
 ## 4. 验收命令
 
@@ -98,6 +107,11 @@ for f in /tmp/settings.html.js /tmp/shell.html.js; do node --check "$f"; done
    dirty 构建仍发生在源目录，因此回滚菜单对该模式会提示无上一版本。
 10. **serviceVersion ≠ currentVersion。** 状态复用必须用 active runtime 的 `serviceVersion`；
     直接比较源 HEAD 会让回滚后的服务在下一次连接时被误杀重建。
+11. **重连会杀旧子进程，close 事件异步到达。** 旧 child 的 `close` 可能在新的
+    `spawnLocalService` 之后触发：先比 `connectEpoch` 再清引用/排重试，
+    否则新服务会失去跟踪（退出时不杀）或触发双 spawn（两个服务进程）。
+12. **30s 端口等待定时器可能跨代触发。** `portTimer` 到期时 `this.localChild`
+    可能已属于新一代连接；必须身份校验后再 kill，否则会杀掉健康的新服务。
 
 ## 7. 文档同步要求
 

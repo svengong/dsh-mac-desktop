@@ -168,6 +168,10 @@ class ConnectionManager extends EventEmitter {
     this.remotePort = null
     this.localVersion = null
     this.reservedLocalPort = null
+    // Bumped by connect()/stop()/resetService(); stale close watchers and
+    // retry timers from a previous connect generation must never spawn a
+    // second service or clobber the current child reference.
+    this.connectEpoch = 0
   }
 
   url() {
@@ -416,6 +420,7 @@ class ConnectionManager extends EventEmitter {
   async connect() {
     const settings = this.getSettings()
     this.stopped = false
+    this.connectEpoch += 1
     this.tools = null
     this.cachedRemoteShell = ''
     this.localRetries = 0
@@ -440,6 +445,7 @@ class ConnectionManager extends EventEmitter {
   /** Disconnect: kill owned local child and tunnel; never touch remote services. */
   stop() {
     this.stopped = true
+    this.connectEpoch += 1
     this.stopOwnedChildren()
     this.releaseReservedPorts()
     if (this.status.state !== 'error') this.setStatus({ state: 'idle', detail: '已断开', serviceOwner: 'none' })
@@ -456,6 +462,7 @@ class ConnectionManager extends EventEmitter {
   async resetService() {
     const settings = this.getSettings()
     this.stopped = true
+    this.connectEpoch += 1
     this.stopOwnedChildren()
     this.releaseReservedPorts()
     this.tunnelChildren.clear()
@@ -741,9 +748,19 @@ class ConnectionManager extends EventEmitter {
     })
     this.localChild = service.child
 
+    const epoch = this.connectEpoch
     const closeWatcher = (code, signal) => {
-      this.localChild = null
+      // rejectPort is per-spawn (no-op once settled) and must always run so
+      // a stale watcher never leaves this spawn's portSeen hanging while its
+      // portTimer later kills whatever child is CURRENT — possibly the next
+      // connect's healthy service.
       rejectPort(new Error(`本地服务启动失败（code=${code} signal=${signal ?? ''}）`))
+      // Only clear the reference that points at THIS child; a newer spawn
+      // may already own this.localChild.
+      if (this.localChild === service.child) this.localChild = null
+      // A stale watcher (the child was replaced by a newer connect or was
+      // intentionally killed) must never schedule a restart.
+      if (epoch !== this.connectEpoch) return
       if (this.stopped || service.child._dshStopRequested) return
       if (this.status.state !== 'connecting' && this.status.state !== 'ready') return
       const why = `本地服务退出（code=${code} signal=${signal ?? ''}）`
@@ -753,11 +770,16 @@ class ConnectionManager extends EventEmitter {
         const delay = 1000 * this.localRetries
         this.setStatus({ detail: `服务退出，${delay / 1000} 秒后重启（第 ${this.localRetries}/${SERVICE_RETRIES} 次）…` })
         setTimeout(() => {
+          if (epoch !== this.connectEpoch) return
           if (this.stopped) return
           if (this.status.state !== 'connecting' && this.status.state !== 'ready') return
           // Restart with a fresh OS-chosen port; a stale bound port can never
           // force a crash-loop.
-          this.spawnLocalService(settings, 0, serveVersion).catch(() => {})
+          this.spawnLocalService(settings, 0, serveVersion).catch(error => {
+            if (this.stopped) return
+            this.log(`本地服务重启失败：${String(error.message || error)}`)
+            this.setStatus({ state: 'error', detail: String(error.message || error) })
+          })
         }, delay)
       } else {
         this.setStatus({ state: 'error', detail: `${why}。请打开服务日志排查。` })
@@ -773,8 +795,13 @@ class ConnectionManager extends EventEmitter {
       this.log(`dsh web 已监听端口 ${actualPort}。`)
     } catch (error) {
       clearTimeout(portTimer)
-      this.killChild(this.localChild)
-      this.localChild = null
+      // Only kill the child THIS spawn owns: by the time the 30s port timer
+      // fires, a newer connect may already own this.localChild, and killing
+      // it would take down a healthy replacement service.
+      if (this.localChild === service.child) {
+        this.killChild(this.localChild)
+        this.localChild = null
+      }
       throw error
     }
   }
@@ -1042,9 +1069,13 @@ class ConnectionManager extends EventEmitter {
     // still be reaped on disconnect (the root cause of "Address already in
     // use" even after switching ports).
     this.tunnelChildren.add(service.child)
+    const epoch = this.connectEpoch
     service.child.on('close', (code, signal) => {
       this.tunnelChildren.delete(service.child)
       if (this.tunnelChild === service.child) this.tunnelChild = null
+      // A stale handler (a reconnect replaced this tunnel) must not touch
+      // the tunnel state a newer tunnel already wrote.
+      if (epoch !== this.connectEpoch) return
       // The tunnel is gone; drop its persisted pid so a future reap never
       // targets a recycled pid.
       if (settings.mode === 'ssh') runtimeStore.removeLocalTunnelState(settings)
@@ -1058,9 +1089,16 @@ class ConnectionManager extends EventEmitter {
         const delay = 2000 * this.tunnelRetries
         this.setStatus({ detail: `隧道断开，${delay / 1000} 秒后重连（第 ${this.tunnelRetries}/${TUNNEL_RETRIES} 次）…` })
         setTimeout(() => {
+          if (epoch !== this.connectEpoch) return
           if (this.stopped) return
           if (this.status.state !== 'connecting' && this.status.state !== 'ready') return
-          this.startTunnel(settings, this.localPort ?? settings.ssh.localPort).catch(() => {})
+          // Re-acquire a fresh local forward port: the old one may still be
+          // held by the dying ssh process or taken by another process.
+          this.startTunnelOnFreePort(settings, rport).catch(error => {
+            if (this.stopped) return
+            this.log(`隧道重连失败：${String(error.message || error)}`)
+            this.setStatus({ state: 'error', detail: String(error.message || error) })
+          })
         }, delay)
       } else {
         this.setStatus({ state: 'error', detail: `${why}。请检查网络与 SSH 配置后「重新连接」。` })
@@ -1086,7 +1124,9 @@ class ConnectionManager extends EventEmitter {
       }
       await sleep(300)
     }
-    if (this.tunnelChild !== null && this.tunnelChild.exitCode === null) this.killChild(this.tunnelChild)
+    // Kill only the child this call spawned: tunnelChild may have been
+    // replaced by a newer startTunnel by the time the deadline fires.
+    if (service.child.exitCode === null && service.child.signalCode === null) this.killChild(service.child)
     throw new Error('隧道建立超时。请检查 SSH 配置后「重新连接」。')
   }
 

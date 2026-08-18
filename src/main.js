@@ -31,7 +31,7 @@ const {
 } = require('./settings')
 const { terminalLabel } = require('./labels')
 const { resolveTools } = require('./tools')
-const { runCommand } = require('./runner')
+const { runCommand, killActiveChildren } = require('./runner')
 const { sshCommandArgs, parseTarget, listSshHosts, isSshConfigAlias } = require('./ssh')
 const { ConnectionManager } = require('./connection')
 const { compareVersions } = require('./components')
@@ -1240,7 +1240,7 @@ const actions = {
     // switch atomically via the `current` symlink, so quitting mid-build only
     // discards a staging dir (rebuilt next run) — the source checkout and the
     // running service are never left half-built. before-quit tears down all
-    // children.
+    // children, including in-flight build processes (killActiveChildren).
     quitting = true
     app.quit()
   },
@@ -1691,10 +1691,14 @@ if (!gotLock) {
     // Killing a mid-flight build is safe: it only discards a staging directory
     // (rebuilt next run); the source checkout and running service are isolated
     // by the atomic `current`-symlink switch. So quit tears down children
-    // directly instead of blocking on a busy gate.
+    // directly instead of blocking on a busy gate. The registry kills every
+    // child this shell spawned — including in-flight git/pnpm commands that
+    // no session reference covers — so quitting never orphans a build or an
+    // adopted service (both would otherwise keep running after exit).
     quitting = true
     if (windowManager !== null) windowManager.save()
     for (const session of sessions.values()) session.connection.stop()
+    killActiveChildren()
   })
 
   app.on('window-all-closed', () => {

@@ -19,7 +19,7 @@ const {
 } = require('../src/components')
 const { UpdateManager, workspacePatchScript } = require('../src/update-manager')
 const { parseTarget, shellQuote, remotePath, tunnelArgs, parseSshConfig, listSshHosts } = require('../src/ssh')
-const { runCommand } = require('../src/runner')
+const { runCommand, spawnService, killActiveChildren } = require('../src/runner')
 const { ConnectionManager } = require('../src/connection')
 const { findFreePort, releasePort, reservePort } = require('../src/ports')
 const runtimeStore = require('../src/runtime-store')
@@ -181,6 +181,14 @@ async function main() {
   assert.deepStrictEqual(failing.lines, ['out', 'err'])
   const noNewline = await runCommand({ cmd: '/bin/sh', args: ['-c', 'printf no-newline'] })
   assert.deepStrictEqual(noNewline.lines, ['no-newline'])
+
+  // runner process registry: killActiveChildren must terminate every tracked
+  // child (in-flight build, service, tunnel) so app quit never orphans one.
+  const sleeper = spawnService({ cmd: '/bin/sleep', args: ['30'] })
+  await new Promise(resolve => sleeper.child.once('spawn', resolve))
+  killActiveChildren()
+  const sleeperEnd = await new Promise(resolve => sleeper.child.once('close', (code, signal) => resolve({ code, signal })))
+  assert.ok(sleeperEnd.code !== null || sleeperEnd.signal !== null, 'registry kill must terminate the child')
 
   // window presentation: dock activation must recover hidden and minimized
   // windows, not only recreate an absent one. A minimized window keeps the
