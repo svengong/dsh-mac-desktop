@@ -1,45 +1,18 @@
 'use strict'
 
 /**
- * Dialog windows: the streaming progress/update log remains an independent
- * macOS window, while the unified settings panel (connection + update
- * manager + advanced) is now an embedded WebContentsView inside each
- * workspace window. The workspace frame (`ui/shell.html`) switches between
- * the harness view and the settings sections; the panel itself exposes only
- * the same narrow contextBridge API as before.
+ * Embedded settings panel (connection + update manager) as a WebContentsView
+ * inside each workspace window. The workspace frame (`ui/shell.html`) switches
+ * between the harness view and the settings sections; the panel exposes only
+ * a narrow contextBridge API. Progress/update logs stream into the shell
+ * frame's loading panel instead of a separate window.
  */
 
 const path = require('node:path')
-const { BrowserWindow, WebContentsView, dialog } = require('electron')
+const { WebContentsView, dialog } = require('electron')
 
 const PRELOAD = path.join(__dirname, 'dialog-preload.js')
 const SETTINGS_HTML = path.join(__dirname, 'ui', 'settings.html')
-const PROGRESS_HTML = path.join(__dirname, 'ui', 'progress.html')
-
-function dialogWindow(file, { width, height, query, macStyle = false }) {
-  const win = new BrowserWindow({
-    width,
-    height,
-    minWidth: macStyle ? 840 : undefined,
-    minHeight: macStyle ? 620 : undefined,
-    resizable: macStyle,
-    minimizable: false,
-    maximizable: false,
-    fullscreenable: false,
-
-    webPreferences: {
-      preload: PRELOAD,
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: true,
-    },
-  })
-  win.setMenuBarVisibility(false)
-  win.once('ready-to-show', () => win.show())
-  if (query) win.loadFile(file, { query })
-  else win.loadFile(file)
-  return win
-}
 
 /**
  * The embedded settings panel for one workspace. The owner is the workspace
@@ -50,6 +23,7 @@ class SetupDialog {
   constructor(ownerWindow) {
     this.ownerWindow = ownerWindow
     this.view = null
+    this.attached = false
     this.activeSection = 'connection'
     this.deviceKey = null
     this.bounds = null
@@ -65,7 +39,7 @@ class SetupDialog {
    * the previous terminal.
    */
   setDeviceKey(deviceKey, section = 'connection') {
-    this.activeSection = ['connection', 'updates', 'advanced'].includes(section) ? section : 'connection'
+    this.activeSection = ['connection', 'updates'].includes(section) ? section : 'connection'
     if (this.deviceKey === deviceKey) return
     this.deviceKey = deviceKey
     this.reload()
@@ -77,7 +51,7 @@ class SetupDialog {
    * otherwise keep displaying (and later save) the stale form.
    */
   reload(section = this.activeSection) {
-    this.activeSection = ['connection', 'updates', 'advanced'].includes(section) ? section : 'connection'
+    this.activeSection = ['connection', 'updates'].includes(section) ? section : 'connection'
     if (this.view !== null && !this.view.webContents.isDestroyed()) {
       this.view.webContents.loadFile(SETTINGS_HTML, {
         query: { section: this.activeSection, embedded: '1' },
@@ -95,11 +69,15 @@ class SetupDialog {
         contextIsolation: true,
         nodeIntegration: false,
         sandbox: true,
+        // Same reason as the harness view: the settings panel must not be
+        // throttled while its window is in the background.
+        backgroundThrottling: false,
       },
     })
-    this.ownerWindow.contentView.addChildView(this.view)
-    // A freshly created View defaults to 0×0 bounds; the workspace has already
-    // measured its layout, so apply the last known bounds immediately.
+    // Do not addChildView here: open() is the single place that attaches the
+    // panel to the window, so close() can detach it without a lingering
+    // hidden view stacked above the harness. The view object and its
+    // webContents stay alive for re-attach.
     if (this.bounds !== null) this.view.setBounds(this.bounds)
     this.view.setVisible(false)
     this.view.webContents.loadFile(SETTINGS_HTML, { query: { section, embedded: '1' } })
@@ -107,22 +85,46 @@ class SetupDialog {
   }
 
   open(section = 'connection') {
-    this.activeSection = ['connection', 'updates', 'advanced'].includes(section) ? section : 'connection'
+    this.activeSection = ['connection', 'updates'].includes(section) ? section : 'connection'
     const view = this.ensureView(this.activeSection)
     if (view === null) return
+    // Re-attach after a close() removed it; addChildView also brings the panel
+    // back above the harness view so it captures clicks while open.
+    if (!this.attached) {
+      this.ownerWindow.contentView.addChildView(view)
+      this.attached = true
+    }
+    if (this.bounds !== null) view.setBounds(this.bounds)
     view.setVisible(true)
     this.showSection(this.activeSection)
     view.webContents.focus()
   }
 
   close() {
+    // When the owner window has been destroyed (e.g. the window's `closed`
+    // event fired during quit), the contentView is gone and the view is torn
+    // down with it — nothing to detach. Bail before touching either.
+    if (this.ownerWindow === null || this.ownerWindow.isDestroyed()) {
+      this.attached = false
+      return
+    }
     if (this.view !== null && !this.view.webContents.isDestroyed()) {
       this.view.setVisible(false)
+      // Detach the panel from the content view, not just hide it: a hidden
+      // WebContentsView stacked above the harness can still swallow the
+      // harness's top-edge clicks on macOS, which surfaces as unresponsive
+      // harness toolbar buttons after a terminal switch or with several
+      // windows open. removeChildView keeps the view (and its webContents)
+      // alive so open() can re-attach it without a reload.
+      if (this.attached) {
+        this.ownerWindow.contentView.removeChildView(this.view)
+        this.attached = false
+      }
     }
   }
 
   showSection(section) {
-    if (!['connection', 'updates', 'advanced'].includes(section)) return
+    if (!['connection', 'updates'].includes(section)) return
     this.activeSection = section
     if (this.view !== null && !this.view.webContents.isDestroyed()) {
       this.view.webContents.send('dialog:section', section)
@@ -151,63 +153,6 @@ class SetupDialog {
   }
 }
 
-class ProgressDialog {
-  constructor() {
-    this.win = null
-    this.visible = false
-    this.ready = false
-    this.pending = []
-  }
-
-  open() {
-    if (this.win !== null && !this.win.isDestroyed()) {
-      this.win.show()
-      this.win.focus()
-      return
-    }
-    this.win = dialogWindow(PROGRESS_HTML, { width: 800, height: 700 })
-    this.visible = true
-    this.ready = false
-    // Main code calls state()/log() immediately after open(); queue those
-    // messages until the renderer has loaded so the first status line and
-    // first log lines can never silently disappear.
-    this.win.webContents.once('did-finish-load', () => {
-      this.ready = true
-      for (const [channel, payload] of this.pending.splice(0)) this.send(channel, payload)
-    })
-    this.win.on('show', () => {
-      this.visible = true
-    })
-    this.win.on('closed', () => {
-      this.win = null
-      this.visible = false
-      this.ready = false
-      this.pending = []
-    })
-  }
-
-  close() {
-    if (this.win !== null && !this.win.isDestroyed()) this.win.close()
-  }
-
-  send(channel, payload) {
-    if (this.win === null || this.win.isDestroyed()) return
-    if (!this.ready) {
-      this.pending.push([channel, payload])
-      return
-    }
-    this.win.webContents.send(channel, payload)
-  }
-
-  log(line) {
-    this.send('progress:log', line)
-  }
-
-  state(payload) {
-    this.send('progress:state', payload)
-  }
-}
-
 /**
  * Register the dialog IPC surface. `handlers` supplies the main-process
  * implementations; every handler returns only JSON-safe data.
@@ -221,11 +166,10 @@ function registerDialogIpc(handlers) {
   })
   ipcMain.handle('dialog:test-ssh', (event, target) => handlers.testSsh(event, target))
   ipcMain.handle('dialog:save', (event, rawSettings) => handlers.save(event, rawSettings))
-  ipcMain.handle('dialog:action', (event, name) => handlers.action(event, name))
   ipcMain.handle('dialog:close-panel', event => handlers.closePanel(event))
   ipcMain.handle('updates:get-state', event => handlers.updatesGetState(event))
   ipcMain.handle('updates:get-log', event => handlers.updatesGetLog(event))
   ipcMain.handle('updates:action', (event, name, payload) => handlers.updatesAction(event, name, payload))
 }
 
-module.exports = { SetupDialog, ProgressDialog, registerDialogIpc }
+module.exports = { SetupDialog, registerDialogIpc }
