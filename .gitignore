@@ -4,3 +4,8 @@ deepseek-harness/
 *.log
 .pnpm-store/
 .cache/
+
+# 本地工具/未使用 pnpm 产物（项目以 npm 管理：package-lock.json）
+.agents/
+pnpm-lock.yaml
+pnpm-workspace.yaml
