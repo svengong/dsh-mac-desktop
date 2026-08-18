@@ -20,6 +20,7 @@
 const fs = require('node:fs')
 const path = require('node:path')
 const http = require('node:http')
+const { randomUUID } = require('node:crypto')
 const { EventEmitter } = require('node:events')
 const { runCommand, spawnService } = require('./runner')
 const { sshCommandArgs, tunnelArgs, shellQuote, remotePath, remoteToolchainPrefix, displayLabel } = require('./ssh')
@@ -32,6 +33,16 @@ const READY_TIMEOUT_MS = 90 * 1000
 const SERVICE_RETRIES = 3
 const TUNNEL_RETRIES = 5
 const LOG_RING_LINES = 300
+
+// Sentinel markers for remoteRun: some ssh gateways (e.g. Tencent devcloud)
+// print a banner line such as `authz success` onto stdout from the remote
+// login shell before the command runs. Every value-parse in the shell reads
+// `remoteRun`'s lines, so instead of teaching each parse site to skip an
+// unknown banner, remoteRun wraps the command in these unique markers and
+// returns only the payload between them. Random per process so a command's own
+// output can never collide.
+const PAYLOAD_BEGIN = `__DSH_PAYLOAD_BEGIN_${randomUUID().replace(/-/g, '')}__`
+const PAYLOAD_END = `__DSH_PAYLOAD_END_${randomUUID().replace(/-/g, '')}__`
 
 /** Probe a URL once; `isDsh` checks for the boot marker in the served HTML. */
 function probeOnce(url) {
@@ -65,6 +76,45 @@ function pidAlive(pid) {
   } catch (error) {
     return error.code === 'EPERM'
   }
+}
+
+/**
+ * Parse the loopback port out of a service URL. Returns 0 when the URL has no
+ * usable port, so callers can skip lsof probing rather than guess a port.
+ */
+function urlPort(url) {
+  try {
+    const port = Number(new URL(url).port)
+    return Number.isInteger(port) && port > 0 ? port : 0
+  } catch {
+    return 0
+  }
+}
+
+/**
+ * Resolve the real PID listening on a local loopback port, falling back to
+ * `lsof` when the state file's recorded pid has gone stale (e.g. an
+ * externally-started service the shell adopted but whose state was never
+ * updated). Returns 0 when nothing answers or `lsof` is unavailable.
+ */
+async function findListeningPid(port) {
+  if (!Number.isInteger(port) || port <= 0) return 0
+  const candidates = ['/usr/sbin/lsof', '/usr/bin/lsof', 'lsof']
+  for (const bin of candidates) {
+    try {
+      const result = await runCommand({
+        cmd: bin,
+        args: ['-t', `-iTCP:${port}`, '-sTCP:LISTEN'],
+        timeoutMs: 5000,
+      })
+      if (result.code !== 0) continue
+      const pid = Number((result.lines[0] || '').trim())
+      if (Number.isInteger(pid) && pid > 0) return pid
+    } catch {
+      // Try the next candidate.
+    }
+  }
+  return 0
 }
 
 /** Normalize a version fingerprint into a shell/JSON-safe token. */
@@ -126,6 +176,37 @@ class ConnectionManager extends EventEmitter {
     // port for a local instance, or the fallback forward port for a tunnel.
     if (settings.mode === 'ssh') return `http://127.0.0.1:${this.localPort ?? settings.ssh.localPort}`
     return `http://127.0.0.1:${this.localPort ?? settings.local.port}`
+  }
+
+  /**
+   * The harness's own package version (apps/cli package.json `version`), read
+   * from the checkout the shell manages — locally from disk, remotely over
+   * ssh. Best-effort: returns '' on any read/parse failure. `host.describe`
+   * is deliberately NOT used because its `version` field is an upstream
+   * placeholder (`0.0.1`) that does not track the real package version.
+   */
+  async hostVersion() {
+    const settings = this.getSettings()
+    try {
+      if (settings.mode === 'local') {
+        const manifest = JSON.parse(fs.readFileSync(
+          path.join(settings.local.repoDir, 'apps', 'cli', 'package.json'), 'utf8',
+        ))
+        return typeof manifest.version === 'string' ? manifest.version : ''
+      }
+      const result = await this.remoteRun(
+        settings.ssh.host,
+        `cat ${remotePath(settings.ssh.remoteRepoDir)}/apps/cli/package.json 2>/dev/null || echo __none__`,
+        { timeoutMs: 15_000 },
+      )
+      if (result.code !== 0) return ''
+      const text = result.lines.join('\n')
+      if (text.includes('__none__')) return ''
+      const manifest = JSON.parse(text)
+      return typeof manifest.version === 'string' ? manifest.version : ''
+    } catch {
+      return ''
+    }
   }
 
   setStatus(patch) {
@@ -204,6 +285,8 @@ class ConnectionManager extends EventEmitter {
       `git -C ${dir} rev-parse HEAD 2>/dev/null || stat -f %m ${dir}/apps/cli/lib/bin.js 2>/dev/null || echo unknown`,
       { timeoutMs: 15_000 },
     )
+    // remoteRun already isolates the payload from any gateway banner, so the
+    // first non-empty line is the version token the command reported.
     const line = result.lines.map(text => text.trim()).find(Boolean)
     return versionToken(line || 'unknown')
   }
@@ -253,15 +336,37 @@ class ConnectionManager extends EventEmitter {
   async remoteRun(target, inner, { timeoutMs, onLine } = {}) {
     const tools = this.resolvedTools()
     const shellPath = await this.remoteLoginShell(target)
-    // The inner command is single-quoted for the remote shell that sshd
+    // Wrap the command in unique markers so any login-shell/gateway banner
+    // (authz success etc.) printed BEFORE the command stays outside the
+    // payload. `inner` runs in a subshell so any `exit` inside it only ends
+    // the subshell, keeping the trailing END marker and the real exit code
+    // (`__dsh_rc=$?`) intact for callers' `code !== 0` checks.
+    const wrapped = `echo ${PAYLOAD_BEGIN}; ( ${inner} ); __dsh_rc=$?; echo ${PAYLOAD_END}; exit $__dsh_rc`
+    // The wrapped command is single-quoted for the remote shell that sshd
     // invokes, so `-c` receives the whole command as one argument.
-    const command = `${shellPath} -l -c ${shellQuote(inner)}`
-    return runCommand({
+    const command = `${shellPath} -l -c ${shellQuote(wrapped)}`
+    let inPayload = false
+    const filteredOnLine = onLine === undefined ? undefined : line => {
+      if (line === PAYLOAD_END) {
+        inPayload = false
+        return
+      }
+      if (inPayload) {
+        onLine(line)
+        return
+      }
+      if (line === PAYLOAD_BEGIN) inPayload = true
+    }
+    const result = await runCommand({
       cmd: tools.ssh,
       args: sshCommandArgs(target, command),
       timeoutMs,
-      onLine,
+      onLine: filteredOnLine,
     })
+    const begin = result.lines.indexOf(PAYLOAD_BEGIN)
+    const end = begin >= 0 ? result.lines.indexOf(PAYLOAD_END, begin + 1) : -1
+    const lines = begin >= 0 && end > begin ? result.lines.slice(begin + 1, end) : result.lines
+    return { ...result, lines }
   }
 
   async remoteLoginShell(target) {
@@ -318,6 +423,7 @@ class ConnectionManager extends EventEmitter {
     this.localPort = null
     this.remotePort = null
     this.localVersion = null
+    this.machineId = null
     this.stopOwnedChildren()
     this.releaseReservedPorts()
     this.setStatus({ state: 'connecting', mode: settings.mode, url: this.url(), detail: '正在连接…', serviceOwner: 'none' })
@@ -441,8 +547,33 @@ class ConnectionManager extends EventEmitter {
       this.localRetries = 0
       return
     }
-    const probe = await probeOnce(this.url())
+    const url = this.url()
+    const probe = await probeOnce(url)
     if (probe.up) {
+      // An externally-owned service (the shell adopted an already-listening
+      // port) still needs a restart for plugin/preset updates to take effect:
+      // the host process must reload its profile. Resolve the real listener —
+      // the state file's pid first, then `lsof` on the ACTUAL url port (not
+      // the configured default) when that pid has gone stale — and start a
+      // fresh owned service. Deriving the port from the URL that just answered
+      // keeps the probe and the kill on the same endpoint even when the
+      // service runs on an OS-chosen port.
+      const state = this.readLocalState(settings)
+      let pid = state !== null && Number.isInteger(state.pid) ? state.pid : 0
+      if (!pidAlive(pid)) pid = await findListeningPid(urlPort(url))
+      if (pidAlive(pid)) {
+        this.log(`重启本地服务（外部托管，pid ${pid}）…`)
+        try {
+          process.kill(pid, 'SIGTERM')
+        } catch {
+          // Already gone; fall through to a fresh spawn.
+        }
+        this.localPort = null
+        await this.spawnLocalService(settings, 0, version)
+        await waitReady(this.url())
+        this.localRetries = 0
+        return
+      }
       this.log('服务由外部进程托管，跳过重启')
       return
     }
@@ -650,6 +781,46 @@ class ConnectionManager extends EventEmitter {
 
   // ── ssh mode ──────────────────────────────────────────────────────────────
 
+  /**
+   * Identify the remote machine the shell is connecting to. The identity is a
+   * UUID persisted at `~/.dsh/.desktop-machine-id` on the remote: every ssh
+   * alias that reaches the same user's home (e.g. `ubuntu` over LAN and
+   * `home4` over the public network) reads the same id, so the shell can merge
+   * them into one terminal regardless of which network entry was used. A
+   * missing file is created on first contact.
+   * @param {string} target - the ssh destination alias/string.
+   * @returns {Promise<string>} the remote machine id.
+   */
+  /**
+   * Read the remote machine id WITHOUT creating it. `ensureRemoteMachineId`
+   * reuses this so an id is never minted on a machine that already has one.
+   * @param {string} target - the ssh destination alias/string.
+   * @returns {Promise<string|undefined>} the machine id, or undefined when absent.
+   */
+  async readRemoteMachineId(target) {
+    const read = await this.remoteRun(
+      target,
+      'cat "$HOME"/.dsh/.desktop-machine-id 2>/dev/null || echo __none__',
+      { timeoutMs: 15_000 },
+    )
+    return read.lines
+      .map(line => line.trim())
+      .find(line => line !== '__none__' && /^[0-9a-fA-F-]{8,}$/.test(line))
+  }
+
+  async ensureRemoteMachineId(target) {
+    const existing = await this.readRemoteMachineId(target)
+    if (existing !== undefined) return existing
+    const id = randomUUID()
+    const write = await this.remoteRun(
+      target,
+      `mkdir -p "$HOME"/.dsh && printf '%s' ${shellQuote(id)} > "$HOME"/.dsh/.desktop-machine-id`,
+      { timeoutMs: 15_000 },
+    )
+    if (write.code !== 0) throw new Error(`无法在远端写入终端身份标记：${write.lines.join('\n')}`)
+    return id
+  }
+
   async connectSsh(settings) {
     const tools = this.resolvedTools()
     const target = settings.ssh.host
@@ -668,11 +839,15 @@ class ConnectionManager extends EventEmitter {
         `SSH 连接失败（${target}）。请确认：1) 已配置免密登录（ssh-copy-id 后可用 ssh ${target} 直连）；2) 主机可达。${lanHint}`,
       )
     }
+    this.machineId = await this.ensureRemoteMachineId(target)
+    this.log(`已识别终端身份 ${this.machineId.slice(0, 8)}`)
     await this.ensureRemoteRepo(settings)
     const version = await this.serviceVersion(settings)
     const state = await this.readRemoteState(settings)
 
     // Reuse a previously started remote service when its build still matches.
+    // This fast path is lock-free: reusing an already-running service never
+    // spawns anything, so it cannot orphan a process.
     if (state !== null && state.version === version) {
       this.remotePort = state.port
       await this.startTunnelOnFreePort(settings, state.port)
@@ -685,16 +860,25 @@ class ConnectionManager extends EventEmitter {
       // Tunnel is up but nothing dsh answers behind it: fall through to (re)start.
     }
 
-    // Reap a stale/outdated remote service before starting a fresh one.
-    if (state !== null && Number.isInteger(state.pid)) {
-      this.log(`清理旧版/残留远端服务（pid ${state.pid}）…`)
-      await this.remoteRun(target, `kill ${state.pid} 2>/dev/null || true`, { timeoutMs: 15_000 })
-      await sleep(800)
-    }
+    // The reap→launch→write-state sequence is serialized under a remote lock
+    // so two shells (e.g. two aliases reaching the same machine concurrently)
+    // cannot both decide to start and leave one service orphaned. Inside the
+    // lock the state is re-read: a peer may have already started a matching
+    // service, in which case it is adopted instead of started again.
+    const remoteRun = (host, inner, options) => this.remoteRun(host, inner, options)
+    const remotePort = await runtimeStore.withRemoteLock(
+      settings,
+      remoteRun,
+      `service-${settings.ssh.host}`,
+      async () => {
+        const fresh = await this.readRemoteState(settings)
+        if (fresh !== null && fresh.version === version) return fresh.port
+        await this.reapRemoteService(settings, fresh ?? state)
+        return this.launchRemoteService(settings, 0, version)
+      },
+      { timeoutMs: 90_000 },
+    )
 
-    // Start the remote service with `--port 0`; the CLI reports the real
-    // loopback port, which removes remote-port probing entirely.
-    const remotePort = await this.launchRemoteService(settings, 0, version)
     this.remotePort = remotePort
     await this.startTunnelOnFreePort(settings, remotePort)
     const url = this.url()
@@ -705,6 +889,41 @@ class ConnectionManager extends EventEmitter {
       detail: ready.isDsh ? `已连接（${displayLabel(target)}，隧道转发）` : '隧道已建立，但该端口响应的可能不是 DeepSeek Harness',
       serviceOwner: 'remote',
     })
+  }
+
+  /**
+   * Reap a stale/outdated remote service before starting a fresh one. The
+   * recorded pid is authoritative first; when it has gone stale (the service
+   * died or was started by another shell without updating the state), fall
+   * back to `lsof` on the recorded port so a leftover listener is still
+   * reaped instead of becoming an orphan.
+   */
+  async reapRemoteService(settings, state) {
+    if (state === null || state === undefined) return
+    const target = settings.ssh.host
+    let pid = Number.isInteger(state.pid) ? state.pid : 0
+    const pidCheck = pid > 0
+      ? await this.remoteRun(target, `kill -0 ${pid} 2>/dev/null && echo alive || echo dead`, { timeoutMs: 15_000 })
+      : { code: 0, lines: ['dead'] }
+    if (pidCheck.code === 0 && pidCheck.lines.includes('alive')) {
+      this.log(`清理旧版/残留远端服务（pid ${pid}）…`)
+      await this.remoteRun(target, `kill ${pid} 2>/dev/null || true`, { timeoutMs: 15_000 })
+      await sleep(800)
+      return
+    }
+    if (Number.isInteger(state.port) && state.port > 0) {
+      const lsof = await this.remoteRun(
+        target,
+        `lsof -t -iTCP:${state.port} -sTCP:LISTEN 2>/dev/null | head -1 || echo 0`,
+        { timeoutMs: 15_000 },
+      )
+      const listenerPid = Number((lsof.lines[0] ?? '0').trim())
+      if (Number.isInteger(listenerPid) && listenerPid > 0) {
+        this.log(`清理残留远端服务（端口 ${state.port}，pid ${listenerPid}）…`)
+        await this.remoteRun(target, `kill ${listenerPid} 2>/dev/null || true`, { timeoutMs: 15_000 })
+        await sleep(800)
+      }
+    }
   }
 
   async ensureRemoteRepo(settings) {
@@ -755,6 +974,28 @@ class ConnectionManager extends EventEmitter {
     return { code: 0, lines: [] }
   }
 
+  /**
+   * Reap a leftover local tunnel from a previous shell run that was force-killed
+   * (a detached `ssh -N -L` never exits on its own). The tunnel's pid is the one
+   * persisted in the tunnel state file; when that pid is still alive it is
+   * killed and the stale state dropped.
+   */
+  async reapStaleTunnel(settings) {
+    const state = runtimeStore.readLocalTunnelState(settings)
+    if (state === null) return
+    if (!pidAlive(state.pid)) {
+      runtimeStore.removeLocalTunnelState(settings)
+      return
+    }
+    this.log(`清理残留 SSH 隧道（pid ${state.pid}）…`)
+    try {
+      process.kill(state.pid, 'SIGTERM')
+    } catch {
+      // Already gone.
+    }
+    runtimeStore.removeLocalTunnelState(settings)
+  }
+
   /** Pick the configured local forward port when free, else the next free port. */
   async startTunnelOnFreePort(settings, remotePort) {
     // Reap stale tunnels before picking a port so a forgotten earlier spawn
@@ -764,6 +1005,8 @@ class ConnectionManager extends EventEmitter {
         this.killChild(child)
       }
     }
+    // Also reap a tunnel left behind by a previous force-killed shell.
+    await this.reapStaleTunnel(settings)
     const localPort = await this.acquireLocalPort(settings.ssh.localPort)
     this.localPort = localPort
     try {
@@ -802,6 +1045,9 @@ class ConnectionManager extends EventEmitter {
     service.child.on('close', (code, signal) => {
       this.tunnelChildren.delete(service.child)
       if (this.tunnelChild === service.child) this.tunnelChild = null
+      // The tunnel is gone; drop its persisted pid so a future reap never
+      // targets a recycled pid.
+      if (settings.mode === 'ssh') runtimeStore.removeLocalTunnelState(settings)
       if (this.stopped) return
       if (service.child._dshStopRequested) return
       if (this.status.state !== 'connecting' && this.status.state !== 'ready') return
@@ -829,6 +1075,13 @@ class ConnectionManager extends EventEmitter {
       }
       if (await tcpProbe(localPort)) {
         this.tunnelRetries = 0
+        // Persist the live tunnel's pid so a later force-killed shell can
+        // still reap this detached `ssh -N -L` on its next run.
+        runtimeStore.writeLocalTunnelState(settings, {
+          pid: service.child.pid,
+          localPort,
+          remotePort: rport,
+        })
         return
       }
       await sleep(300)
