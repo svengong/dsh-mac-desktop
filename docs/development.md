@@ -39,7 +39,7 @@ DSH_DESKTOP_USER_DATA=~/tmp/dsh-shell-dev npm start
 ```
 src/
 ├── main.js           主进程：userData 隔离、窗口/会话生命周期、IPC、菜单/托盘装配
-├── settings.js       设备级设置归一化与原子保存；默认 dshHome 和端口
+├── settings.js       设备级设置归一化与原子保存；默认 dshHome
 ├── window-manager.js 窗口 bounds/active-view/last-active 持久化与恢复
 ├── runtime-store.js  local/remote runtime state、`dsh web` URL 解析、原子 clone/build 锁
 ├── ports.js          SSH 本地转发端口的进程内预留与 TCP 探测
@@ -50,13 +50,12 @@ src/
 ├── ssh.js            ssh config 解析、目标解析、quoting、remote path
 ├── tools.js          node/pnpm 探测（engine 过滤）与干净子进程环境
 ├── runner.js         runCommand / spawnService（独立进程组）
-├── dialogs.js        SetupDialog（嵌入式 WebContentsView）与 ProgressDialog
+├── dialogs.js        SetupDialog（嵌入式 WebContentsView）
 ├── labels.js         全局一致的 DSH-[终端] 标签
 ├── menu.js / tray.js / windows.js  macOS 菜单、托盘、窗口呈现
 └── ui/
     ├── shell.html / shell.css / shell-preload.js   主窗口 46px 壳边框
-    ├── settings.html / dialog-preload.js           连接/更新/高级嵌入式面板
-    └── progress.html                               初始化/更新进度窗口
+    └── settings.html / dialog-preload.js           连接/更新嵌入式面板
 ```
 
 数据流：
@@ -75,7 +74,7 @@ BrowserWindow (shell.html 边框)
 ## 3. 多窗口模型
 
 - `workspaces`：`Map<id, workspace>`，一个 BrowserWindow 一个 workspace。
-- `sessions`：`Map<deviceKey, session>`。`deviceKey` 为 `local` 或 `ssh:<host>`。
+- `sessions`：`Map<deviceKey, session>`。`deviceKey` 为 `local`、`ssh:<host>`，或连接后归一出的 `machine:<id>`（同一远程机器经不同 ssh 别名接入时合并）。
 - 同设备窗口共享 session；窗口关闭只是隐藏，workspace 持续存活，显式退出时才销毁。
 - 窗口切换设备调用 `attachWorkspace`：旧 SSH session 在最后一个窗口离开后停止；
   `local` session 常驻以支持多开。
@@ -117,8 +116,7 @@ BrowserWindow (shell.html 边框)
 - `connect()` 重置本地引用、杀旧子进程、释放旧预留，然后 `connectLocal/connectSsh`。
 - 失败触发 `connect-failed`，main 最多自动重试 2 次（10s/20s）；session 被 stop 后定时器作废。
 - ready 后执行一次性启动自动检查（按设备开关）。
-- 构建/更新期间禁止：退出、第二次构建/更新、重连、重置后端、保存连接设置。
-  判断函数为 `busySession()`（全局扫描 updater.busy / updateManager.busy）。
+- 构建/更新按设备互斥：同一终端的第二次构建/更新、重连、重置后端、保存连接设置被 `isSessionBusy(session)` 拦截；不同终端的构建互不干扰。
 
 ## 6. 更新管理
 
