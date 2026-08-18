@@ -168,6 +168,28 @@ https://example.com/hello-plugin.tgz
 npm 插件与 Git 预设的实际安装通过 `withComponentLock` 串行化（本地/远端锁），
 避免第二个壳实例同时写同一 profile 或预设目录。
 
+### 6.4 更新通道与生命周期（Phase 1–3）
+
+更新按以下顺序决策（本地 + 官方仓库 URL 时）：
+
+1. **官方产物优先**（Phase 2）：`artifact.js` 先做 registry 预检——最新版本 +
+   依赖链完整性（`@deepseek-ai/dsh-frontend` 曾 404，链断时**自动降级源码构建**
+   并给出明确原因）。可用时 `npm install --prefix` 装进 `runtime/<version>`
+   （npm 布局 `node_modules/@deepseek-ai/dsh/lib/bin.js`），校验后原子切换
+   `current`；源码构建（git worktree）成为 fork/离线场景的 fallback。
+2. **detached worker 执行**（Phase 3）：菜单「更新并重启」与初始化在本地产物
+   可用时改由 `src/update-worker.js` 独立进程执行（`runner.spawnDetached`，
+   不注册进进程登记表——壳退出不会杀它）。壳轮询 `runtime/update-status.json`
+   把阶段/日志推给 UI；`done` 后由壳重启服务（或下次连接按版本不匹配自动重启）。
+3. **意图可恢复**（Phase 1）：开始更新前写 `update-pending.json`，正常结束才清除；
+   启动时 `resumePendingUpdate()` 检测残留——worker 还在跑则接管观察，已完成则
+   提示，被打断则询问「继续/放弃」后重跑。
+
+两种运行时布局由 `src/runtime-layout.js` 统一解析（`runtimeLayout`/`runtimeBin`/
+`runtimeIsBuilt`/`npmArtifactVersion`），任何 bin 查找不得再假设仓库布局。
+更新管理面板内的 Harness 行更新走壳内管线（实时日志），菜单/初始化走 worker，
+两者共享同一 artifact 安装原语。
+
 ## 7. macOS UI 约定
 
 - 主窗口：`titleBarStyle: 'hiddenInset'`、`trafficLightPosition: {x:18,y:15}`，

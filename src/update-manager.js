@@ -316,6 +316,19 @@ class UpdateManager {
     const row = this.component('harness')
     this.patchRow('harness', { status: 'checking', summary: 'git fetch 远端更新信息…', error: '' })
     const facts = await this.harnessUpdater.check()
+    // Official-artifact verdict (local + official repo): no git facts at all,
+    // the harness row mirrors the registry state instead of a branch.
+    if (facts.artifact !== undefined && facts.artifact.ok && facts.updateAvailable !== undefined) {
+      this.patchRow('harness', {
+        status: 'ready',
+        current: facts.currentNpm !== '' ? `v${facts.currentNpm}` : '未安装',
+        latest: `v${facts.artifact.version}`,
+        updateAvailable: facts.updateAvailable,
+        summary: facts.summary,
+        error: '',
+      })
+      return
+    }
     if (!facts.gitRepo || facts.upstream === '') {
       this.patchRow('harness', {
         status: 'error',

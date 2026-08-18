@@ -246,6 +246,7 @@ class SettingsStore {
 
 module.exports = {
   DEV_DEFAULT_DSH_HOME,
+  DEFAULT_LOCAL_REPO_URL,
   DEFAULTS,
   defaultDevice,
   deviceKeyOf,

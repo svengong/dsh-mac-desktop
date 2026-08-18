@@ -31,7 +31,7 @@ const {
 } = require('./settings')
 const { terminalLabel } = require('./labels')
 const { resolveTools } = require('./tools')
-const { runCommand, killActiveChildren } = require('./runner')
+const { runCommand, killActiveChildren, spawnDetached } = require('./runner')
 const { sshCommandArgs, parseTarget, listSshHosts, isSshConfigAlias } = require('./ssh')
 const { ConnectionManager } = require('./connection')
 const { compareVersions } = require('./components')
@@ -195,6 +195,7 @@ function sessionFor(deviceKey) {
     autoReconnectTimer: null,
     autoReconnectAttempts: 0,
     connecting: false,
+    workerPollTimer: null,
   }
   // `key` mutates when the ssh alias is merged into its machine identity after
   // connect, so every consumer reads the CURRENT key instead of the captured
@@ -233,6 +234,216 @@ function stopSession(session) {
   session.autoReconnectTimer = null
   session.connection.stop()
   if (session.key !== 'local') sessions.delete(session.key)
+}
+
+// ── official-artifact update worker (Phase 2/3) ─────────────────────────────
+
+/** Whether a local PID is alive (signal 0 probes without signalling). */
+function pidAliveLocal(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return error.code === 'EPERM'
+  }
+}
+
+/**
+ * Spawn the detached update worker for a local official-artifact update and
+ * start observing its status file. The worker survives shell quit; on the
+ * next launch `resumePendingUpdate` picks the outcome back up.
+ */
+function spawnUpdateWorker(session, view, version) {
+  if (session.workerPollTimer !== null) return
+  const root = runtimeStore.localRuntimeRoot(view)
+  const taskPath = path.join(root, 'update-task.json')
+  try {
+    fs.mkdirSync(root, { recursive: true })
+    fs.writeFileSync(taskPath, JSON.stringify({
+      dshHome: view.local.dshHome,
+      repoDir: view.local.repoDir,
+      repoUrl: view.local.repoUrl,
+      toolPaths: view.toolPaths,
+      version,
+      registryUrl: view.update?.registryUrl ?? '',
+    }, null, 2))
+    runtimeStore.writePendingUpdate(view, { intent: 'artifact', version })
+  } catch (error) {
+    routeSessionLine(session, `✗ 无法准备更新任务：${error.message}`)
+    return
+  }
+  routeSessionLine(session, `启动后台更新任务：官方预构建版 v${version}（壳可正常关闭，任务会继续完成）`)
+  spawnDetached({
+    cmd: process.execPath,
+    args: [path.join(__dirname, 'update-worker.js'), taskPath],
+  })
+  session.workerPollTimer = setInterval(() => observeUpdateWorker(session), 800)
+  session.workerPollTimer.unref()
+}
+
+/** Poll the worker status file and mirror its progress into the session UI. */
+function observeUpdateWorker(session) {
+  const view = settingsViewFor(session.key)
+  const status = runtimeStore.readUpdateStatus(view)
+  if (status === null) return
+  const live = Number.isInteger(status.pid) && pidAliveLocal(status.pid)
+  const logTail = Array.isArray(status.logTail) ? status.logTail : []
+  const lastCount = session.workerLogCount ?? 0
+  if (logTail.length > lastCount) {
+    for (const line of logTail.slice(lastCount)) routeSessionLine(session, line)
+    session.workerLogCount = logTail.length
+  }
+  const phase = String(status.phase || '')
+  if (phase === 'done' || phase === 'error' || (phase !== '' && !live)) {
+    stopObservingWorker(session)
+    if (phase === 'done') {
+      routeSessionLine(session, `官方产物 v${status.version} 已就绪，正在重启服务…`)
+      runtimeStore.clearUpdateStatus(view)
+      for (const workspace of session.windows) setProgress(workspace, { title: '更新完成', status: '正在重启服务…' })
+      session.connection.restartService().then(() => {
+        for (const workspace of session.windows) setProgress(workspace, null)
+        reloadSessionWindows(session)
+        routeSessionLine(session, '服务已重启，使用新版本。')
+      }).catch(error => {
+        for (const workspace of session.windows) setProgress(workspace, null)
+        routeSessionLine(session, `✗ 重启服务失败：${String(error.message || error)}`)
+      })
+    } else if (phase === 'error') {
+      routeSessionLine(session, `✗ 官方产物更新失败：${status.error || '未知错误'}`)
+      runtimeStore.clearUpdateStatus(view)
+      for (const workspace of session.windows) {
+        setProgress(workspace, {
+          title: '更新失败（官方产物）',
+          status: status.error || '未知错误',
+          actions: [
+            { label: '重试', name: 'run-update', primary: true },
+            { label: '放弃', name: 'dismiss-progress' },
+          ],
+        })
+      }
+    } else {
+      routeSessionLine(session, '更新任务进程已退出且未完成，可稍后重试。')
+      runtimeStore.clearUpdateStatus(view)
+    }
+    return
+  }
+  const phaseText = phase === 'starting' ? '启动中…' : phase === 'downloading' ? `下载官方预构建版 v${status.version}…` : phase === 'installing' ? '安装中…' : phase === 'switching' ? '原子切换运行时…' : '进行中…'
+  for (const workspace of session.windows) {
+    setProgress(workspace, { title: '更新（官方产物）', status: phaseText })
+  }
+}
+
+function stopObservingWorker(session) {
+  if (session.workerPollTimer !== null) {
+    clearInterval(session.workerPollTimer)
+    session.workerPollTimer = null
+  }
+  session.workerLogCount = 0
+}
+
+/**
+ * Actionable failure diagnostics for a failed build/update: disk space,
+ * toolchain availability, mode — the things that turn a dead-end retry
+ * into a decision (free disk, fix toolchain, switch source, use artifact).
+ */
+async function diagnoseFailure(session) {
+  const lines = []
+  const view = settingsViewFor(session.key)
+  try {
+    const dshHome = runtimeStore.expandHome(view.local.dshHome)
+    const df = await runCommand({ cmd: '/bin/df', args: ['-k', dshHome] })
+    const row = (df.lines[1] || '').split(/\s+/)
+    const availBlocks = Number(row[3])
+    lines.push(`磁盘空间：${Number.isFinite(availBlocks) ? `${(availBlocks / 1024 / 1024).toFixed(1)} GB 可用` : '未知'}`)
+  } catch {
+    lines.push('磁盘空间：未知')
+  }
+  const tools = resolveTools(view)
+  lines.push(`node：${tools.node || '未找到'}`)
+  lines.push(`pnpm：${tools.pnpm || '未找到'}`)
+  lines.push(view.mode === 'ssh' ? `模式：SSH ${view.ssh.host}` : '模式：本地')
+  lines.push('提示：完整日志已写入日志文件，可从「更新管理」查看。')
+  return lines.join('\n')
+}
+
+/**
+ * Decide whether an update should go through the detached artifact worker.
+ * Returns true when a worker was started (or already running).
+ */
+async function startArtifactUpdateIfPossible(session) {
+  if (session.key !== 'local') return false
+  if (session.workerPollTimer !== null) return true
+  const view = settingsViewFor('local')
+  if (!session.updater.preferArtifact(view)) return false
+  const query = await session.updater.queryArtifact(view)
+  if (!query.ok) {
+    routeSessionLine(session, query.reason)
+    return false
+  }
+  spawnUpdateWorker(session, view, query.version)
+  return true
+}
+
+/**
+ * On launch, pick up an update intent the previous run left behind: a worker
+ * that finished while the shell was gone, a worker that died mid-download,
+ * or an in-shell source pipeline that was killed on quit.
+ */
+function resumePendingUpdate() {
+  const view = settingsViewFor('local')
+  const pending = runtimeStore.readPendingUpdate(view)
+  const status = runtimeStore.readUpdateStatus(view)
+  if (pending === null && status === null) return
+  const session = sessionFor('local')
+  const liveWorker = status !== null && Number.isInteger(status.pid) && pidAliveLocal(status.pid)
+  const phase = status === null ? '' : String(status.phase || '')
+  setTimeout(() => {
+    if (pending !== null && liveWorker) {
+      session.workerLogCount = 0
+      session.workerPollTimer = setInterval(() => observeUpdateWorker(session), 800)
+      session.workerPollTimer.unref()
+      routeSessionLine(session, `检测到后台更新仍在进行（v${pending.version}），已接管观察。`)
+      dialog.showMessageBox({ type: 'info', title: '更新进行中', message: `官方产物 v${pending.version} 仍在后台更新，完成后会自动重启服务。` })
+      return
+    }
+    if (status !== null && phase === 'done') {
+      runtimeStore.clearPendingUpdate(view)
+      runtimeStore.clearUpdateStatus(view)
+      dialog.showMessageBox({ type: 'info', title: '更新已完成', message: `上次更新已完成：官方预构建版 v${status.version}。重新连接后生效。` })
+      return
+    }
+    if (status !== null && phase === 'error') {
+      runtimeStore.clearPendingUpdate(view)
+      runtimeStore.clearUpdateStatus(view)
+      dialog.showMessageBox({ type: 'error', title: '更新失败', message: `上次官方产物更新失败：${status.error || '未知错误'}`, buttons: ['重试', '放弃'], defaultId: 0 }).then(result => {
+        if (result.response === 0) {
+          session.updater.queryArtifact(view).then(query => {
+            if (query.ok) spawnUpdateWorker(session, view, query.version)
+          })
+        }
+      })
+      return
+    }
+    if (pending !== null) {
+      const message = pending.intent === 'artifact'
+        ? `上次官方产物更新未完成（v${pending.version}）。继续下载安装？`
+        : `上次源码构建更新未完成（${pending.version || '目标版本未知'}）。继续？`
+      dialog.showMessageBox({ type: 'warning', title: '上次更新未完成', message, buttons: ['继续', '放弃'], defaultId: 0 }).then(result => {
+        if (result.response !== 0) {
+          runtimeStore.clearPendingUpdate(view)
+          return
+        }
+        if (pending.intent === 'artifact') {
+          spawnUpdateWorker(session, view, pending.version)
+        } else {
+          session.updater.runPipeline({ includePull: true, toleratePullFailure: true }).then(outcome => {
+            if (outcome.ok) reloadSessionWindows(session)
+          })
+        }
+      })
+    }
+  }, 1500)
 }
 
 /** Send one session line to the file and to every open panel of its windows. */
@@ -1001,6 +1212,13 @@ async function startWithSettings(workspace) {
       return
     }
     setWorkspaceView(workspace, 'harness')
+    // Phase 2/3: official artifact first — no checkout, no build, and the
+    // worker survives shell quit.
+    const usedWorker = await startArtifactUpdateIfPossible(session)
+    if (usedWorker) {
+      setProgress(workspace, { title: '初始化（官方产物）', status: '正在后台下载官方预构建版…' })
+      return
+    }
     setProgress(workspace, {
       title: '初始化构建',
       status: '首次使用：确保仓库 → 工具链引导 → pnpm install → pnpm run build → 启动服务',
@@ -1024,6 +1242,11 @@ async function startWithSettings(workspace) {
 async function runInit(workspace) {
   const session = workspace.session
   if (!canStartBusyTask(session)) return
+  const usedWorker = await startArtifactUpdateIfPossible(session)
+  if (usedWorker) {
+    setProgress(workspace, { title: '初始化（官方产物）', status: '正在后台下载官方预构建版…' })
+    return
+  }
   setProgress(workspace, { title: '初始化构建', status: '执行中…' })
   const outcome = await session.updater.runPipeline({ includePull: true, toleratePullFailure: true })
   if (outcome.ok) {
@@ -1177,6 +1400,13 @@ const actions = {
   async updateAndRestart(workspace) {
     const target = withWorkspace(workspace)
     if (!canStartBusyTask(target.session)) return target
+    // Phase 2/3: local official-artifact updates go through the detached
+    // worker — no source checkout, no pnpm build, survives shell quit.
+    const usedWorker = await startArtifactUpdateIfPossible(target.session)
+    if (usedWorker) {
+      setProgress(target, { title: '更新并重启（官方产物）', status: '正在后台下载官方预构建版…' })
+      return target
+    }
     setProgress(target, { title: '更新并重启', status: '执行中…' })
     const outcome = await target.session.updater.runPipeline({ includePull: true })
     if (outcome.ok) {
@@ -1185,10 +1415,15 @@ const actions = {
       reloadSessionWindows(target.session)
       setProgress(target, null)
     } else {
+      const diagnosis = await diagnoseFailure(target.session)
       setProgress(target, {
-        title: '更新并重启',
-        status: '更新失败。可修复后重试（日志已写入文件）。',
-        actions: [{ label: '重试', name: 'run-update', primary: true }],
+        title: '更新失败',
+        status: `${String(outcome.error?.message || outcome.error)}\n\n${diagnosis}`,
+        actions: [
+          { label: '重试', name: 'run-update', primary: true },
+          { label: '改用官方产物', name: 'run-artifact' },
+          { label: '放弃', name: 'dismiss-progress' },
+        ],
       })
     }
     refreshMenu()
@@ -1488,6 +1723,29 @@ function registerIpc() {
       case 'run-update':
         void actions.updateAndRestart(workspace)
         break
+      case 'run-artifact':
+        void (async () => {
+          const view = settingsViewFor(workspace.deviceKey)
+          if (workspace.session.key !== 'local') {
+            routeSessionLine(workspace.session, '官方产物仅支持本地模式（SSH 走远端源码构建）。')
+            return
+          }
+          const query = await workspace.session.updater.queryArtifact(view)
+          if (!query.ok) {
+            routeSessionLine(workspace.session, query.reason)
+            return
+          }
+          if (workspace.session.workerPollTimer !== null) {
+            routeSessionLine(workspace.session, '官方产物更新已在进行中。')
+            return
+          }
+          spawnUpdateWorker(workspace.session, view, query.version)
+          setProgress(workspace, { title: '安装官方产物', status: `后台下载官方预构建版 v${query.version}…` })
+        })()
+        break
+      case 'dismiss-progress':
+        setProgress(workspace, null)
+        break
       default:
         return { ok: false, error: `未知动作：${name}` }
     }
@@ -1675,6 +1933,10 @@ if (!gotLock) {
       : firstView.ssh.host !== ''
     if (complete) startWithSettings(first)
     else setWorkspaceView(first, 'connection')
+
+    // Phase 1: pick up an update the previous run left unfinished (killed
+    // pipeline or a detached worker that finished while the shell was gone).
+    resumePendingUpdate()
 
     app.on('activate', (_event, hasVisibleWindows) => {
       flashDockIconPress()

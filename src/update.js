@@ -20,6 +20,10 @@ const path = require('node:path')
 const { runCommand } = require('./runner')
 const { remotePath, shellQuote, remoteToolchainPrefix } = require('./ssh')
 const { engineOk } = require('./tools')
+const { isNewerVersion } = require('./components')
+const { queryNpmArtifact, installNpmArtifact } = require('./artifact')
+const { NPM_PACKAGE, npmArtifactVersion } = require('./runtime-layout')
+const { DEFAULT_LOCAL_REPO_URL } = require('./settings')
 const runtimeStore = require('./runtime-store')
 
 const LONG_TIMEOUT_MS = 45 * 60 * 1000
@@ -129,8 +133,48 @@ class Updater {
     }
   }
 
+  /**
+   * Whether this device should prefer official npm artifacts over a source
+   * build: local mode AND an official (or default) repo URL. Custom forks
+   * keep the source pipeline.
+   */
+  preferArtifact(settings) {
+    if (settings.mode !== 'local') return false
+    const url = String(settings.local.repoUrl || '').trim()
+    return url === '' || url === DEFAULT_LOCAL_REPO_URL
+  }
+
+  /** Registry preflight for the official npm artifact (never throws). */
+  async queryArtifact(settings) {
+    return queryNpmArtifact({ registryUrl: settings.update?.registryUrl ?? '' })
+  }
+
+  /** The currently active npm-layout version token ('npm:...'), or ''. */
+  npmCurrentVersion(settings) {
+    const active = runtimeStore.localActiveRuntimeDir(settings)
+    if (active === null) return ''
+    return npmArtifactVersion(active)
+  }
+
   async check() {
     const settings = this.getSettings()
+    if (settings.mode === 'local' && this.preferArtifact(settings)) {
+      const artifact = await this.queryArtifact(settings)
+      if (artifact.ok) {
+        const current = this.npmCurrentVersion(settings)
+        const currentVersion = current.startsWith('npm:') ? current.slice(4) : ''
+        const updateAvailable = currentVersion === '' || isNewerVersion(artifact.version, currentVersion)
+        this.onLine(`官方产物：${NPM_PACKAGE}@${artifact.version}${currentVersion !== '' ? `（当前 ${currentVersion}）` : '（未安装）'}${updateAvailable ? '，可更新。' : '，已最新。'}`)
+        return {
+          gitRepo: false, branch: '', upstream: '', ahead: 0, behind: 0, dirty: false,
+          artifact, currentNpm: currentVersion,
+          updateAvailable,
+          summary: updateAvailable ? `官方预构建版 v${artifact.version} 可用` : `官方预构建版 v${artifact.version}（已最新）`,
+        }
+      }
+      this.onLine(artifact.reason)
+      this.onLine('回退到源码构建检查。')
+    }
     this.onLine('获取远端更新信息（git fetch）…')
     const fetch = settings.mode === 'ssh'
       ? await this.remoteGit(['fetch', '--quiet'], { timeoutMs: 120_000, onLine: line => this.onLine(line) })
@@ -301,6 +345,20 @@ class Updater {
       const remoteRun = (host, inner, options) => this.connection.remoteRun(host, inner, options)
       const executePipeline = async () => {
         let tools = this.connection.resolvedTools()
+        // Phase 2: official npm artifact first (local + official repo URL).
+        // The artifact pipeline installs a prebuilt CLI into a versioned dir,
+        // verifies it, and atomically switches `current` — no checkout, no
+        // pnpm build. It falls back to the source pipeline below when the
+        // registry chain is broken or the install fails.
+        if (settings.mode === 'local' && this.preferArtifact(settings)) {
+          const artifactOutcome = await this.artifactPipeline(settings)
+          if (artifactOutcome.choseArtifact) {
+            if (artifactOutcome.rolledBack) {
+              return { ok: false, error: artifactOutcome.error, rolledBack: true, rollbackVersion: artifactOutcome.rollbackVersion }
+            }
+            return { ok: true, artifact: true, version: artifactOutcome.version }
+          }
+        }
         await this.runStep('确保仓库就绪', () => settings.mode === 'ssh'
           ? this.connection.ensureRemoteRepo(settings)
           : this.connection.ensureLocalRepo(settings))
@@ -395,9 +453,89 @@ class Updater {
       }
       return { ok: false, error }
     } finally {
+      // A settled pipeline (ok or error) has no unfinished intent left;
+      // a killed process never reaches this point and leaves the pending
+      // file behind for next-launch resume.
+      try {
+        const current = this.getSettings()
+        if (current.mode === 'local') runtimeStore.clearPendingUpdate(current)
+      } catch {
+        // Best-effort.
+      }
       this.setBusy(false)
     }
   }
+
+  /**
+   * The official-artifact update path: registry preflight → npm install into
+   * a versioned runtime dir → verify → atomic `current` switch → restart.
+   * Returns {choseArtifact:false} when the artifact channel is unavailable so
+   * the caller falls back to the source pipeline.
+   */
+  async artifactPipeline(settings) {
+    const query = await this.queryArtifact(settings)
+    if (!query.ok) {
+      this.onLine(query.reason)
+      return { choseArtifact: false }
+    }
+    await this.ensureToolchain(settings)
+    const tools = this.connection.resolvedTools({ refresh: true })
+    if (tools.node === '') {
+      throw new Error('未找到兼容的 node（需 22.19+ 或 24+）。请安装 Node.js，或在「设置 → 高级」中手动指定 node 路径。')
+    }
+    const version = query.version
+    runtimeStore.writePendingUpdate(settings, { intent: 'artifact', version })
+    const active = runtimeStore.localActiveRuntimeDir(settings)
+    const currentNpm = this.npmCurrentVersion(settings)
+    if (currentNpm === `npm:${version}` && active !== null) {
+      this.onLine(`官方产物 v${version} 已安装，跳过下载。`)
+      return { choseArtifact: true, fresh: false, version }
+    }
+    const buildDir = runtimeStore.localVersionDir(settings, `npm:${version}`)
+    fs.rmSync(buildDir, { recursive: true, force: true })
+    fs.mkdirSync(buildDir, { recursive: true })
+    this.onLine(`下载官方预构建版 ${NPM_PACKAGE}@${version} → ${buildDir} …`)
+    let installed
+    try {
+      installed = await installNpmArtifact({
+        nodeBin: tools.node,
+        runtimeDir: buildDir,
+        spec: `${NPM_PACKAGE}@${version}`,
+        env: tools.env,
+        onLine: line => this.onLine(line),
+      })
+    } catch (error) {
+      fs.rmSync(buildDir, { recursive: true, force: true })
+      throw error
+    }
+    this.onLine(`已安装 ${installed}，原子切换 current …`)
+    const previous = runtimeStore.readLocalRootManifest(settings).current ?? null
+    const activated = runtimeStore.activateLocalRuntime(settings, `npm:${version}`)
+    this.onLine(`已切换到官方产物 ${activated}（上一版本：${previous ?? '无'}）。`)
+    try {
+      await this.runStep('重启服务', async () => {
+        await this.connection.restartService()
+        return { code: 0, lines: [] }
+      })
+    } catch (error) {
+      if (previous !== null && previous !== '') {
+        const rollbackVersion = runtimeStore.rollbackLocalRuntime(settings)
+        if (rollbackVersion !== null && rollbackVersion !== '') {
+          this.onLine(`新产物启动失败，已回滚到 ${rollbackVersion}，尝试恢复旧服务…`)
+          try {
+            await this.connection.restartService()
+            this.onLine('旧版本已恢复，本次更新未生效。')
+            return { choseArtifact: true, fresh: false, rolledBack: true, rollbackVersion, error }
+          } catch (rollbackError) {
+            this.onLine(`旧版本恢复失败：${String(rollbackError.message || rollbackError)}`)
+          }
+        }
+      }
+      throw error
+    }
+    return { choseArtifact: true, fresh: true, version }
+  }
+
   /**
    * Make the toolchain self-contained for the configured mode — the system
    * environment is never a dependency.
