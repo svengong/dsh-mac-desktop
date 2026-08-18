@@ -9,7 +9,6 @@ The shell is a **thin wrapper**: it loads a fixed URL and only ever runs git/pnp
 ## Highlights
 
 - **Silent resident deployment, local or SSH-remote** — connect and the harness **resident daemon (`dsh web`) is deployed and kept up to date automatically**: the shell clones (or pulls), builds, starts and restarts the service, and upgrades it to the current version on every reconnect — no shell access, no manual steps. The remote needs **no system toolchain**: a portable node and the repo-pinned pnpm are bootstrapped into `~/.dsh-tools` on the remote automatically.
-- **Self-contained and isolated** — its own dsh home (default `~/.dsh-dev`), clean child environment, per-device settings; never touches your real `~/.dsh` or the installed app's data.
 - **Multi-window, VS Code Remote style** — one window per workspace; windows on the same device share one backend; any window can switch to any SSH host.
 - **Update-friendly** — official prebuilt artifacts preferred, source builds as fallback; versioned runtimes with atomic switch and automatic rollback; updates survive shell quit (detached worker) and resume after a crash.
 
@@ -20,6 +19,7 @@ The shell is a **thin wrapper**: it loads a fixed URL and only ever runs git/pnp
 - **In-shell loading panel**: live status and logs while connecting/building/updating, with retry actions on failure.
 - **Menu-bar tray + Dock**: status, pending update count, and update management without opening a window.
 - **macOS-native UI**: workspace frame with embedded settings panels, light/dark appearance, per-device settings and update sources.
+- **Data isolation**: the harness runs under its own dsh home; your real `~/.dsh` and the installed app's data are never touched.
 - **Startup auto-check**: notifies when updates are available (deduplicated per launch, per device).
 
 ## Quick start
