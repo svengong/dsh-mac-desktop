@@ -65,10 +65,11 @@ const SHELL_FRAME_HEIGHT = 46
 
 /**
  * Keep development launches from touching the packaged app's settings/logs.
- * `electron .` and `npm start` use `~/.dsh-desktop` as the Electron userData
+ * `electron .` and `npm start` use `~/.dsh-dev` as the Electron userData
  * directory (the same home the local service already uses for its own DSH
  * state), so a shell under development can never overwrite the installed
- * DeepSeek Harness app's `~/Library/Application Support/DeepSeek Harness`.
+ * DeepSeek Harness app's `~/Library/Application Support/DeepSeek Harness`
+ * or the user's real `~/.dsh`. The directory is created on demand.
  * Packaged builds keep Electron's default unless DSH_DESKTOP_USER_DATA is set.
  */
 function configureUserData() {
@@ -81,7 +82,12 @@ function configureUserData() {
     return
   }
   if (!app.isPackaged) {
-    app.setPath('userData', path.join(os.homedir(), DEV_DEFAULT_DSH_HOME.replace(/^~\//, '')))
+    // Development convention: always use `~/.dsh-dev` (create it on demand)
+    // so the dev shell never collides with the user's `~/.dsh` or the
+    // installed app's `~/Library/Application Support/DeepSeek Harness`.
+    const devHome = path.join(os.homedir(), DEV_DEFAULT_DSH_HOME.replace(/^~\//, ''))
+    fs.mkdirSync(devHome, { recursive: true })
+    app.setPath('userData', devHome)
   }
 }
 
@@ -1506,7 +1512,7 @@ async function runSmoke() {
   })
   await check('dev userData isolation', () => {
     if (app.isPackaged) return
-    const expected = path.join(os.homedir(), '.dsh-desktop')
+    const expected = path.join(os.homedir(), DEV_DEFAULT_DSH_HOME.replace(/^~\//, ''))
     if (app.getPath('userData') !== expected) {
       throw new Error(`dev userData should be ${expected}, got ${app.getPath('userData')}`)
     }

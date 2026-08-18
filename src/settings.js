@@ -5,7 +5,7 @@
  *
  * The settings file lives in the Electron userData directory
  * (`~/Library/Application Support/DeepSeek Harness/settings.json` in packaged
- * builds; `~/.dsh-desktop/settings.json` during development). It is scoped per
+ * builds; `~/.dsh-dev/settings.json` during development). It is scoped per
  * target device: `devices` maps a device key (`local`, or `ssh:<host>`) to
  * that device's connection fields and update-manager settings. The in-memory
  * normalized document also exposes the active device's `mode` / `local` /
@@ -18,8 +18,13 @@ const path = require('node:path')
 const os = require('node:os')
 const { normalizeUpdate } = require('./components')
 
-/** The shell-owned dsh home used for development/desktop service isolation. */
-const DEV_DEFAULT_DSH_HOME = '~/.dsh-desktop'
+/**
+ * The shell-owned dsh home used for development/desktop service isolation.
+ *
+ * Development launches always use `~/.dsh-dev` (created on demand) so a dev
+ * shell never touches the user's real `~/.dsh` or the installed app's data.
+ */
+const DEV_DEFAULT_DSH_HOME = '~/.dsh-dev'
 
 /** Packaged builds must never point at a read-only path inside the .app. */
 const IS_PACKAGED = typeof process.resourcesPath === 'string' && process.resourcesPath !== ''
