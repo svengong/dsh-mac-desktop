@@ -49,6 +49,15 @@ async function main() {
   assert.strictEqual(migrated.ssh.host, 'legacy-host')
   assert.strictEqual(migrated.activeDeviceId, 'ssh:legacy-host')
 
+  // machine identity: a device carrying a machineId keys under machine:<id>;
+  // without one it falls back to the ssh alias until the first connect.
+  const machineId = '11111111-2222-3333-4444-555555555555'
+  const identified = normalizeSettings({ mode: 'ssh', ssh: { host: 'home4' }, machineId })
+  assert.strictEqual(identified.activeDeviceId, `machine:${machineId}`)
+  assert.strictEqual(identified.devices[`machine:${machineId}`].machineId, machineId)
+  const unidentified = normalizeSettings({ mode: 'ssh', ssh: { host: 'ubuntu' } })
+  assert.strictEqual(unidentified.activeDeviceId, 'ssh:ubuntu')
+
   // A second device gets its own update section; switching active devices
   // restores each one's settings independently.
   const multi = normalizeSettings({

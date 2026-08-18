@@ -102,6 +102,7 @@ function normalizeToolPaths(raw) {
 function defaultDevice(mode = 'local') {
   return {
     mode: mode === 'ssh' ? 'ssh' : 'local',
+    machineId: '',
     local: normalizeLocal(undefined),
     ssh: normalizeSsh(undefined),
     update: normalizeUpdate(undefined),
@@ -119,6 +120,9 @@ function normalizeDevice(raw) {
   const source = raw !== null && typeof raw === 'object' ? raw : {}
   return {
     mode: source.mode === 'ssh' ? 'ssh' : 'local',
+    // The remote machine identity, learned on first successful connection
+    // from `~/.dsh/.desktop-machine-id`. Empty until the host is first reached.
+    machineId: text(source.machineId).trim(),
     local: normalizeLocal(source.local),
     ssh: normalizeSsh(source.ssh),
     update: normalizeUpdate(source.update),
@@ -133,6 +137,13 @@ function normalizeDevice(raw) {
  */
 function deviceKeyOf(device) {
   if (device.mode === 'ssh') {
+    // The terminal identity is the remote machine, not the ssh alias: every
+    // alias that reaches the same `~/.dsh` (e.g. `ubuntu` + `home4`) must
+    // collapse onto one device so its update sources are shared. Before the
+    // first connection reveals the machine id, the host alias is the fallback
+    // key and is upgraded in place after connect.
+    const machineId = typeof device.machineId === 'string' ? device.machineId.trim() : ''
+    if (machineId !== '') return `machine:${machineId}`
     const host = typeof device.ssh?.host === 'string' ? device.ssh.host.trim() : ''
     return host === '' ? 'ssh' : `ssh:${host}`
   }
