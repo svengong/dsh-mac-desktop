@@ -17,5 +17,8 @@ function subscribe(channel, callback) {
 
 contextBridge.exposeInMainWorld('desktopShell', {
   navigate: view => ipcRenderer.invoke('shell:navigate', view),
+  newWindow: () => ipcRenderer.invoke('shell:new-window'),
+  action: name => ipcRenderer.invoke('shell:action', name),
   onState: callback => subscribe('shell:state', callback),
+  onLog: callback => subscribe('shell:log', callback),
 })
