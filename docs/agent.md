@@ -61,7 +61,11 @@ Electron macOS 薄壳：主窗口顶部 46px 壳边框，下面是 harness WebCo
     `artifact.js` 预检（registry 最新版 + 依赖链完整性）；链断/安装失败自动降级
     源码管线并说明原因，绝不静默换路。新增安装路径必须复用 `installNpmArtifact`
     + `activateLocalRuntime`，不要自造第三套。
-16. **更新意图必须可恢复。** 开始更新前写 `update-pending.json`，正常结束才清除；
+16. **更新意图必须可恢复。**
+17. **连接时自动升级驻留程序是核心契约。** 连接对比 state.version 与
+    serviceVersion，不匹配自动 reap + relaunch；但「获取新版本」只走更新管线——
+    runtime 化后 source HEAD 变化不得触发连接升级。改版本语义前先读
+    `development.md`「10. 新版本发布约定」并跑两个 e2e。 开始更新前写 `update-pending.json`，正常结束才清除；
     被打断（退出/崩溃）后启动时 `resumePendingUpdate()` 询问继续/放弃。detached
     worker（`update-worker.js`）不注册进进程登记表，壳退出不杀它；壳通过
     `runtime/update-status.json` 观察，`done` 后重启服务，下次连接按版本不匹配兜底。
@@ -72,6 +76,9 @@ Electron macOS 薄壳：主窗口顶部 46px 壳边框，下面是 harness WebCo
 node scripts/smoke.js
 DSH_DESKTOP_SMOKE=1 npx electron .
 node --check <改动的 .js>
+# 新版本发布前必跑（见 development.md「10. 新版本发布约定」）：
+node scripts/e2e-local.js
+node scripts/e2e-ssh.js <ssh-host>
 ```
 
 UI 改动额外检查：
@@ -123,6 +130,18 @@ for f in /tmp/settings.html.js /tmp/shell.html.js; do node --check "$f"; done
     否则新服务会失去跟踪（退出时不杀）或触发双 spawn（两个服务进程）。
 13. **30s 端口等待定时器可能跨代触发。** `portTimer` 到期时 `this.localChild`
     可能已属于新一代连接；必须身份校验后再 kill，否则会杀掉健康的新服务。
+14. **远端命令的 stat 必须 GNU 优先。** `stat -c %Y`（GNU/Linux）先试，
+    `stat -f %m`（BSD/macOS）兜底；反序时 GNU 的 `-f %m` 会把文件系统信息块
+    打到 stdout 污染 lines[0]。dirty 工作区的 mtime 指纹（本地/远端、
+    connection.js 与 update.js）都必须带 `dirty:` 前缀且经 `versionToken`。
+15. **远端 state 文件必须带换行结尾。** `writeRemoteState` 的 printf 缺 `\n`
+    会让 `cat` 输出与 remoteRun 的 END marker 粘连，payload 隔离失效导致
+    state 读取返回 null（历史潜伏缺陷）。`extractPayload` 按子串匹配 marker
+    做纵深防御，新增无换行输出的远端命令前先想清楚 marker 行为。
+16. **runtime 化后 source 变化不触发连接升级。** `serviceVersion` 在
+    manifest.current 有效时返回它；dirty mtime 只在无 runtime（或删除
+    runtime）时成为版本源。e2e 验证 source 语义的自动升级前，必须先
+    `rm -rf ~/.dsh/runtime`，否则 fast path 按旧 current 复用属正确行为。
 
 ## 7. 文档同步要求
 

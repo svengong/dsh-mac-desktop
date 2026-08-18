@@ -182,6 +182,21 @@ async function main() {
   const noNewline = await runCommand({ cmd: '/bin/sh', args: ['-c', 'printf no-newline'] })
   assert.deepStrictEqual(noNewline.lines, ['no-newline'])
 
+  // remoteRun payload extraction: a newline-less command output that fuses
+  // with the END marker (e.g. `printf ... > file` + `cat file`) must still
+  // yield the clean payload.
+  const { extractPayload } = (() => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'connection.js'), 'utf8')
+    const fn = src.match(/function extractPayload\(lines, beginMarker, endMarker\) \{[\s\S]*?^\}/m)[0]
+    return { extractPayload: new Function(`${fn}\nreturn extractPayload`)() }
+  })()
+  const B = '__B__'
+  const E = '__E__'
+  assert.deepStrictEqual(extractPayload(['banner', B, '{"a":1}', E, 'tail'], B, E), ['{"a":1}'])
+  assert.deepStrictEqual(extractPayload([B, '{"a":1}' + E], B, E), ['{"a":1}'])
+  assert.deepStrictEqual(extractPayload([B + 'json' + E], B, E), ['json'])
+  assert.deepStrictEqual(extractPayload(['a', 'b'], B, E), ['a', 'b'])
+
   // runner process registry: killActiveChildren must terminate every tracked
   // child (in-flight build, service, tunnel) so app quit never orphans one.
   const sleeper = spawnService({ cmd: '/bin/sleep', args: ['30'] })

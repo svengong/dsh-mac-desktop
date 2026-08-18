@@ -180,9 +180,12 @@ async function readRemoteState(settings, remoteRun) {
 async function writeRemoteState(settings, remoteRun, state) {
   if (!isValidState(state)) return
   const safeVersion = String(state.version).replace(/[^a-zA-Z0-9._-]/g, '').slice(0, 64) || 'unknown'
+  // Trailing \n is load-bearing: remoteRun wraps commands in payload
+  // markers and matches them per line; a newline-less file would fuse the
+  // state JSON with the END marker on one line and break payload parsing.
   await remoteRun(
     settings.ssh.host,
-    `printf '{"pid":%s,"port":%s,"version":"%s"}' "${state.pid}" "${state.port}" "${safeVersion}" > ${REMOTE_STATE_FILE}`,
+    `printf '{\"pid\":%s,\"port\":%s,\"version\":\"%s\"}\n' "${state.pid}" "${state.port}" "${safeVersion}" > ${REMOTE_STATE_FILE}`,
     { timeoutMs: 15_000 },
   )
 }
