@@ -39,8 +39,14 @@ function linePump(onLine) {
 /**
  * Run one command to completion.
  * @param {object} options - cmd, args, cwd, env, timeoutMs, onLine.
- * @returns {Promise<{code: number|null, signal: string|null, timedOut: boolean, lines: string[]}>}
- * Resolves for any exit; rejects only when the binary cannot be spawned.
+ * @returns {object} {code, signal, timedOut, lines} - resolves for any exit;
+ * rejects only when the binary cannot be spawned.
+ *
+ * The child runs in its own process group (`detached: true`) so the timeout
+ * can SIGKILL the whole tree (pnpm/npm installs spawn grandchildren) instead
+ * of leaving orphans behind. Every spawned child is also registered in the
+ * process registry so the app-quit teardown (`killActiveChildren`) can
+ * terminate in-flight builds and services that no session reference covers.
  */
 function runCommand({ cmd, args = [], cwd, env, timeoutMs = DEFAULT_TIMEOUT_MS, onLine }) {
   return new Promise((resolve, reject) => {
@@ -50,11 +56,13 @@ function runCommand({ cmd, args = [], cwd, env, timeoutMs = DEFAULT_TIMEOUT_MS, 
         cwd,
         env: env === undefined ? process.env : env,
         stdio: ['ignore', 'pipe', 'pipe'],
+        detached: true,
       })
     } catch (error) {
       reject(new Error(`无法启动 ${cmd}: ${error.message}`))
       return
     }
+    trackChild(child)
     const lines = []
     let timedOut = false
     let settled = false
@@ -66,7 +74,17 @@ function runCommand({ cmd, args = [], cwd, env, timeoutMs = DEFAULT_TIMEOUT_MS, 
     child.stderr.on('data', pump)
     const timer = setTimeout(() => {
       timedOut = true
-      child.kill('SIGKILL')
+      // Group-kill: a SIGKILL to the leader alone leaves pnpm/git
+      // grandchildren running in the same group.
+      try {
+        process.kill(-child.pid, 'SIGKILL')
+      } catch {
+        try {
+          child.kill('SIGKILL')
+        } catch {
+          // Already gone.
+        }
+      }
     }, timeoutMs)
     child.on('error', error => {
       if (settled) return
@@ -96,6 +114,9 @@ function spawnService({ cmd, args, cwd, env, onLine }) {
     stdio: ['ignore', 'pipe', 'pipe'],
     detached: true,
   })
+  // Also register services so app quit kills them even when a session
+  // reference was lost before its stop() was called.
+  trackChild(child)
   const pump = linePump(onLine)
   child.stdout.on('data', pump)
   child.stderr.on('data', pump)
@@ -116,4 +137,34 @@ function spawnService({ cmd, args, cwd, env, onLine }) {
   return { child, stop }
 }
 
-module.exports = { runCommand, spawnService, DEFAULT_TIMEOUT_MS }
+// ── process registry ──────────────────────────────────────────────────────
+//
+// Every child this module spawns is tracked here so app quit can terminate
+// in-flight work (a pnpm install running in a staging dir, a plugin install,
+// a tunnel) even when no session/connection reference points at it anymore.
+
+const activeChildren = new Set()
+
+function trackChild(child) {
+  if (child === null || child === undefined) return
+  activeChildren.add(child)
+  child.once('close', () => activeChildren.delete(child))
+}
+
+function killActiveChildren() {
+  for (const child of activeChildren) {
+    if (child.exitCode !== null || child.signalCode !== null) continue
+    try {
+      process.kill(-child.pid, 'SIGTERM')
+    } catch {
+      try {
+        child.kill('SIGTERM')
+      } catch {
+        // Already gone.
+      }
+    }
+  }
+  activeChildren.clear()
+}
+
+module.exports = { runCommand, spawnService, DEFAULT_TIMEOUT_MS, killActiveChildren, trackChild }
