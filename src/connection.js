@@ -608,6 +608,14 @@ class ConnectionManager extends EventEmitter {
       await this.restartRemoteService(settings)
       await this.startTunnelOnFreePort(settings, this.remotePort)
       await waitReady(this.url())
+      // Emit the new URL: windows follow the port that actually serves, and
+      // a stale title/URL after a restart is a dead page for every window.
+      this.setStatus({
+        state: 'ready',
+        url: this.url(),
+        detail: `已重启（${displayLabel(settings.ssh.host)}，隧道转发）`,
+        serviceOwner: 'remote',
+      })
       return
     }
     const version = await this.serviceVersion(settings)
@@ -620,6 +628,12 @@ class ConnectionManager extends EventEmitter {
       await this.spawnLocalService(settings, 0, version)
       await waitReady(this.url())
       this.localRetries = 0
+      this.setStatus({
+        state: 'ready',
+        url: this.url(),
+        detail: `已重启（端口 ${this.localPort}）`,
+        serviceOwner: 'self',
+      })
       return
     }
     const url = this.url()
@@ -647,6 +661,12 @@ class ConnectionManager extends EventEmitter {
         await this.spawnLocalService(settings, 0, version)
         await waitReady(this.url())
         this.localRetries = 0
+        this.setStatus({
+          state: 'ready',
+          url: this.url(),
+          detail: `已重启（端口 ${this.localPort}）`,
+          serviceOwner: 'self',
+        })
         return
       }
       this.log('服务由外部进程托管，跳过重启')
@@ -655,6 +675,12 @@ class ConnectionManager extends EventEmitter {
     this.localPort = null
     await this.spawnLocalService(settings, 0, version)
     await waitReady(this.url())
+    this.setStatus({
+      state: 'ready',
+      url: this.url(),
+      detail: `已重启（端口 ${this.localPort}）`,
+      serviceOwner: 'self',
+    })
   }
 
   // ── local mode ────────────────────────────────────────────────────────────
