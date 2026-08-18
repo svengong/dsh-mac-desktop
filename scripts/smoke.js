@@ -449,18 +449,25 @@ async function main() {
   assert.strictEqual(restoredWm.lastActiveWorkspace(new Map([[7, fakeWorkspace]])), fakeWorkspace)
 
   // Local `--port 0`: the shell adopts the OS-chosen port from stdout.
+  // This needs a BUILT local checkout (deepseek-harness/); on CI the
+  // checkout is absent (it is gitignored), so skip instead of failing —
+  // live service launching is covered by scripts/e2e-local.js.
   const repoDir = path.resolve(__dirname, '..', 'deepseek-harness')
   const portZeroHome = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-port-zero-'))
   const portZeroSettings = { mode: 'local', local: { repoDir, repoUrl: '', dshHome: portZeroHome, port: 3080 }, ssh: {} }
-  const portZeroConnection = new ConnectionManager({ getSettings: () => portZeroSettings, onLog: () => {} })
-  const portZeroTools = resolveTools({
-    local: { repoDir, repoUrl: '' },
-    toolPaths: { node: '', git: '', pnpm: '', shell: '/bin/zsh' },
-  })
-  portZeroConnection.resolvedTools = () => portZeroTools
-  await portZeroConnection.spawnLocalService(portZeroSettings, 0, 'smoke-port-zero')
-  assert.ok(portZeroConnection.localPort > 0, 'expected an OS-chosen local port')
-  portZeroConnection.stopOwnedChildren()
+  if (require('../src/runtime-layout').runtimeLayout(repoDir) !== null) {
+    const portZeroConnection = new ConnectionManager({ getSettings: () => portZeroSettings, onLog: () => {} })
+    const portZeroTools = resolveTools({
+      local: { repoDir, repoUrl: '' },
+      toolPaths: { node: '', git: '', pnpm: '', shell: '/bin/zsh' },
+    })
+    portZeroConnection.resolvedTools = () => portZeroTools
+    await portZeroConnection.spawnLocalService(portZeroSettings, 0, 'smoke-port-zero')
+    assert.ok(portZeroConnection.localPort > 0, 'expected an OS-chosen local port')
+    portZeroConnection.stopOwnedChildren()
+  } else {
+    console.log('SKIP: --port 0 live-service check (no built deepseek-harness checkout)')
+  }
   await new Promise(resolve => setTimeout(resolve, 200))
   fs.rmSync(portZeroHome, { recursive: true, force: true })
   fs.rmSync(runtimeHome, { recursive: true, force: true })
