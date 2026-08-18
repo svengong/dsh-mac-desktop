@@ -76,7 +76,10 @@ jobs:
         run: npm run smoke
 
       - name: Package DMG + ZIP (${{ matrix.arch }})
-        run: npm run dist:dmg -- ${{ matrix.flag }}
+        # --publish never: electron-builder detects the v* tag and would try to
+        # upload to GitHub itself; publishing is done by the publish job via
+        # action-gh-release, and no GH_TOKEN is available here.
+        run: npm run dist:dmg -- ${{ matrix.flag }} --publish never
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
