@@ -20,6 +20,7 @@ const fs = require('node:fs')
 const path = require('node:path')
 const os = require('node:os')
 const { shellQuote } = require('./ssh')
+const { runtimeIsBuilt } = require('./runtime-layout')
 
 const LOCAL_STATE_FILE = 'desktop-web.state.json'
 // Local ssh-tunnel bookkeeping, kept separate from the web-service state so a
@@ -265,7 +266,7 @@ function writeLocalRuntimeManifest(settings, version, meta = {}) {
 function activateLocalRuntime(settings, version) {
   const root = localRuntimeRoot(settings)
   const versionDir = localVersionDir(settings, version)
-  if (!fs.existsSync(path.join(versionDir, 'apps/cli/lib/bin.js'))) {
+  if (!runtimeIsBuilt(versionDir)) {
     throw new Error(`运行时目录未构建完成：${versionDir}`)
   }
   const previous = readLocalRootManifest(settings)
@@ -290,7 +291,7 @@ function localActiveRuntimeDir(settings) {
   if (manifest.current === null) return null
   const dir = localVersionDir(settings, manifest.current)
   try {
-    if (fs.existsSync(path.join(dir, 'apps/cli/lib/bin.js'))) return dir
+    if (runtimeIsBuilt(dir)) return dir
   } catch {
     return null
   }
@@ -336,7 +337,7 @@ function rollbackLocalRuntime(settings) {
   const manifest = readLocalRootManifest(settings)
   if (manifest.previous === null || manifest.previous === '') return null
   const dir = localVersionDir(settings, manifest.previous)
-  if (!fs.existsSync(path.join(dir, 'apps/cli/lib/bin.js'))) return null
+  if (!runtimeIsBuilt(dir)) return null
   activateLocalRuntime(settings, manifest.previous)
   return manifest.previous
 }
@@ -558,6 +559,100 @@ async function withRemoteLock(settings, remoteRun, name, task, { timeoutMs = LOC
   }
 }
 
+
+// ── update intent / worker status (Phase 1 + Phase 3) ───────────────────────
+//
+// `update-pending.json` records an update the user started but that was not
+// completed (shell quit mid-build, worker crash): on the next launch the shell
+// offers to resume instead of silently forgetting the request.
+// `runtime/update-status.json` is the detached update worker's live state:
+// the shell polls it while the worker runs and reads it after a crash/quit.
+
+function pendingUpdatePath(settings) {
+  return path.join(expandHome(settings.local.dshHome), 'update-pending.json')
+}
+
+function readPendingUpdate(settings) {
+  try {
+    const pending = JSON.parse(fs.readFileSync(pendingUpdatePath(settings), 'utf8'))
+    if (pending === null || typeof pending !== 'object') return null
+    if (typeof pending.intent !== 'string' || pending.intent === '') return null
+    return {
+      intent: pending.intent,
+      version: typeof pending.version === 'string' ? pending.version : '',
+      startedAt: typeof pending.startedAt === 'string' ? pending.startedAt : '',
+    }
+  } catch {
+    return null
+  }
+}
+
+function writePendingUpdate(settings, pending) {
+  try {
+    const file = pendingUpdatePath(settings)
+    fs.mkdirSync(path.dirname(file), { recursive: true })
+    fs.writeFileSync(file, JSON.stringify({
+      intent: pending.intent,
+      version: pending.version ?? '',
+      startedAt: pending.startedAt ?? new Date().toISOString(),
+    }, null, 2))
+    return true
+  } catch {
+    return false
+  }
+}
+
+function clearPendingUpdate(settings) {
+  try {
+    fs.rmSync(pendingUpdatePath(settings), { force: true })
+  } catch {
+    // Best-effort.
+  }
+}
+
+function updateStatusPath(settings) {
+  return path.join(expandHome(settings.local.dshHome), RUNTIME_DIR, 'update-status.json')
+}
+
+function readUpdateStatus(settings) {
+  try {
+    const status = JSON.parse(fs.readFileSync(updateStatusPath(settings), 'utf8'))
+    if (status === null || typeof status !== 'object') return null
+    return status
+  } catch {
+    return null
+  }
+}
+
+function writeUpdateStatus(settings, patch) {
+  try {
+    const file = updateStatusPath(settings)
+    fs.mkdirSync(path.dirname(file), { recursive: true })
+    const previous = readUpdateStatus(settings) ?? {}
+    // Append incoming log lines to the existing tail (bounded ring).
+    const incoming = Array.isArray(patch.logTail) ? patch.logTail : []
+    const prevTail = Array.isArray(previous.logTail) ? previous.logTail : []
+    const logTail = [...prevTail, ...incoming].slice(-80)
+    fs.writeFileSync(file, JSON.stringify({
+      ...previous,
+      ...patch,
+      logTail: logTail.slice(-80),
+      updatedAt: new Date().toISOString(),
+    }, null, 2))
+    return true
+  } catch {
+    return false
+  }
+}
+
+function clearUpdateStatus(settings) {
+  try {
+    fs.rmSync(updateStatusPath(settings), { force: true })
+  } catch {
+    // Best-effort.
+  }
+}
+
 module.exports = {
   LOCAL_STATE_FILE,
   LOCAL_TUNNEL_STATE_FILE,
@@ -570,6 +665,14 @@ module.exports = {
   RUNTIME_ROOT_MANIFEST,
   activateLocalRuntime,
   activateRemoteRuntime,
+  clearPendingUpdate,
+  clearUpdateStatus,
+  pendingUpdatePath,
+  readPendingUpdate,
+  readUpdateStatus,
+  updateStatusPath,
+  writePendingUpdate,
+  writeUpdateStatus,
   expandHome,
   isValidState,
   localActiveRuntimeDir,

@@ -57,6 +57,14 @@ Electron macOS 薄壳：主窗口顶部 46px 壳边框，下面是 harness WebCo
     在途 git/pnpm 构建在应用退出后继续运行。
 14. **超时杀进程必须连进程组一起杀。** `runCommand` 一律 `detached: true`，
     超时用 `process.kill(-pid, 'SIGKILL')`，否则 pnpm/npm 的孙进程会孤儿化。
+15. **官方产物优先，源码构建是 fallback。** 本地 + 官方仓库 URL 的更新先走
+    `artifact.js` 预检（registry 最新版 + 依赖链完整性）；链断/安装失败自动降级
+    源码管线并说明原因，绝不静默换路。新增安装路径必须复用 `installNpmArtifact`
+    + `activateLocalRuntime`，不要自造第三套。
+16. **更新意图必须可恢复。** 开始更新前写 `update-pending.json`，正常结束才清除；
+    被打断（退出/崩溃）后启动时 `resumePendingUpdate()` 询问继续/放弃。detached
+    worker（`update-worker.js`）不注册进进程登记表，壳退出不杀它；壳通过
+    `runtime/update-status.json` 观察，`done` 后重启服务，下次连接按版本不匹配兜底。
 
 ## 4. 验收命令
 
@@ -107,10 +115,13 @@ for f in /tmp/settings.html.js /tmp/shell.html.js; do node --check "$f"; done
    dirty 构建仍发生在源目录，因此回滚菜单对该模式会提示无上一版本。
 10. **serviceVersion ≠ currentVersion。** 状态复用必须用 active runtime 的 `serviceVersion`；
     直接比较源 HEAD 会让回滚后的服务在下一次连接时被误杀重建。
-11. **重连会杀旧子进程，close 事件异步到达。** 旧 child 的 `close` 可能在新的
+11. **运行时布局不再只有仓库形状。** bin 查找必须走 `runtime-layout.js`
+    （repo 布局 `apps/cli/lib/bin.js`；npm 布局 `node_modules/@deepseek-ai/dsh/lib/bin.js`），
+    直接拼 `apps/cli/lib/bin.js` 会漏掉官方产物运行时。
+12. **重连会杀旧子进程，close 事件异步到达。** 旧 child 的 `close` 可能在新的
     `spawnLocalService` 之后触发：先比 `connectEpoch` 再清引用/排重试，
     否则新服务会失去跟踪（退出时不杀）或触发双 spawn（两个服务进程）。
-12. **30s 端口等待定时器可能跨代触发。** `portTimer` 到期时 `this.localChild`
+13. **30s 端口等待定时器可能跨代触发。** `portTimer` 到期时 `this.localChild`
     可能已属于新一代连接；必须身份校验后再 kill，否则会杀掉健康的新服务。
 
 ## 7. 文档同步要求

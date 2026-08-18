@@ -26,6 +26,7 @@ const { runCommand, spawnService } = require('./runner')
 const { sshCommandArgs, tunnelArgs, shellQuote, remotePath, remoteToolchainPrefix, displayLabel } = require('./ssh')
 const { resolveTools } = require('./tools')
 const { findFreePort, releasePort, reservePort, tcpProbe } = require('./ports')
+const { runtimeLayout, npmArtifactVersion } = require('./runtime-layout')
 const runtimeStore = require('./runtime-store')
 
 const PROBE_INTERVAL_MS = 750
@@ -276,6 +277,11 @@ class ConnectionManager extends EventEmitter {
         const head = result.code === 0 ? result.lines.map(line => line.trim()).find(Boolean) : ''
         if (head) return versionToken(head)
       }
+      const activeDir = runtimeStore.localActiveRuntimeDir(settings) ?? settings.local.repoDir
+      // An npm-layout runtime's installed package version IS its identity;
+      // there is no git HEAD or built bin.js to fingerprint.
+      const npmVersion = npmArtifactVersion(activeDir)
+      if (npmVersion !== '') return npmVersion
       try {
         const stat = fs.statSync(path.join(settings.local.repoDir, 'apps/cli/lib/bin.js'))
         return `mtime:${stat.mtimeMs}`
@@ -399,8 +405,7 @@ class ConnectionManager extends EventEmitter {
       for (const dir of [runtimeDir, settings.local.repoDir]) {
         if (dir === null || dir === '') continue
         try {
-          fs.accessSync(path.join(dir, 'apps/cli/lib/bin.js'), fs.constants.R_OK)
-          return true
+          if (runtimeLayout(dir) !== null) return true
         } catch {
           // Fall through to the next candidate.
         }
@@ -714,14 +719,13 @@ class ConnectionManager extends EventEmitter {
     // Serve from the atomically-activated runtime when one exists; otherwise
     // fall back to the source checkout (first run / dirty-worktree builds).
     const runtimeDir = runtimeStore.localActiveRuntimeDir(settings) ?? settings.local.repoDir
-    const binPath = path.join(runtimeDir, 'apps/cli/lib/bin.js')
-    try {
-      fs.accessSync(binPath, fs.constants.R_OK)
-    } catch {
+    const layout = runtimeLayout(runtimeDir)
+    if (layout === null) {
       throw new Error(
-        `仓库尚未构建（缺少 ${binPath}）。请在顶部菜单「更新 → 更新并重启」完成首次构建。`,
+        `运行时尚未构建（${runtimeDir} 缺少 apps/cli/lib/bin.js 或官方产物）。请在顶部菜单「更新 → 更新并重启」完成首次构建/安装。`,
       )
     }
+    const binPath = layout.bin
     this.log(`启动 dsh web（${port === 0 ? '由系统分配端口' : `端口 ${port}`}，数据目录 ${settings.local.dshHome}，运行时 ${runtimeDir}）…`)
     this.prepareLocalHome(settings)
 

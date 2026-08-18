@@ -137,6 +137,22 @@ function spawnService({ cmd, args, cwd, env, onLine }) {
   return { child, stop }
 }
 
+/**
+ * Spawn a detached helper that must SURVIVE the shell (the update worker).
+ * Deliberately NOT registered in the process registry: app quit must not
+ * kill it. Returns the unref'd child.
+ */
+function spawnDetached({ cmd, args = [], cwd, env }) {
+  const child = spawn(cmd, args, {
+    cwd,
+    env: env === undefined ? process.env : env,
+    stdio: 'ignore',
+    detached: true,
+  })
+  child.unref()
+  return child
+}
+
 // ── process registry ──────────────────────────────────────────────────────
 //
 // Every child this module spawns is tracked here so app quit can terminate
@@ -167,4 +183,4 @@ function killActiveChildren() {
   activeChildren.clear()
 }
 
-module.exports = { runCommand, spawnService, DEFAULT_TIMEOUT_MS, killActiveChildren, trackChild }
+module.exports = { runCommand, spawnService, spawnDetached, DEFAULT_TIMEOUT_MS, killActiveChildren, trackChild }
