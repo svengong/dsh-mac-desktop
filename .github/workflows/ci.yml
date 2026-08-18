@@ -30,6 +30,11 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # smoke.js asserts a resolvable pnpm (tools.pnpm !== ''); the runner
+      # has no user-level login shell, so without this the check fails.
+      - name: Install pnpm
+        run: npm install -g pnpm@11
+
       - name: Smoke tests
         run: npm run smoke
 
