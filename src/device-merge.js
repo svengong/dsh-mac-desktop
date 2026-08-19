@@ -45,23 +45,4 @@ function mergeUpdates(primary, secondary) {
   }
 }
 
-/**
- * Gather the update sections of every ssh device pointing at `host`, except
- * the excluded keys. Returns them in document order (callers fold with
- * mergeUpdates, so order only affects tie-breaking, not content).
- */
-function sameHostUpdates(devices, host, excludeKeys) {
-  const excluded = new Set(excludeKeys ?? [])
-  const updates = []
-  if (host === '' || host === undefined || host === null) return updates
-  for (const [key, device] of Object.entries(devices)) {
-    if (excluded.has(key)) continue
-    if (device === null || typeof device !== 'object') continue
-    if (device.mode !== 'ssh') continue
-    if (device.ssh === null || device.ssh === undefined || device.ssh.host !== host) continue
-    if (device.update !== undefined && device.update !== null) updates.push(device.update)
-  }
-  return updates
-}
-
-module.exports = { mergeUpdates, sameHostUpdates }
+module.exports = { mergeUpdates }
