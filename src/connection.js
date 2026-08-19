@@ -1258,15 +1258,14 @@ class ConnectionManager extends EventEmitter {
 
   async startRemoteService(settings, remotePort, version) {
     const dir = await this.remoteServiceDir(settings)
-    const bin = `${dir}/apps/cli/lib/bin.js`
     const check = await this.remoteRun(
       settings.ssh.host,
-      `test -f ${bin} && echo bin-ok || echo bin-missing`,
+      `if test -f ${dir}/apps/cli/lib/bin.js || test -f ${dir}/node_modules/@deepseek-ai/dsh/lib/bin.js; then echo bin-ok; else echo bin-missing; fi`,
       { timeoutMs: 20_000 },
     )
     if (check.code !== 0 || !check.lines.includes('bin-ok')) {
       throw new Error(
-        `远程仓库尚未构建（${settings.ssh.remoteRepoDir}/apps/cli/lib/bin.js 不存在）。请在顶部菜单「更新 → 更新并重启」完成远程构建。`,
+        `远程运行时尚未构建（${dir} 缺少 apps/cli/lib/bin.js 或官方产物）。请在顶部菜单「更新 → 更新并重启」完成远程构建/安装。`,
       )
     }
     return this.launchRemoteService(settings, remotePort ?? 0, version)
@@ -1279,7 +1278,6 @@ class ConnectionManager extends EventEmitter {
    */
   async launchRemoteService(settings, remotePort = 0, version = 'unknown') {
     const dir = await this.remoteServiceDir(settings)
-    const bin = `${dir}/apps/cli/lib/bin.js`
     const logFile = runtimeStore.REMOTE_LOG_FILE
     const pidFile = runtimeStore.REMOTE_PID_FILE
     const portFile = runtimeStore.REMOTE_PORT_FILE
@@ -1287,7 +1285,11 @@ class ConnectionManager extends EventEmitter {
       ? '启动远程 dsh web（由系统分配端口）…'
       : `启动远程 dsh web（端口 ${remotePort}）…`)
 
-    const startCommand = `if command -v setsid >/dev/null 2>&1; then setsid sh -c ${shellQuote(`cd ${dir} && exec node ${bin} web --port ${remotePort} > ${portFile} 2>> ${logFile} < /dev/null`)} </dev/null >/dev/null 2>&1 & else nohup sh -c ${shellQuote(`cd ${dir} && exec node ${bin} web --port ${remotePort} > ${portFile} 2>> ${logFile} < /dev/null`)} >/dev/null 2>&1 </dev/null & fi; echo $! > ${pidFile}`
+    // The runtime dir may be a repo-layout checkout (apps/cli/lib/bin.js)
+    // or an npm-layout official artifact; resolve the bin inside the remote
+    // shell so one launcher covers both.
+    const runNode = `cd ${dir} && BIN=apps/cli/lib/bin.js; [ -f "$BIN" ] || BIN=node_modules/@deepseek-ai/dsh/lib/bin.js; exec node "$BIN" web --port ${remotePort} > ${portFile} 2>> ${logFile} < /dev/null`
+    const startCommand = `if command -v setsid >/dev/null 2>&1; then setsid sh -c ${shellQuote(runNode)} </dev/null >/dev/null 2>&1 & else nohup sh -c ${shellQuote(runNode)} >/dev/null 2>&1 </dev/null & fi; echo $! > ${pidFile}`
     const start = await this.remoteRun(
       settings.ssh.host,
       `${remoteToolchainPrefix()} mkdir -p "$HOME"/.dsh; rm -f ${portFile}; ${startCommand}`,
