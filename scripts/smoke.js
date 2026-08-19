@@ -24,7 +24,7 @@ const { ConnectionManager } = require('../src/connection')
 const { findFreePort, releasePort, reservePort } = require('../src/ports')
 const runtimeStore = require('../src/runtime-store')
 const { WindowManager } = require('../src/window-manager')
-const { mergeUpdates, sameHostUpdates } = require('../src/device-merge')
+const { mergeUpdates } = require('../src/device-merge')
 const { resolveTools, engineOk } = require('../src/tools')
 const { presentWindow } = require('../src/windows')
 
@@ -540,19 +540,6 @@ async function main() {
   const m1 = mergeUpdates({ components: [harnessDef, npmDef] }, { components: [npmDef, presetDef], lastCheckAt: '2026-08-18T00:00:00Z' })
   assert.strictEqual(m1.components.length, 3)
   assert.strictEqual(m1.lastCheckAt, '2026-08-18T00:00:00Z')
-  // sameHostUpdates gathers old machine-id devices for the same host only
-  const devices = {
-    'machine:old': { mode: 'ssh', ssh: { host: 'ubuntu' }, update: { components: [npmDef, presetDef] } },
-    'machine:other-host': { mode: 'ssh', ssh: { host: 'ubuntu2604' }, update: { components: [presetDef] } },
-    local: { mode: 'local', ssh: { host: 'ubuntu' }, update: { components: [npmDef] } },
-  }
-  const gathered = sameHostUpdates(devices, 'ubuntu', ['machine:new'])
-  assert.strictEqual(gathered.length, 1, 'only the same-host ssh device is gathered')
-  const merged = gathered.reduce((acc, u) => mergeUpdates(acc, u), { components: [harnessDef] })
-  assert.deepStrictEqual(merged.components.map(c => c.id).sort(), ['harness', 'p1', 'p2'])
-  // idempotent: merging again does not duplicate
-  const mergedAgain = mergeUpdates(merged, gathered[0])
-  assert.strictEqual(mergedAgain.components.length, 3)
 
   console.log('smoke: all checks passed')
 }

@@ -938,13 +938,20 @@ class ConnectionManager extends EventEmitter {
     const existing = await this.readRemoteMachineId(target)
     if (existing !== undefined) return existing
     const id = randomUUID()
+    // Atomic-ish create: only write when the file does NOT exist, then cat
+    // back whatever won the race and return THAT. A machine id must never be
+    // overwritten once it exists — a read failure (ssh hiccup) or two
+    // concurrent connects used to rebuild it, silently changing the device
+    // key and orphaning the configured components under the old key.
     const write = await this.remoteRun(
       target,
-      `mkdir -p "$HOME"/.dsh && printf '%s' ${shellQuote(id)} > "$HOME"/.dsh/.desktop-machine-id`,
+      `mkdir -p "$HOME"/.dsh && if [ ! -f "$HOME"/.dsh/.desktop-machine-id ]; then printf '%s' ${shellQuote(id)} > "$HOME"/.dsh/.desktop-machine-id; fi; cat "$HOME"/.dsh/.desktop-machine-id`,
       { timeoutMs: 15_000 },
     )
     if (write.code !== 0) throw new Error(`无法在远端写入终端身份标记：${write.lines.join('\n')}`)
-    return id
+    const finalId = write.lines.map(line => line.trim()).find(line => /^[0-9a-fA-F-]{8,}$/.test(line))
+    if (finalId === undefined) throw new Error('无法读取远端终端身份标记')
+    return finalId
   }
 
   async connectSsh(settings) {
