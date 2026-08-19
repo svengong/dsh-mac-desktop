@@ -1,6 +1,6 @@
 {
   "name": "dsh-mac-desktop",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "description": "macOS desktop shell for the DeepSeek Harness web app: local or SSH-remote connections with an in-menu update flow",
   "main": "src/main.js",
