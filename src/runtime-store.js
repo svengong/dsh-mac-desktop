@@ -402,7 +402,7 @@ async function activateRemoteRuntime(settings, remoteRun, version) {
   const versionDir = remoteVersionDir(version)
   const check = await remoteRun(
     settings.ssh.host,
-    `test -f ${versionDir}/apps/cli/lib/bin.js && echo ok || echo missing`,
+    `if test -f ${versionDir}/apps/cli/lib/bin.js || test -f ${versionDir}/node_modules/@deepseek-ai/dsh/lib/bin.js; then echo ok; else echo missing; fi`,
     { timeoutMs: 20_000 },
   )
   if (!check.lines.includes('ok')) throw new Error(`远端运行时目录未构建完成：${versionDir}`)
@@ -421,7 +421,7 @@ async function activateRemoteRuntime(settings, remoteRun, version) {
 async function remoteActiveRuntimeDir(settings, remoteRun) {
   const result = await remoteRun(
     settings.ssh.host,
-    `if [ -f ${remoteCurrentDir()}/apps/cli/lib/bin.js ]; then echo ${remoteCurrentDir()}; else echo __none__; fi`,
+    `if [ -f ${remoteCurrentDir()}/apps/cli/lib/bin.js ] || [ -f ${remoteCurrentDir()}/node_modules/@deepseek-ai/dsh/lib/bin.js ]; then echo ${remoteCurrentDir()}; else echo __none__; fi`,
     { timeoutMs: 20_000 },
   )
   const found = result.lines.map(line => line.trim()).find(Boolean)

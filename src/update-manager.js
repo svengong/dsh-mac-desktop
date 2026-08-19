@@ -25,6 +25,7 @@ const {
 const { runCommand } = require('./runner')
 const { remotePath, remoteToolchainPrefix, shellQuote } = require('./ssh')
 const runtimeStore = require('./runtime-store')
+const { runtimeLayout } = require('./runtime-layout')
 
 const LONG_TIMEOUT_MS = 45 * 60 * 1000
 const PLUGIN_TIMEOUT_MS = 10 * 60 * 1000
@@ -645,14 +646,16 @@ class UpdateManager {
       const serviceDir = await this.connection.remoteServiceDir(settings)
       const result = await this.connection.remoteRun(
         settings.ssh.host,
-        `${REMOTE_PREFIX} ${registryEnv} export DSH_HOME="$HOME"/.dsh; cd ${serviceDir} && node apps/cli/lib/bin.js plugin --profile ${def.profile} add ${shellQuote(spec)}`,
+        `${REMOTE_PREFIX} ${registryEnv} export DSH_HOME="$HOME"/.dsh; cd ${serviceDir} && BIN=apps/cli/lib/bin.js; [ -f "$BIN" ] || BIN=node_modules/@deepseek-ai/dsh/lib/bin.js; node "$BIN" plugin --profile ${def.profile} add ${shellQuote(spec)}`,
         { timeoutMs: PLUGIN_TIMEOUT_MS, onLine: line => this.log(line) },
       )
       if (result.code !== 0) throw new Error(`插件更新失败（退出码 ${result.code}）：${result.lines.slice(-6).join('\n')}`)
     } else {
       const tools = this.connection.resolvedTools({ refresh: true })
       const runtimeDir = runtimeStore.localActiveRuntimeDir(settings) ?? settings.local.repoDir
-      const binPath = path.join(runtimeDir, 'apps/cli/lib/bin.js')
+      const layout = runtimeLayout(runtimeDir)
+      if (layout === null) throw new Error(`运行时尚未构建：${runtimeDir}`)
+      const binPath = layout.bin
       // `dsh plugin` resolves pnpm from PATH, while the shell's clean env
       // intentionally excludes login-shell dirs; prepend the resolved pnpm's
       // own directory so the official CLI invocation finds the same pnpm.

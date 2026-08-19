@@ -532,6 +532,17 @@ async function main() {
   runtimeStore.clearPendingUpdate(homeSettings)
   assert.strictEqual(runtimeStore.readPendingUpdate(homeSettings), null)
   fs.rmSync(layoutDir, { recursive: true, force: true })
+  // artifact preference: SSH-remote with the official repo URL prefers the
+  // prebuilt npm artifact too (no remote compilation); forks stay source.
+  const { Updater } = require('../src/update')
+  const prefUpdater = new Updater({ getSettings: () => ({}), connection: null })
+  assert.strictEqual(prefUpdater.preferArtifact({ mode: 'ssh', ssh: { remoteRepoUrl: '' } }), true)
+  assert.strictEqual(prefUpdater.preferArtifact({ mode: 'ssh', ssh: { remoteRepoUrl: 'https://github.com/deepseek-ai/deepseek-harness.git' } }), true)
+  assert.strictEqual(prefUpdater.preferArtifact({ mode: 'ssh', ssh: { remoteRepoUrl: 'https://github.com/someone/harness-fork.git' } }), false)
+  assert.strictEqual(prefUpdater.preferArtifact({ mode: 'local', local: { repoUrl: '' } }), true)
+  assert.strictEqual(prefUpdater.preferArtifact({ mode: 'local', local: { repoUrl: 'https://github.com/someone/harness-fork.git' } }), false)
+  assert.strictEqual(prefUpdater.preferArtifact({ mode: 'ssh', ssh: { remoteRepoUrl: '' } }), true)
+
   // device-merge: machine-id drift must not lose configured components.
   const npmDef = { id: 'p1', kind: 'npm', packageName: 'dsh-better-sidebar', installSpec: 'dsh-better-sidebar', profile: 'web' }
   const presetDef = { id: 'p2', kind: 'git-preset', presetId: 'anchored-standard' }

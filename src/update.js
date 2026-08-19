@@ -23,7 +23,7 @@ const { engineOk } = require('./tools')
 const { isNewerVersion } = require('./components')
 const { queryNpmArtifact, installNpmArtifact } = require('./artifact')
 const { NPM_PACKAGE, npmArtifactVersion } = require('./runtime-layout')
-const { DEFAULT_LOCAL_REPO_URL } = require('./settings')
+const { OFFICIAL_REPO_URL } = require('./settings')
 const runtimeStore = require('./runtime-store')
 
 const LONG_TIMEOUT_MS = 45 * 60 * 1000
@@ -135,13 +135,16 @@ class Updater {
 
   /**
    * Whether this device should prefer official npm artifacts over a source
-   * build: local mode AND an official (or default) repo URL. Custom forks
-   * keep the source pipeline.
+   * build: local or SSH-remote with an official (or default) repo URL.
+   * Custom forks keep the source pipeline. The registry preflight in
+   * queryArtifact decides whether the channel is actually usable; when the
+   * chain is broken the caller falls back to source building.
    */
   preferArtifact(settings) {
-    if (settings.mode !== 'local') return false
-    const url = String(settings.local.repoUrl || '').trim()
-    return url === '' || url === DEFAULT_LOCAL_REPO_URL
+    const url = settings.mode === 'local'
+      ? String(settings.local.repoUrl || '').trim()
+      : settings.mode === 'ssh' ? String(settings.ssh.remoteRepoUrl || '').trim() : ''
+    return url === '' || url === OFFICIAL_REPO_URL
   }
 
   /** Registry preflight for the official npm artifact (never throws). */
@@ -149,19 +152,31 @@ class Updater {
     return queryNpmArtifact({ registryUrl: settings.update?.registryUrl ?? '' })
   }
 
-  /** The currently active npm-layout version token ('npm:...'), or ''. */
-  npmCurrentVersion(settings) {
-    const active = runtimeStore.localActiveRuntimeDir(settings)
-    if (active === null) return ''
-    return npmArtifactVersion(active)
+  /**
+   * The currently active npm-layout version token ('npm:...'), or '' when
+   * the active runtime is not an npm artifact (source-built or none).
+   */
+  async npmCurrentVersion(settings) {
+    if (settings.mode === 'local') {
+      const active = runtimeStore.localActiveRuntimeDir(settings)
+      if (active === null) return ''
+      return npmArtifactVersion(active)
+    }
+    const remoteRun = (host, inner, options) => this.connection.remoteRun(host, inner, options)
+    const manifest = await runtimeStore.readRemoteRootManifest(settings, remoteRun)
+    const active = await runtimeStore.remoteActiveRuntimeDir(settings, remoteRun)
+    if (manifest.current !== null && active !== null && manifest.current.startsWith('npm')) {
+      return `npm:${manifest.current.slice(3)}`
+    }
+    return ''
   }
 
   async check() {
     const settings = this.getSettings()
-    if (settings.mode === 'local' && this.preferArtifact(settings)) {
+    if (this.preferArtifact(settings)) {
       const artifact = await this.queryArtifact(settings)
       if (artifact.ok) {
-        const current = this.npmCurrentVersion(settings)
+        const current = await this.npmCurrentVersion(settings)
         const currentVersion = current.startsWith('npm:') ? current.slice(4) : ''
         const updateAvailable = currentVersion === '' || isNewerVersion(artifact.version, currentVersion)
         this.onLine(`官方产物：${NPM_PACKAGE}@${artifact.version}${currentVersion !== '' ? `（当前 ${currentVersion}）` : '（未安装）'}${updateAvailable ? '，可更新。' : '，已最新。'}`)
@@ -354,7 +369,7 @@ class Updater {
         // verifies it, and atomically switches `current` — no checkout, no
         // pnpm build. It falls back to the source pipeline below when the
         // registry chain is broken or the install fails.
-        if (settings.mode === 'local' && this.preferArtifact(settings)) {
+        if (this.preferArtifact(settings)) {
           const artifactOutcome = await this.artifactPipeline(settings)
           if (artifactOutcome.choseArtifact) {
             if (artifactOutcome.rolledBack) {
@@ -483,11 +498,14 @@ class Updater {
       return { choseArtifact: false }
     }
     await this.ensureToolchain(settings)
+    const version = query.version
+    if (settings.mode === 'ssh') {
+      return this.remoteArtifactPipeline(settings, version)
+    }
     const tools = this.connection.resolvedTools({ refresh: true })
     if (tools.node === '') {
       throw new Error('未找到兼容的 node（需 22.19+ 或 24+）。请安装 Node.js，或在「设置 → 高级」中手动指定 node 路径。')
     }
-    const version = query.version
     runtimeStore.writePendingUpdate(settings, { intent: 'artifact', version })
     const active = runtimeStore.localActiveRuntimeDir(settings)
     const currentNpm = this.npmCurrentVersion(settings)
@@ -533,6 +551,72 @@ class Updater {
           } catch (rollbackError) {
             this.onLine(`旧版本恢复失败：${String(rollbackError.message || rollbackError)}`)
           }
+        }
+      }
+      throw error
+    }
+    return { choseArtifact: true, fresh: true, version }
+  }
+
+  /**
+   * SSH-remote official-artifact install: npm install the prebuilt CLI into
+   * ~/.dsh/runtime/<npm-token> on the remote, verify, atomically switch the
+   * remote `current`, then restart the remote service. Falls back to the
+   * source pipeline only through the caller's {choseArtifact:false} path; a
+   * failed install throws (and is rolled back if the switch already happened).
+   */
+  async remoteArtifactPipeline(settings, version) {
+    const remoteRun = (host, inner, options) => this.connection.remoteRun(host, inner, options)
+    const token = runtimeStore.versionToken(`npm:${version}`)
+    const versionDir = runtimeStore.remoteVersionDir(`npm:${version}`)
+    runtimeStore.writePendingUpdate(settings, { intent: 'artifact', version })
+    // Skip when the active remote runtime is already this artifact version.
+    const manifest = await runtimeStore.readRemoteRootManifest(settings, remoteRun)
+    const active = await runtimeStore.remoteActiveRuntimeDir(settings, remoteRun)
+    if (manifest.current === token && active !== null) {
+      this.onLine(`远端官方产物 v${version} 已安装，跳过下载。`)
+      return { choseArtifact: true, fresh: false, version }
+    }
+    this.onLine(`远端下载官方预构建版 ${NPM_PACKAGE}@${version} → ${versionDir} …`)
+    const install = await remoteRun(
+      settings.ssh.host,
+      `rm -rf ${versionDir} && mkdir -p ${versionDir} && ${remoteToolchainPrefix()} cd ${versionDir} && npm install --prefix ${versionDir} --no-audit --no-fund ${NPM_PACKAGE}@${version}`,
+      { timeoutMs: 20 * 60_000, onLine: line => this.onLine(line) },
+    )
+    if (install.code !== 0) {
+      throw new Error(`远端官方产物安装失败（退出码 ${install.code}）：${install.lines.slice(-8).join('\n')}`)
+    }
+    const verify = await remoteRun(
+      settings.ssh.host,
+      `if test -f ${versionDir}/node_modules/@deepseek-ai/dsh/lib/bin.js; then echo ok; else echo missing; fi`,
+      { timeoutMs: 20_000 },
+    )
+    if (!verify.lines.includes('ok')) throw new Error(`远端官方产物校验失败：${versionDir}`)
+    this.onLine('已安装，原子切换远端 current …')
+    const previous = manifest.current ?? null
+    const activated = await runtimeStore.activateRemoteRuntime(settings, remoteRun, `npm:${version}`)
+    this.onLine(`已切换到远端官方产物 ${activated}（上一版本：${previous ?? '无'}）。`)
+    try {
+      await this.runStep('重启服务', async () => {
+        await this.connection.restartService()
+        return { code: 0, lines: [] }
+      })
+    } catch (error) {
+      if (previous !== null && previous !== '') {
+        try {
+          const rollbackVersion = await runtimeStore.rollbackRemoteRuntime(settings, remoteRun)
+          if (rollbackVersion !== null && rollbackVersion !== '') {
+            this.onLine(`新产物启动失败，已回滚到 ${rollbackVersion}，尝试恢复旧服务…`)
+            try {
+              await this.connection.restartService()
+              this.onLine('旧版本已恢复，本次更新未生效。')
+              return { choseArtifact: true, fresh: false, rolledBack: true, rollbackVersion, error }
+            } catch (rollbackError) {
+              this.onLine(`旧版本恢复失败：${String(rollbackError.message || rollbackError)}`)
+            }
+          }
+        } catch (rollbackError) {
+          this.onLine(`回滚失败：${String(rollbackError.message || rollbackError)}`)
         }
       }
       throw error

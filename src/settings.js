@@ -34,9 +34,12 @@ const DEFAULT_LOCAL_REPO_DIR = IS_PACKAGED
   ? path.join(os.homedir(), 'deepseek-harness')
   : path.join(__dirname, '..', 'deepseek-harness')
 
+/** The official harness repository (packaging-independent). */
+const OFFICIAL_REPO_URL = 'https://github.com/deepseek-ai/deepseek-harness.git'
+
 /** A fresh packaged install can clone the official repo without first-run setup. */
 const DEFAULT_LOCAL_REPO_URL = IS_PACKAGED
-  ? 'https://github.com/deepseek-ai/deepseek-harness.git'
+  ? OFFICIAL_REPO_URL
   : ''
 
 /** Defaults every device entry is normalized against. */
@@ -247,6 +250,7 @@ class SettingsStore {
 module.exports = {
   DEV_DEFAULT_DSH_HOME,
   DEFAULT_LOCAL_REPO_URL,
+  OFFICIAL_REPO_URL,
   DEFAULTS,
   defaultDevice,
   deviceKeyOf,
