@@ -47,6 +47,7 @@ class Updater {
   constructor({ getSettings, connection, onLine, onBusyChange }) {
     this.getSettings = getSettings
     this.connection = connection
+    this.owner = () => connection.owner()
     this.onLine = onLine || (() => {})
     this.onBusyChange = onBusyChange || (() => {})
     this.busy = false
@@ -70,6 +71,7 @@ class Updater {
       env: tools.env,
       timeoutMs: options.timeoutMs,
       onLine: options.onLine,
+      owner: this.owner(),
     })
   }
 
@@ -250,6 +252,7 @@ class Updater {
       env: tools.env,
       timeoutMs: LONG_TIMEOUT_MS,
       onLine: line => this.onLine(line),
+      owner: this.owner(),
     }))
     await this.runStep('pnpm run build', () => runCommand({
       cmd: tools.pnpm,
@@ -258,6 +261,7 @@ class Updater {
       env: tools.env,
       timeoutMs: LONG_TIMEOUT_MS,
       onLine: line => this.onLine(line),
+      owner: this.owner(),
     }))
   }
 
@@ -409,7 +413,7 @@ class Updater {
           this.onLine(`远程 node/pnpm：${toolchain.lines.map(line => line.trim()).filter(Boolean).join('，')}`)
         } else {
           if (tools.node === '') throw new Error('未找到兼容的 node（需 22.19+ 或 24+）。请安装 Node.js，或在「设置 → 高级」中指定 node 路径。')
-          const nodeVersion = await runCommand({ cmd: tools.node, args: ['--version'], env: tools.env, timeoutMs: 60_000 })
+          const nodeVersion = await runCommand({ cmd: tools.node, args: ['--version'], env: tools.env, timeoutMs: 60_000, owner: this.owner() })
           if (nodeVersion.code !== 0) throw new Error(`node 不可用（退出码 ${nodeVersion.code}）。`)
           const pnpmVersion = await runCommand({
             cmd: tools.pnpm,
@@ -417,6 +421,7 @@ class Updater {
             env: tools.env,
             cwd: settings.local.repoDir,
             timeoutMs: 60_000,
+            owner: this.owner(),
           })
           if (pnpmVersion.code !== 0) throw new Error(`pnpm 不可用（退出码 ${pnpmVersion.code}）。`)
           this.onLine(`node：${(nodeVersion.lines[0] || '').trim()}；pnpm：${(pnpmVersion.lines[0] || '').trim()}`)
@@ -525,6 +530,7 @@ class Updater {
         spec: `${NPM_PACKAGE}@${version}`,
         env: tools.env,
         onLine: line => this.onLine(line),
+        owner: this.owner(),
       })
     } catch (error) {
       fs.rmSync(buildDir, { recursive: true, force: true })
@@ -664,6 +670,7 @@ class Updater {
       env: tools.env,
       timeoutMs: 10 * 60_000,
       onLine: line => this.onLine(`[curl] ${line}`),
+      owner: this.owner(),
     })
     if (fetch.code !== 0) throw new Error(`便携版 node 下载失败（${url}）。请检查网络。`)
     const unpack = await runCommand({
@@ -672,6 +679,7 @@ class Updater {
       env: tools.env,
       timeoutMs: 5 * 60_000,
       onLine: line => this.onLine(`[tar] ${line}`),
+      owner: this.owner(),
     })
     fs.rmSync(archive, { force: true })
     if (unpack.code !== 0) throw new Error('便携版 node 解压失败。')
@@ -691,6 +699,7 @@ class Updater {
       env: this.connection.resolvedTools().env,
       timeoutMs: 10 * 60_000,
       onLine: line => this.onLine(`[npm] ${line}`),
+      owner: this.owner(),
     })
     if (result.code !== 0) throw new Error(`pnpm 本地安装失败：${result.lines.join('\n')}`)
     const resolved = this.connection.resolvedTools({ refresh: true })

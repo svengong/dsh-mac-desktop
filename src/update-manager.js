@@ -139,6 +139,7 @@ class UpdateManager {
     this.saveUpdate = saveUpdate
     this.connection = connection
     this.harnessUpdater = harnessUpdater
+    this.owner = () => connection.owner()
     this.onLog = onLog || (() => {})
     this.onState = onState || (() => {})
     this.busy = false
@@ -283,6 +284,7 @@ class UpdateManager {
       env: tools.env,
       timeoutMs: 120_000,
       onLine,
+      owner: this.owner(),
     })
   }
 
@@ -596,6 +598,7 @@ class UpdateManager {
       env: this.localTools().env,
       timeoutMs: 60_000,
       onLine: line => this.log(line),
+      owner: this.owner(),
     })
     if (result.code !== 0) throw new Error(`workspace 设置准备失败：${result.lines.join('\n')}`)
     this.log(`workspace 设置：${result.lines[0] ?? ''}`)
@@ -673,6 +676,7 @@ class UpdateManager {
         env: pluginEnv,
         timeoutMs: PLUGIN_TIMEOUT_MS,
         onLine: line => this.log(line),
+        owner: this.owner(),
       })
       if (result.code !== 0) throw new Error(`插件更新失败（退出码 ${result.code}）：${result.lines.slice(-6).join('\n')}`)
     }
