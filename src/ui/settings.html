@@ -510,6 +510,19 @@ function sourceOf(row) {
 }
 function renderUpdates() {
   const list = $('update-components'); list.textContent = ''
+  if (updateState.detached) {
+    const empty = document.createElement('div')
+    empty.className = 'component empty-state'
+    empty.style.cssText = 'display:flex;min-height:180px;align-items:center;justify-content:center;color:var(--ds-text-muted);border:1px dashed var(--ds-border-strong);border-radius:10px;margin:12px 0'
+    empty.textContent = '当前窗口尚未连接终端。请先在「连接」中选择并保存终端。'
+    list.appendChild(empty)
+    const badgeEl = $('nav-update-count'); badgeEl.hidden = true; badgeEl.textContent = '0'
+    setSwitch('auto-check', updateState.autoCheckOnLaunch === false ? false : true)
+    $('check-all').disabled = true
+    $('update-all').disabled = true
+    renderFooter()
+    return
+  }
   for (const row of updateState.components) {
     const item = document.createElement('section'); item.className = 'component'; item.dataset.available = row.updateAvailable ? 'true' : 'false'
     const main = document.createElement('div'); main.className = 'component-main'
@@ -603,6 +616,21 @@ function appendLog(line) {
 api.updates.onLog(appendLog)
 api.updates.onState(state => { updateState = state; renderUpdates() })
 
+/** Live connection strip for the connection page; no page jump on connect. */
+function renderLive(live) {
+  const strip = $('live-strip')
+  if (live && live.state === 'ready' && live.url) {
+    strip.hidden = false
+    strip.textContent = '当前连接：' + live.url + ' — ' + live.detail
+  } else if (live && live.detail) {
+    strip.hidden = false
+    strip.textContent = '状态：' + live.detail
+  } else {
+    strip.hidden = true
+  }
+}
+api.onLive && api.onLive(renderLive)
+
 // ── save connection settings ────────────────────────────────────────────────
 
 async function saveSettings() {
@@ -649,9 +677,7 @@ api.getState().then(state => {
   const update = s.update ?? {}
   updateState.autoCheckOnLaunch = update.autoCheckOnLaunch !== false
   setSwitch('auto-check', updateState.autoCheckOnLaunch)
-  if (state.live && state.live.state === 'ready' && state.live.url) {
-    const live = $('live-strip'); live.hidden = false; live.textContent = `当前连接：${state.live.url} — ${state.live.detail}`
-  }
+  renderLive(state.live)
   refreshMode(); refreshSshHost(); refreshSections()
   if (activeSection === 'updates') void refreshUpdatesLog()
 })

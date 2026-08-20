@@ -89,10 +89,10 @@ function renderLoadingActions(actions) {
 }
 
 // 加载面板显示决策表：
-//   view === 'harness' 且（有进度条 或 harness 未就绪）→ 显示；其余 → 隐藏
+//   view === 'harness' 且（有进度条 或 harness 未就绪 或 连接非 ready）→ 显示；其余 → 隐藏
 function renderLoading(state) {
   const panel = $('loading-panel')
-  const show = state.view === 'harness' && (state.progress !== null || !state.harnessReady)
+  const show = state.view === 'harness' && (state.progress !== null || !state.harnessReady || state.connState !== 'ready')
   panel.classList.toggle('hidden', !show)
   if (!show) return
 
@@ -108,16 +108,34 @@ function renderLoading(state) {
   let tone = 'busy'
   let title = '正在连接…'
   let status = state.status || ''
+  let actions = []
   switch (state.connState) {
     case 'idle':
       tone = 'idle'
-      title = '未连接'
-      status = state.status || '尚未连接，可在「连接」中配置。'
+      if (state.detached) {
+        if (state.hasOpenWindow) {
+          title = '终端已在另一个窗口打开'
+          status = '同一终端只保留一个窗口实例，不会重复连接。'
+          actions = [{ label: '切换到该窗口', name: 'focus-terminal-window', primary: true }]
+        } else {
+          title = '待连接'
+          status = '当前窗口尚未连接终端，请先在「连接」中选择并保存。'
+          actions = [{ label: '打开连接设置', name: 'open-connection', primary: true }]
+        }
+      } else {
+        title = '未连接'
+        status = state.status || '尚未连接，可在「连接」中配置。'
+      }
       break
     case 'error':
       tone = 'error'
       title = '连接失败'
       status = state.status || state.loadError || '未知错误'
+      actions = [{ label: '连接设置', name: 'open-connection' }]
+      break
+    case 'restarting':
+      tone = 'busy'
+      title = '正在重启服务…'
       break
     case 'ready':
       title = '正在加载界面…'
@@ -128,7 +146,7 @@ function renderLoading(state) {
   panel.dataset.tone = tone
   $('loading-title').textContent = title
   $('loading-status').textContent = status
-  renderLoadingActions([])
+  renderLoadingActions(actions)
 }
 
 api.onState(state => {
@@ -140,8 +158,8 @@ api.onState(state => {
     button.setAttribute('aria-current', active ? 'page' : 'false')
   }
   $('shell-terminal').textContent = `DSH-[${state.terminal || '本地'}]`
-  $('shell-status').textContent = state.status || ''
-  $('shell-status').title = state.status || ''
+  $('shell-status').textContent = state.detached && state.hasOpenWindow ? '终端已打开' : ((state.task && state.task.label) || state.status || '')
+  $('shell-status').title = state.detached && state.hasOpenWindow ? '终端已打开' : ((state.task && state.task.label) || state.status || '')
   renderLoading(state)
 })
 </script>
