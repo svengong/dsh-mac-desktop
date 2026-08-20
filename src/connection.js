@@ -169,15 +169,6 @@ async function waitReady(url, timeoutMs = READY_TIMEOUT_MS) {
   throw new Error(`等待 ${url} 就绪超时（${Math.round(timeoutMs / 1000)} 秒）。请打开服务日志排查。`)
 }
 
-function isGitRepo(dir) {
-  try {
-    fs.statSync(path.join(dir, '.git'))
-    return true
-  } catch {
-    return false
-  }
-}
-
 /** Expand a leading `~/` against the user's home directory. */
 function expandHome(dir) {
   const { homedir } = require('node:os')
@@ -486,8 +477,9 @@ class ConnectionManager extends EventEmitter {
       return false
     }
     const dir = await this.remoteServiceDir(settings)
-    const bin = `${dir}/apps/cli/lib/bin.js`
-    const result = await this.remoteRun(settings.ssh.host, `test -f ${bin} && echo yes || echo no`)
+    // A runtime dir may be repo-layout (apps/cli/lib/bin.js) or npm-layout
+    // (node_modules/@deepseek-ai/dsh/lib/bin.js); recognize either.
+    const result = await this.remoteRun(settings.ssh.host, `if test -f ${dir}/apps/cli/lib/bin.js || test -f ${dir}/node_modules/@deepseek-ai/dsh/lib/bin.js; then echo yes; else echo no; fi`)
     // A non-zero exit here is a connectivity/ssh failure, not a "not built"
     // verdict: let the caller surface it as a connection problem.
     if (result.code !== 0) throw new Error(`无法检查远端构建状态：${result.lines.join('\n')}`)
@@ -713,7 +705,9 @@ class ConnectionManager extends EventEmitter {
     if (tools.node === '') {
       throw new Error('未找到兼容的 node（需 22.19+ 或 24+）。请安装 Node.js，或在「设置 → 高级」中手动指定 node 路径。')
     }
-    await this.ensureLocalRepo(settings)
+    // No source checkout is required anymore: the runtime is installed from
+    // the official npm artifact, so connecting never clones or validates a git
+    // repo — it just resolves the active runtime and serves it.
     const version = await this.serviceVersion(settings)
     const state = this.readLocalState(settings)
 
@@ -757,42 +751,6 @@ class ConnectionManager extends EventEmitter {
         : '已连接，但该端口响应的可能不是 DeepSeek Harness',
       serviceOwner: 'self',
     })
-  }
-
-  /**
-   * Local counterpart of ensureRemoteRepo: clone from `local.repoUrl` when the
-   * directory is missing or not a git repo, with a clear error when no URL is
-   * configured and nothing to clone from.
-   */
-  async ensureLocalRepo(settings) {
-    if (isGitRepo(settings.local.repoDir)) return { code: 0, lines: [] }
-    const tools = this.resolvedTools()
-    if (settings.local.repoUrl === '') {
-      throw new Error(
-        `仓库目录 ${settings.local.repoDir} 不存在或不是 git 仓库。\n` +
-        '请在「连接设置」中填写「仓库地址」（git URL），由壳自动克隆；或改为已有的 deepseek-harness 检出目录。',
-      )
-    }
-    if (tools.git === '') throw new Error('未找到 git，无法克隆仓库。请在「设置 → 高级」中指定 git 路径。')
-    this.log(`克隆 ${settings.local.repoUrl} 到 ${settings.local.repoDir} …`)
-    const lockName = `clone-${path.basename(settings.local.repoDir)}`
-    return runtimeStore.withLocalLock(settings, lockName, async () => {
-      // Another process may have won the clone race while we waited.
-      if (isGitRepo(settings.local.repoDir)) return { code: 0, lines: [] }
-      const result = await runCommand({
-        cmd: tools.git,
-        // Bypass user-global hooks (pre-commit/lfs shims): they assume a full
-        // developer environment and can fail a clean-env clone, and the repo
-        // has no LFS content to materialize.
-        args: ['-c', 'core.hooksPath=/dev/null', 'clone', settings.local.repoUrl, settings.local.repoDir],
-        env: tools.env,
-        timeoutMs: 10 * 60_000,
-        onLine: line => this.log(`[git] ${line}`),
-        owner: this.owner(),
-      })
-      if (result.code !== 0) throw new Error(`本地 git clone 失败：${result.lines.join('\n')}`)
-      return { code: 0, lines: [] }
-    }, { timeoutMs: 10 * 60_000 + 30_000 })
   }
 
   /**
@@ -1001,7 +959,9 @@ class ConnectionManager extends EventEmitter {
     }
     this.machineId = await this.ensureRemoteMachineId(target)
     this.log(`已识别终端身份 ${this.machineId.slice(0, 8)}`)
-    await this.ensureRemoteRepo(settings)
+    // No source checkout is required anymore: the remote runtime is installed
+    // from the official npm artifact, so connecting never clones or validates
+    // a remote git repo — it just resolves the active runtime and serves it.
     const version = await this.serviceVersion(settings)
     const state = await this.readRemoteState(settings)
 
@@ -1096,54 +1056,6 @@ class ConnectionManager extends EventEmitter {
         await sleep(800)
       }
     }
-  }
-
-  async ensureRemoteRepo(settings) {
-    const target = settings.ssh.host
-    const dir = remotePath(settings.ssh.remoteRepoDir)
-    const url = settings.ssh.remoteRepoUrl
-    this.log(`检查远程仓库 ${settings.ssh.remoteRepoDir} …`)
-    const check = await this.remoteRun(
-      target,
-      `if [ -d ${dir}/.git ]; then echo repo-ready; elif [ -e ${dir} ]; then echo repo-not-git; else echo repo-missing; fi`,
-      { timeoutMs: 20_000 },
-    )
-    if (check.code !== 0) throw new Error(`检查远程仓库失败：${check.lines.join('\n')}`)
-    const verdict = check.lines.find(line => line.startsWith('repo-'))
-    if (verdict === 'repo-not-git') {
-      throw new Error(`远程目录 ${settings.ssh.remoteRepoDir} 已存在但不是 git 仓库。请更换远程仓库目录。`)
-    }
-    if (verdict === 'repo-missing') {
-      if (settings.ssh.remoteRepoUrl === '') {
-        throw new Error(
-          `远程目录 ${settings.ssh.remoteRepoDir} 不存在，且未填写「远程仓库地址」。\n` +
-          '请填写 git URL 由壳自动克隆，或改为远端已有的检出目录。',
-        )
-      }
-      this.log(`克隆 ${url} 到远程 ${settings.ssh.remoteRepoDir} …`)
-      const clone = await runtimeStore.withRemoteLock(
-        settings,
-        (host, inner, options) => this.remoteRun(host, inner, options),
-        `clone-${settings.ssh.host}-${settings.ssh.remoteRepoDir}`,
-        async () => {
-          // Re-check inside the lock; another shell may have finished clone.
-          const inside = await this.remoteRun(
-            target,
-            `if [ -d ${dir}/.git ]; then echo repo-ready; else echo repo-missing; fi`,
-            { timeoutMs: 20_000 },
-          )
-          if (inside.lines.includes('repo-ready')) return { code: 0, lines: [] }
-          return this.remoteRun(
-            target,
-            `mkdir -p ${dir} && git -c core.hooksPath=/dev/null clone ${shellQuote(url)} ${dir}`,
-            { timeoutMs: 10 * 60_000, onLine: line => this.log(`[git] ${line}`) },
-          )
-        },
-        { timeoutMs: 10 * 60_000 + 30_000 },
-      )
-      if (clone.code !== 0) throw new Error(`远程 git clone 失败：${clone.lines.join('\n')}`)
-    }
-    return { code: 0, lines: [] }
   }
 
   /**
