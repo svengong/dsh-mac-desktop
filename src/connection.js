@@ -854,7 +854,9 @@ class ConnectionManager extends EventEmitter {
 
     const service = spawnService({
       cmd: tools.node,
-      args: [binPath, 'web', '--port', String(port)],
+      // `--no-open` stops the harness's web app from launching the system
+      // default browser after startup — the shell renders the web UI itself.
+      args: [binPath, 'web', '--port', String(port), '--no-open'],
       cwd: runtimeDir,
       env: { ...tools.env, DSH_HOME: expandHome(settings.local.dshHome) },
       onLine: line => {
@@ -1326,7 +1328,7 @@ class ConnectionManager extends EventEmitter {
     // The runtime dir may be a repo-layout checkout (apps/cli/lib/bin.js)
     // or an npm-layout official artifact; resolve the bin inside the remote
     // shell so one launcher covers both.
-    const runNode = `cd ${dir} && BIN=apps/cli/lib/bin.js; [ -f "$BIN" ] || BIN=node_modules/@deepseek-ai/dsh/lib/bin.js; exec node "$BIN" web --port ${remotePort} > ${portFile} 2>> ${logFile} < /dev/null`
+    const runNode = `cd ${dir} && BIN=apps/cli/lib/bin.js; [ -f "$BIN" ] || BIN=node_modules/@deepseek-ai/dsh/lib/bin.js; exec node "$BIN" web --port ${remotePort} --no-open > ${portFile} 2>> ${logFile} < /dev/null`
     const startCommand = `if command -v setsid >/dev/null 2>&1; then setsid sh -c ${shellQuote(runNode)} </dev/null >/dev/null 2>&1 & else nohup sh -c ${shellQuote(runNode)} >/dev/null 2>&1 </dev/null & fi; echo $! > ${pidFile}`
     const start = await this.remoteRun(
       settings.ssh.host,
