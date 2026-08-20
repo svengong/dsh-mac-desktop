@@ -1328,7 +1328,12 @@ class ConnectionManager extends EventEmitter {
     // The runtime dir may be a repo-layout checkout (apps/cli/lib/bin.js)
     // or an npm-layout official artifact; resolve the bin inside the remote
     // shell so one launcher covers both.
-    const runNode = `cd ${dir} && BIN=apps/cli/lib/bin.js; [ -f "$BIN" ] || BIN=node_modules/@deepseek-ai/dsh/lib/bin.js; exec node "$BIN" web --port ${remotePort} --no-open > ${portFile} 2>> ${logFile} < /dev/null`
+    // No `--no-open` here: the remote service always starts through ssh, so
+    // the harness sees SSH_CONNECTION/SSH_TTY and skips the default-browser
+    // handoff on its own. Older remote harnesses (and older official
+    // artifacts) don't recognize `--no-open`, so passing it would abort the
+    // boot with "unknown option".
+    const runNode = `cd ${dir} && BIN=apps/cli/lib/bin.js; [ -f "$BIN" ] || BIN=node_modules/@deepseek-ai/dsh/lib/bin.js; exec node "$BIN" web --port ${remotePort} > ${portFile} 2>> ${logFile} < /dev/null`
     const startCommand = `if command -v setsid >/dev/null 2>&1; then setsid sh -c ${shellQuote(runNode)} </dev/null >/dev/null 2>&1 & else nohup sh -c ${shellQuote(runNode)} >/dev/null 2>&1 </dev/null & fi; echo $! > ${pidFile}`
     const start = await this.remoteRun(
       settings.ssh.host,
