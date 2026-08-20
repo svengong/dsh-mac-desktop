@@ -26,7 +26,7 @@ const { runCommand, spawnService } = require('./runner')
 const { sshCommandArgs, tunnelArgs, shellQuote, remotePath, remoteToolchainPrefix, displayLabel } = require('./ssh')
 const { resolveTools } = require('./tools')
 const { findFreePort, releasePort, reservePort, tcpProbe } = require('./ports')
-const { runtimeLayout, npmArtifactVersion } = require('./runtime-layout')
+const { runtimeLayout } = require('./runtime-layout')
 const runtimeStore = require('./runtime-store')
 
 const PROBE_INTERVAL_MS = 750
@@ -152,11 +152,6 @@ async function findListeningPid(port) {
     }
   }
   return 0
-}
-
-/** Normalize a version fingerprint into a shell/JSON-safe token. */
-function versionToken(value) {
-  return String(value).replace(/[^a-zA-Z0-9._-]/g, '').slice(0, 64) || 'unknown'
 }
 
 async function waitReady(url, timeoutMs = READY_TIMEOUT_MS) {
@@ -294,76 +289,10 @@ class ConnectionManager extends EventEmitter {
   }
 
   /**
-   * The build fingerprint of the checkout the settings point at. A git HEAD is
-   * the primary token; a missing/empty repo falls back to the built `bin.js`
-   * mtime so a rebuild still trips an upgrade.
-   */
-  async currentVersion(settings) {
-    if (settings.mode === 'local') {
-      const tools = this.resolvedTools()
-      let head = ''
-      if (tools.git !== '') {
-        const result = await runCommand({
-          cmd: tools.git,
-          args: ['-C', settings.local.repoDir, 'rev-parse', 'HEAD'],
-          timeoutMs: 10_000,
-          owner: this.owner(),
-        })
-        head = result.code === 0 ? result.lines.map(line => line.trim()).find(Boolean) : ''
-      }
-      const activeDir = runtimeStore.localActiveRuntimeDir(settings) ?? settings.local.repoDir
-      // An npm-layout runtime's installed package version IS its identity;
-      // there is no git HEAD or built bin.js to fingerprint.
-      const npmVersion = npmArtifactVersion(activeDir)
-      if (npmVersion !== '') return versionToken(npmVersion)
-      if (head !== '') {
-        // A dirty worktree's build identity is the built bin's mtime: a
-        // rebuild changes it while HEAD stays put, and a connection must
-        // restart the resident service onto the rebuilt code instead of
-        // reusing the stale process by HEAD. Only a clean worktree is its
-        // HEAD. Untracked files never count as dirty (same rule as the
-        // update pipeline's gitFacts).
-        const dirty = await runCommand({
-          cmd: tools.git,
-          args: ['-C', settings.local.repoDir, 'status', '--porcelain'],
-          timeoutMs: 10_000,
-          owner: this.owner(),
-        })
-        const hasTrackedChanges = dirty.code === 0 && dirty.lines.some(line => !line.startsWith('??'))
-        if (hasTrackedChanges) {
-          try {
-            const stat = fs.statSync(path.join(settings.local.repoDir, 'apps/cli/lib/bin.js'))
-            return versionToken(`dirty:${stat.mtimeMs}`)
-          } catch {
-            return versionToken(head)
-          }
-        }
-        return versionToken(head)
-      }
-      try {
-        const stat = fs.statSync(path.join(settings.local.repoDir, 'apps/cli/lib/bin.js'))
-        return `mtime:${stat.mtimeMs}`
-      } catch {
-        return 'unknown'
-      }
-    }
-    const dir = remotePath(settings.ssh.remoteRepoDir)
-    const result = await this.remoteRun(
-      settings.ssh.host,
-      `dirty=$(git -C ${dir} status --porcelain 2>/dev/null | grep -v '^??' | head -1); if [ -n "$dirty" ]; then echo dirty:$(stat -c %Y ${dir}/apps/cli/lib/bin.js 2>/dev/null || stat -f %m ${dir}/apps/cli/lib/bin.js 2>/dev/null || echo unknown); else git -C ${dir} rev-parse HEAD 2>/dev/null || echo unknown; fi`,
-      { timeoutMs: 15_000 },
-    )
-    // remoteRun already isolates the payload from any gateway banner, so the
-    // first non-empty line is the version token the command reported.
-    const line = result.lines.map(text => text.trim()).find(Boolean)
-    return versionToken(line || 'unknown')
-  }
-
-  /**
    * Version of the runtime that is currently active (the `current` symlink),
-   * or the source checkout version when no versioned runtime exists yet.
-   * State reuse and service restarts must use this, not the source HEAD,
-   * otherwise a rolled-back service would be recorded as the newest build.
+   * or 'unknown' when no runtime is installed yet. State reuse and service
+   * restarts must use this — there is no source checkout anymore, so the
+   * active artifact's package version is the only identity.
    */
   async serviceVersion(settings) {
     if (settings.mode === 'local') {
@@ -371,13 +300,13 @@ class ConnectionManager extends EventEmitter {
       if (manifest.current !== null && runtimeStore.localActiveRuntimeDir(settings) !== null) {
         return manifest.current
       }
-      return this.currentVersion(settings)
+      return 'unknown'
     }
     const remoteRun = (host, inner, options) => this.remoteRun(host, inner, options)
     const manifest = await runtimeStore.readRemoteRootManifest(settings, remoteRun)
     const active = await runtimeStore.remoteActiveRuntimeDir(settings, remoteRun)
     if (manifest.current !== null && active !== null) return manifest.current
-    return this.currentVersion(settings)
+    return 'unknown'
   }
 
   localStatePath(settings) {

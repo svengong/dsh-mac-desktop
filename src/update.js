@@ -99,22 +99,19 @@ class Updater {
 
   async check() {
     const settings = this.getSettings()
-    // The shell now installs the official npm artifact exclusively; there is
-    // no source-build fallback, so an unavailable registry is surfaced as the
-    // check result rather than a git branch comparison.
+    // The shell installs the official npm artifact exclusively; an
+    // unavailable registry surfaces as the check result.
     const artifact = await this.queryArtifact(settings)
     if (!artifact.ok) {
       this.onLine(artifact.reason)
-      return { gitRepo: false, branch: '', upstream: '', ahead: 0, behind: 0, dirty: false, summary: artifact.reason }
+      return { artifact, currentNpm: '', updateAvailable: false, summary: artifact.reason }
     }
     const current = await this.npmCurrentVersion(settings)
     const currentVersion = current.startsWith('npm:') ? current.slice(4) : ''
     const updateAvailable = currentVersion === '' || isNewerVersion(artifact.version, currentVersion)
     this.onLine(`官方产物：${NPM_PACKAGE}@${artifact.version}${currentVersion !== '' ? `（当前 ${currentVersion}）` : '（未安装）'}${updateAvailable ? '，可更新。' : '，已最新。'}`)
     return {
-      gitRepo: false, branch: '', upstream: '', ahead: 0, behind: 0, dirty: false,
-      artifact, currentNpm: currentVersion,
-      updateAvailable,
+      artifact, currentNpm: currentVersion, updateAvailable,
       summary: updateAvailable ? `官方预构建版 v${artifact.version} 可用` : `官方预构建版 v${artifact.version}（已最新）`,
     }
   }

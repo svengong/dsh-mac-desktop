@@ -316,45 +316,23 @@ class UpdateManager {
   // ── component checks ───────────────────────────────────────────────────────
 
   async checkHarness() {
-    const row = this.component('harness')
-    this.patchRow('harness', { status: 'checking', summary: 'git fetch 远端更新信息…', error: '' })
+    this.patchRow('harness', { status: 'checking', summary: '查询官方产物版本…', error: '' })
     const facts = await this.harnessUpdater.check()
-    // Official-artifact verdict (local + official repo): no git facts at all,
-    // the harness row mirrors the registry state instead of a branch.
-    if (facts.artifact !== undefined && facts.artifact.ok && facts.updateAvailable !== undefined) {
-      this.patchRow('harness', {
-        status: 'ready',
-        current: facts.currentNpm !== '' ? `v${facts.currentNpm}` : '未安装',
-        latest: `v${facts.artifact.version}`,
-        updateAvailable: facts.updateAvailable,
-        summary: facts.summary,
-        error: '',
-      })
-      return
-    }
-    if (!facts.gitRepo || facts.upstream === '') {
+    if (!facts.artifact.ok) {
       this.patchRow('harness', {
         status: 'error',
-        current: facts.branch,
+        current: '',
         summary: facts.summary,
         error: facts.summary,
       })
       return
     }
-    const current = `${facts.branch}${facts.dirty ? '（工作区有改动）' : ''}`
-    const latest = facts.behind > 0 ? facts.upstream : current
-    const settings = this.getSettings()
-    const activeVersion = await this.connection.serviceVersion(settings)
-    const sourceVersion = await this.connection.currentVersion(settings)
-    const rolledBack = activeVersion !== '' && sourceVersion !== '' && activeVersion !== sourceVersion
     this.patchRow('harness', {
       status: 'ready',
-      current: rolledBack ? `${current} · 运行 ${activeVersion.slice(0, 8)}` : current,
-      latest,
-      updateAvailable: facts.behind > 0 || rolledBack,
-      summary: rolledBack
-        ? `当前运行已回滚版本 ${activeVersion.slice(0, 8)}，源仓库为 ${sourceVersion.slice(0, 8)}`
-        : facts.summary,
+      current: facts.currentNpm !== '' ? `v${facts.currentNpm}` : '未安装',
+      latest: `v${facts.artifact.version}`,
+      updateAvailable: facts.updateAvailable,
+      summary: facts.summary,
       error: '',
     })
   }
