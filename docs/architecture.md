@@ -57,9 +57,11 @@ BrowserWindow (shell.html 边框)
                                             └─ UpdateManager / Updater
 ```
 
-- `workspaces`：`Map<id, workspace>`，一个 BrowserWindow 一个 workspace。
+- `workspaces`：`Map<id, workspace>`，一个 BrowserWindow 一个 workspace。窗口可以是未绑定（detached，不持有 session）或已绑定某终端。
 - `sessions`：`Map<deviceKey, session>`，`deviceKey` 为 `local`、`ssh:<host>` 或归一后的 `machine:<id>`。
 - 同设备窗口共享 session；窗口关闭只是隐藏，workspace 持续存活，显式退出时才销毁。
+- 启动/恢复的第一个窗口绑定上次活跃设备并自动连接；显式新建窗口为 detached，默认连接页。每个终端最多一个已绑定窗口；保存已打开终端时仅聚焦已有窗口，当前窗口保持不变。
+- 任务进度横幅存在 session 上（`session.progress`），同终端所有已绑定窗口共享；`sessionTask` 给壳工具栏提供检查/更新/构建/重启状态。切离窗口时通过 runner owner 取消该终端任务，释放锁后再停 session。
 - 窗口切换设备调用 `attachWorkspace`；`local` session 常驻以支持多开。
 
 ## 4. 端口与进程策略

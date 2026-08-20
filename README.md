@@ -9,8 +9,8 @@ The shell is a **thin wrapper**: it loads a fixed URL and only ever runs git/pnp
 ## Highlights
 
 - **Silent resident deployment, local or SSH-remote** — connect and the harness **resident daemon (`dsh web`) is deployed and kept up to date automatically**: the shell clones (or pulls), builds, starts and restarts the service, and upgrades it to the current version on every reconnect — no shell access, no manual steps. The remote needs **no system toolchain**: a portable node and the repo-pinned pnpm are bootstrapped into `~/.dsh-tools` on the remote automatically.
-- **Multi-window, VS Code Remote style** — one window per workspace; windows on the same device share one backend; any window can switch to any SSH host.
-- **Update-friendly** — official prebuilt artifacts preferred, source builds as fallback; versioned runtimes with atomic switch and automatic rollback; updates survive shell quit (detached worker) and resume after a crash.
+- **Multi-window, VS Code Remote style** — the first window restores and connects the current terminal; new windows open on the connection page without auto-connecting; each terminal keeps at most one bound window: connecting to an already-open terminal only switches to that window and leaves the current window untouched, while every other action stays in the current window.
+- **Update-friendly** — official prebuilt artifacts preferred, source builds as fallback; versioned runtimes with atomic switch and automatic rollback; updates survive shell quit (detached worker), resume after a crash, and can be safely cancelled when switching terminals.
 
 ## Features
 
