@@ -854,9 +854,9 @@ class ConnectionManager extends EventEmitter {
 
     const service = spawnService({
       cmd: tools.node,
-      // `--no-open` stops the harness's web app from launching the system
-      // default browser after startup — the shell renders the web UI itself.
-      args: [binPath, 'web', '--port', String(port), '--no-open'],
+      // NOTE: `--no-open` is intentionally omitted until the official npm
+      // artifact ships it; older artifacts abort on the unknown option.
+      args: [binPath, 'web', '--port', String(port)],
       cwd: runtimeDir,
       env: { ...tools.env, DSH_HOME: expandHome(settings.local.dshHome) },
       onLine: line => {
