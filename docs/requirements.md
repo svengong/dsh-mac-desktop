@@ -143,14 +143,14 @@ VS Code Remote——用户可以选择本机 checkout 或 SSH 远程主机运行
 | 终端 B 更新中，用户切到已打开的 A 或新终端 | 不弹锁：取消 B 任务，关闭/重绑 B 窗口，聚焦目标窗口；旧服务继续运行，更新可重试。 |
 | 窗口 A 保存本地 repo 后，窗口 B 再打开设置 | 保存后重载该设备所有窗口的设置面板，防止旧表单回写。 |
 | 启动时恢复窗口 | 从 `window-state.json` 恢复上次活跃设备和 bounds，不影响 settings 里的 activeDeviceId。 |
-| 两个壳实例同时 clone/build 同一仓库 | 本地 `mkdir` 锁；远端 owner+时间戳锁，stale 后回收。 |
-| 同一设备后台窗口正在 build，前台窗口点击更新 | 按设备 busy 检测，菜单禁用并弹提示。 |
-| build 中 Cmd+Q / 托盘退出 | 直接 teardown 子进程；staging 目录与运行服务隔离，杀 build 安全，下次启动重建。 |
+| 两个壳实例同时安装官方产物 | 本地 `mkdir` 锁；远端 owner+时间戳锁，stale 后回收。 |
+| 同一设备后台窗口正在安装产物，前台窗口点击更新 | 按设备 busy 检测，菜单禁用并弹提示。 |
+| 产物安装中 Cmd+Q / 托盘退出 | 直接 teardown 子进程；staging 目录与运行服务隔离，杀安装安全，下次启动重建。 |
 | SSH session 因切设备被 stop，旧重试定时器到点 | 检查 session 仍注册且仍有窗口，否则丢弃。 |
 | 隧道建立超时 | 杀死本次超时子进程后再报错，防止半死隧道占端口。 |
 | 更新管理 tab 晚打开 | `updates:get-log` 回填 connection log ring 并滚动到底。 |
 | 插件是 `github:owner/repo` 或 `file:./plugin` | 不查询 npm `/latest`，按原 spec 执行安装；检查时提示“自定义安装源”。 |
-| staging build 失败 | current 不被切换，失败 worktree 被移除，旧服务继续运行。 |
+| 官方产物安装失败 | current 不被切换，失败版本目录被移除，旧服务继续运行。 |
 | 新 runtime 启动失败 | 自动切回 manifest.previous 并重启旧 runtime，更新行显示回滚状态。 |
 | 用户手动回滚 | 菜单「回滚 Harness…」切回上一版本并重置/重连后端。 |
 
@@ -164,4 +164,3 @@ VS Code Remote——用户可以选择本机 checkout 或 SSH 远程主机运行
 - 更新管理 tab 滚动顺序为：运行组件 → 更新源 → 固定高度日志。
 - 新建 npm 插件时，直接粘贴 `dsh plugin --profile web add github:owner/repo` 可保存并执行。
 - smoke 实际启动 `dsh web --port 0`，断言回读端口 > 0；`window-state.json` 可恢复 last-active 设备与 bounds。
-- `scripts/e2e-local.js` 与 `scripts/e2e-ssh.js` 都完成 staging build、原子切换、端口 0 启动和 `__DSH_BOOT__` 探测。

@@ -14,12 +14,12 @@ Electron macOS 薄壳：主窗口顶部 46px 壳边框，下面是 harness WebCo
 |---|---|---|
 | 开发态隔离 | `src/main.js#configureUserData` | 未打包时 userData=`~/.dsh-dev`（自动创建）；`DSH_DESKTOP_USER_DATA` 可覆盖 |
 | 端口 0 | `src/runtime-store.js`、`src/connection.js` | 本地/远端 `dsh web --port 0`，解析 `dsh web: URL` 回读真实端口 |
-| 版本化运行时 | `src/runtime-store.js`、`src/update.js` | staging git worktree build → 原子 `current` → 自动/手动回滚 |
+| 版本化运行时 | `src/runtime-store.js`、`src/update.js` | 官方产物 npm install → 原子 `current` → 自动/手动回滚 |
 | 转发端口 | `src/ports.js` | 仅 SSH 本地转发使用优先端口 + 顺延 30 + 进程内预留 |
-| 安装/构建锁 | `src/runtime-store.js`、`src/update.js` | 本地 `mkdir` 锁；远端 owner+2h stale 锁；clone/build 串行 |
+| 安装锁 | `src/runtime-store.js`、`src/update.js` | 本地 `mkdir` 锁；远端 owner+2h stale 锁；产物安装串行 |
 | 窗口状态 | `src/window-manager.js`、`src/main.js` | `window-state.json` 保存 bounds/active-view/last-active，启动恢复 |
 | 多窗口加固 | `src/main.js` | 保存后重载同设备所有设置面板；按终端 busy 阻止同设备并发任务；重连定时器不复活已 stop session |
-| 退出防护 | `src/main.js#before-quit` | 退出直接 teardown 子进程；staging 与运行服务隔离，杀 build 安全 |
+| 退出防护 | `src/main.js#before-quit` | 退出直接 teardown 子进程；staging 与运行服务隔离，杀安装安全 |
 | 日志面板 | `src/ui/settings.html` | 日志在 tab 最后、固定 176px、`updates:get-log` 回填最新 |
 | macOS UI | `src/main.js#createBrowserWindow`、`src/ui/shell.css` | hiddenInset + trafficLightPosition；系统字体与浅/深色变量 |
 | npm 插件 | `src/components.js`、`src/update-manager.js`、`src/ui/settings.html` | `installSpec` 支持 pnpm `add` 全语法；可直接粘贴完整命令 |
@@ -36,11 +36,11 @@ Electron macOS 薄壳：主窗口顶部 46px 壳边框，下面是 harness WebCo
 3. **settings 永远先归一化。** 所有入口都经 `normalizeSettings`，坏数据回退默认。
 4. **Web 服务端口必须用 `--port 0`。** 不要重新引入本地/远端 web 端口扫描；只有 SSH
    转发端口使用 `acquireLocalPort()`，停止/失败路径调 `releaseReservedPorts()`。
-5. **clone/build 必须过 runtime-store 锁。** 新增任何仓库写入或 pnpm build 路径时，
+5. **产物安装必须过 runtime-store 锁。** 新增任何运行时写入或产物安装路径时，
    先判断是否会被第二个壳实例并发执行。
-6. **busy 任务按终端互斥。** 新增任何 pnpm install/build/plugin update 路径前，先经过
+6. **busy 任务按终端互斥。** 新增任何产物安装/plugin update 路径前，先经过
    `isSessionBusy()` / `canStartBusyTask()` 语义（或复用 `Updater.runPipeline` /
-   `UpdateManager.update*`）；不同终端的构建互不阻塞。
+   `UpdateManager.update*`）；不同终端的安装互不阻塞。
 7. **多窗口设置不能有第二事实源。** 连接设置保存后必须 `setupDialog.reload()` 同设备窗口；
    更新状态用 `broadcastSession` 推送。
 8. **标题与菜单统一走 `labels.js`。** 不要手写第二份 `DSH-[终端]`。
@@ -57,15 +57,15 @@ Electron macOS 薄壳：主窗口顶部 46px 壳边框，下面是 harness WebCo
     在途 git/pnpm 构建在应用退出后继续运行。
 14. **超时杀进程必须连进程组一起杀。** `runCommand` 一律 `detached: true`，
     超时用 `process.kill(-pid, 'SIGKILL')`，否则 pnpm/npm 的孙进程会孤儿化。
-15. **官方产物优先，源码构建是 fallback。** 本地 + 官方仓库 URL 的更新先走
-    `artifact.js` 预检（registry 最新版 + 依赖链完整性）；链断/安装失败自动降级
-    源码管线并说明原因，绝不静默换路。新增安装路径必须复用 `installNpmArtifact`
-    + `activateLocalRuntime`，不要自造第三套。
+15. **仅官方产物，无源码构建。** 更新只走 `artifact.js` 预检（registry 最新版 +
+    依赖链完整性）→ `installNpmArtifact` 安装 → `activateLocalRuntime` 原子切换；
+    链断/安装失败直接报错并说明原因，不回退源码构建。新增安装路径必须复用这套
+    原语，不要自造第三套。
 16. **更新意图必须可恢复。**
 17. **连接时自动升级驻留程序是核心契约。** 连接对比 state.version 与
-    serviceVersion，不匹配自动 reap + relaunch；但「获取新版本」只走更新管线——
-    runtime 化后 source HEAD 变化不得触发连接升级。改版本语义前先读
-    `development.md`「10. 新版本发布约定」并跑两个 e2e。 开始更新前写 `update-pending.json`，正常结束才清除；
+   serviceVersion，不匹配自动 reap + relaunch；但「获取新版本」只走更新管线——
+   版本只在更新管线里变更。改版本语义前先读
+   `development.md`「10. 新版本发布约定」。 开始更新前写 `update-pending.json`，正常结束才清除；
     被打断（退出/崩溃）后启动时 `resumePendingUpdate()` 询问继续/放弃。detached
     worker（`update-worker.js`）不注册进进程登记表，壳退出不杀它；壳通过
     `runtime/update-status.json` 观察，`done` 后重启服务，下次连接按版本不匹配兜底。
@@ -76,9 +76,6 @@ Electron macOS 薄壳：主窗口顶部 46px 壳边框，下面是 harness WebCo
 node scripts/smoke.js
 DSH_DESKTOP_SMOKE=1 npx electron .
 node --check <改动的 .js>
-# 新版本发布前必跑（见 development.md「10. 新版本发布约定」）：
-node scripts/e2e-local.js
-node scripts/e2e-ssh.js <ssh-host>
 ```
 
 UI 改动额外检查：
@@ -115,13 +112,13 @@ for f in /tmp/settings.html.js /tmp/shell.html.js; do node --check "$f"; done
    不要手拼裸字符串。
 4. **`tcpProbe` 成功 ≠ 端口是 DSH。** 本地复用只认 state.version + `__DSH_BOOT__` 标记。
 5. **窗口关闭是隐藏不是销毁。** 清理逻辑要区分 `close`（hide）与 `closed`（quit）。
-6. **退出不阻塞构建。** 退出直接 teardown 子进程；staging 目录与运行服务隔离，杀 build 安全，下次启动重建。
+6. **退出不阻塞安装。** 退出直接 teardown 子进程；staging 目录与运行服务隔离，杀安装安全，下次启动重建。
 7. **设置面板是懒创建且常驻。** 修改共享设置后必须 reload，否则旧 form 会被另一个窗口保存回去。
 8. **端口不再暴露给用户。** 内部 `dsh web --port 0`；SSH 本地转发 `localPort` 仅作优先值、占用时顺延，settings 里的 `remotePort` 仅作兼容保留。
-9. **dirty 工作区不建 runtime 快照。** staging 只对 clean HEAD 使用 git worktree；
-   dirty 构建仍发生在源目录，因此回滚菜单对该模式会提示无上一版本。
+9. **官方产物安装失败会回滚。** 新产物启动失败自动切回 `previous` 并重启旧版本；
+   无上一版本（首次安装）时则报错并保留失败目录待重试。
 10. **serviceVersion ≠ currentVersion。** 状态复用必须用 active runtime 的 `serviceVersion`；
-    直接比较源 HEAD 会让回滚后的服务在下一次连接时被误杀重建。
+    直接比较包版本之外的东西会让回滚后的服务在下一次连接时被误杀重建。
 11. **运行时布局不再只有仓库形状。** bin 查找必须走 `runtime-layout.js`
     （repo 布局 `apps/cli/lib/bin.js`；npm 布局 `node_modules/@deepseek-ai/dsh/lib/bin.js`），
     直接拼 `apps/cli/lib/bin.js` 会漏掉官方产物运行时。
@@ -132,16 +129,14 @@ for f in /tmp/settings.html.js /tmp/shell.html.js; do node --check "$f"; done
     可能已属于新一代连接；必须身份校验后再 kill，否则会杀掉健康的新服务。
 14. **远端命令的 stat 必须 GNU 优先。** `stat -c %Y`（GNU/Linux）先试，
     `stat -f %m`（BSD/macOS）兜底；反序时 GNU 的 `-f %m` 会把文件系统信息块
-    打到 stdout 污染 lines[0]。dirty 工作区的 mtime 指纹（本地/远端、
-    connection.js 与 update.js）都必须带 `dirty:` 前缀且经 `versionToken`。
+    打到 stdout 污染 lines[0]。
 15. **远端 state 文件必须带换行结尾。** `writeRemoteState` 的 printf 缺 `\n`
     会让 `cat` 输出与 remoteRun 的 END marker 粘连，payload 隔离失效导致
     state 读取返回 null（历史潜伏缺陷）。`extractPayload` 按子串匹配 marker
     做纵深防御，新增无换行输出的远端命令前先想清楚 marker 行为。
-16. **runtime 化后 source 变化不触发连接升级。** `serviceVersion` 在
-    manifest.current 有效时返回它；dirty mtime 只在无 runtime（或删除
-    runtime）时成为版本源。e2e 验证 source 语义的自动升级前，必须先
-    `rm -rf ~/.dsh/runtime`，否则 fast path 按旧 current 复用属正确行为。
+16. **版本只在更新管线里变更，连接不触发升级。** `serviceVersion` 在
+    manifest.current 有效时返回它；只有「获取新版本」（更新管线）才会切换
+    current，连接只负责「升级到 current」。
 
 ## 7. 文档同步要求
 

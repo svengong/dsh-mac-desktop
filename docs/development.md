@@ -48,7 +48,7 @@ src/
 ├── runtime-store.js  local/remote runtime state、`dsh web` URL 解析、原子 clone/build 锁
 ├── ports.js          SSH 本地转发端口的进程内预留与 TCP 探测
 ├── connection.js     本地服务/SSH 隧道连接、state 复用、服务重置、日志 ring
-├── update.js         Harness pipeline：git → pnpm install → build → 重启
+├── update.js         官方产物安装管线：registry 预检 → npm install → 原子切换 → 重启
 ├── update-manager.js 组件检查/更新：harness、npm 插件、git preset
 ├── components.js     组件目录、归一化、npm spec 解析、版本比较/树哈希
 ├── ssh.js            ssh config 解析、目标解析、quoting、remote path
@@ -135,11 +135,10 @@ BrowserWindow (shell.html 边框)
 
 未知 kind 会在归一化时丢弃，因此 settings.json 永远不能把壳变成任意命令执行器。
 
-### 6.2 Harness staged runtime
+### 6.2 Harness 官方产物运行时
 
-- clean 工作区：`git worktree add --detach <dshHome>/runtime/<version> HEAD`，
-  在 worktree 里 `pnpm install + build`，成功后原子切换 `current` symlink；
-- dirty 工作区：保持旧行为，在源目录构建，不提供回滚快照；
+- `npm install --prefix <dshHome>/runtime/<npm:version> @deepseek-ai/dsh@<latest>`，
+  校验后原子切换 `current` symlink；
 - `runtime/manifest.json` 保存 `current` 与 `previous`，最多保留当前 + 上一版本；
 - 新 runtime 启动失败：自动切回 `previous` 并重启旧版本；
 - 更新菜单「回滚 Harness…」调用同一套 runtime-store 回滚并重置/重连后端；
@@ -176,11 +175,11 @@ npm 插件与 Git 预设的实际安装通过 `withComponentLock` 串行化（�
 
 更新按以下顺序决策（本地 + 官方仓库 URL 时）：
 
-1. **官方产物优先**（Phase 2）：`artifact.js` 先做 registry 预检——最新版本 +
-   依赖链完整性（`@deepseek-ai/dsh-frontend` 曾 404，链断时**自动降级源码构建**
-   并给出明确原因）。可用时 `npm install --prefix` 装进 `runtime/<version>`
+1. **仅官方产物**（Phase 2）：`artifact.js` 先做 registry 预检——最新版本 +
+   依赖链完整性（`@deepseek-ai/dsh-frontend` 曾 404，链断时更新失败并给出明确
+   原因，不再回退源码构建）。`npm install --prefix` 装进 `runtime/<version>`
    （npm 布局 `node_modules/@deepseek-ai/dsh/lib/bin.js`），校验后原子切换
-   `current`；源码构建（git worktree）成为 fork/离线场景的 fallback。
+   `current`。
 2. **detached worker 执行**（Phase 3）：菜单「更新并重启」与初始化在本地产物
    可用时改由 `src/update-worker.js` 独立进程执行（`runner.spawnDetached`，
    不注册进进程登记表——壳退出不会杀它）。壳轮询 `runtime/update-status.json`
@@ -254,31 +253,22 @@ DSH_DESKTOP_SMOKE=1 npx electron .       # Electron 冒烟（菜单/Dock/actions
 
 1. **连接时自动升级（reap → launch）**：连接时对比 state 记录的 version 与当前
    serviceVersion。不匹配 → 自动清理旧驻留程序（kill 记录 pid / lsof 兜底）→ 以
-   当前版本重新启动。版本身份：runtime `current` 优先；无 runtime 时 clean 工作区
-   用 git HEAD，**dirty 工作区用已构建 bin 的 mtime**（重建后 HEAD 不变，但连接
-   必须重启到新构建，不能按 HEAD 复用旧进程）；npm 布局用包版本。所有 token 统一
-   经 `versionToken` 归一。
-2. **获取新版本（更新管线）**：git pull → staging build → 原子切换 current →
-   重启。连接只负责「升级到 current」，不负责「获取新版本」——runtime 化后
-   source HEAD 的变化**不会**触发连接升级（复用旧 runtime），这是设计语义，
-   不要改回「连接即比对 HEAD」。
+   当前版本重新启动。版本身份即官方产物的包版本（npm 布局），统一经
+   `versionToken` 归一。
+2. **获取新版本（更新管线）**：registry 预检 → 下载官方产物 → 原子切换 current →
+   重启。连接只负责「升级到 current」，不负责「获取新版本」。
 
 ### 验证步骤（每次新版本必做）
 
 1. `node scripts/smoke.js` + `DSH_DESKTOP_SMOKE=1 npx electron .` 全绿。
-2. `node scripts/e2e-local.js`：构建 → 服务启动 → 空提交模拟新版本 → 重连自动
-   reap 旧服务并升级（含崩溃重试不回退旧版本）。约几分钟。
-3. `node scripts/e2e-ssh.js <ssh-host>`：远端构建（dirty 模式）→ 远端服务被外部
-   kill 后重连自动 relaunch（锁内探活，修复了死端口空等 90s 的旧缺口）→ bin
-   mtime 变化（重建）后重连自动 reap + 升级远端驻留程序。需要一台免密 SSH 目标。
-4. 手工冒烟（推荐）：旧版本壳保持连接 → 另一实例触发升级 → 确认旧壳窗口不会
+2. 手工冒烟（推荐）：旧版本壳保持连接 → 另一实例触发升级 → 确认旧壳窗口不会
    把版本拉回旧值（多实例防回退：closeWatcher 重启前重解析 serviceVersion）。
-5. 回滚验证：新版本启动失败 → 自动回滚 previous 并恢复旧服务。
+3. 回滚验证：新版本启动失败 → 自动回滚 previous 并恢复旧服务。
 
 ### 检查点速查
 
 - 本地：日志出现「清理旧版/残留服务」；`<dshHome>/desktop-web.state.json` 的
-  version == 新 token（git HEAD 或 npm:<ver>）。
+  version == 新 token（npm:<ver>）。
 - 远端：`~/.dsh/desktop-web.state.json` version 更新；`desktop-web.log` 有新版本
   启动记录；隧道重建后页面就绪（`__DSH_BOOT__` 探测通过）。
 - 多实例：两个壳同时连接时，最终 state 必须指向新版本（无旧版本回退）。
