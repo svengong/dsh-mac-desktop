@@ -17,7 +17,7 @@
 
 ### 2.2 现状基础（可复用资产）
 
-- **Linux 侧机制已就绪且与客户端形态无关**：远端驻留服务（`desktop-web.state.json` + `setsid` 启动）、版本化运行时、免密 SSH——`scripts/e2e-ssh.js` 已真机验证。
+- **Linux 侧机制已就绪且与客户端形态无关**：远端驻留服务（`desktop-web.state.json` + `setsid` 启动）、版本化运行时、免密 SSH，已真机验证。
 - **Web UI 具备基础移动适配**：`index.html` 已有 `viewport` meta；响应式程度（断点/触摸/交互）待 P0 实测。
 - **认证模型一致**：SSH 密钥免密登录，与桌面壳相同。
 
@@ -77,7 +77,7 @@
 
 ### 2.5 验证基线
 
-- Linux 侧：`scripts/e2e-ssh.js <ssh-host>` 每次改动后回归（远端构建、自动 relaunch、版本自动升级）。
+- Linux 侧：每次改动后回归（远端产物安装、自动 relaunch、版本自动升级）。
 - 移动侧：真机验收清单（见 P0/P1 验收）；无头环境不可行，需实物测试。
 
 ## 3. 其他规划方向（备选，未排期）

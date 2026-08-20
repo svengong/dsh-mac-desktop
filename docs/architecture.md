@@ -39,7 +39,7 @@ desktop-shell/
 │   └── ui/                shell.html (workspace frame + loading panel), settings.html, shell.css
 │
 ├── build/                 icon.icns, icon.png, iconPressed.png, tray template icons (committed)
-└── scripts/               gen-icons.sh, build.sh, install.sh, smoke.js, e2e-local.js, e2e-ssh.js
+└── scripts/               gen-icons.sh, build.sh, install.sh, smoke.js, release.js
 ```
 
 本目录独立于 harness 仓库，保留自己的 npm install，产品依赖图不受影响。
@@ -77,18 +77,18 @@ BrowserWindow (shell.html 边框)
 
 `connect()` 重置本地引用、杀旧子进程、释放旧预留，然后 `connectLocal/connectSsh`。失败触发 `connect-failed`，main 最多自动重试 2 次（10s/20s）。
 
-**连接时自动升级（reap → launch）**：连接对比 state 记录的 version 与当前 `serviceVersion`。不匹配 → 自动清理旧驻留程序（kill 记录 pid / lsof 兜底）→ 以当前版本重新启动。版本身份：runtime `current` 优先；无 runtime 时 clean 工作区用 git HEAD，**dirty 工作区用已构建 bin 的 mtime**，npm 布局用包版本；所有 token 统一经 `versionToken`。
+**连接时自动升级（reap → launch）**：连接对比 state 记录的 version 与当前 `serviceVersion`。不匹配 → 自动清理旧驻留程序（kill 记录 pid / lsof 兜底）→ 以当前版本重新启动。版本身份即官方产物的包版本（npm 布局），统一经 `versionToken`。
 
-**两层升级语义**：连接只负责「升级到 current」；「获取新版本」走更新管线（git pull → staging build → 原子切换 → 重启）。runtime 化后 source HEAD 变化不触发连接升级，这是设计行为。
+**两层升级语义**：连接只负责「升级到 current」；「获取新版本」走更新管线（registry 预检 → 下载官方产物 → 原子切换 → 重启）。
 
 **远端恢复**：state 匹配但服务已死（崩溃/远端重启）时，锁内探活（node fetch + `__DSH_BOOT__`）→ 自动 reap + relaunch，不会建隧道到死端口空等。
 
 ## 6. 更新架构（产物优先 + 可恢复 + 生命周期解耦）
 
-1. **官方产物优先**：`artifact.js` 先做 registry 预检（最新版本 + 依赖链完整性），可用时 `npm install --prefix` 装进 `runtime/<version>`（npm 布局），校验后原子切换 `current`；源码构建（git worktree staging）是 fork/离线场景的 fallback。
+1. **仅官方产物**：`artifact.js` 先做 registry 预检（最新版本 + 依赖链完整性），`npm install --prefix` 装进 `runtime/<version>`（npm 布局），校验后原子切换 `current`。registry 链断则更新失败并给出明确原因，不再回退源码构建。
 2. **detached worker 执行**：菜单「更新并重启」与初始化在本地产物可用时由 `update-worker.js` 独立进程执行（`spawnDetached`，壳退出不杀）。壳轮询 `runtime/update-status.json` 推送阶段/日志；`done` 后由壳重启服务（或下次连接按版本不匹配自动重启）。
 3. **意图可恢复**：更新前写 `update-pending.json`，正常结束才清除；启动时 `resumePendingUpdate()` 检测残留——worker 还在跑则接管观察，已完成则提示，被打断则询问「继续/放弃」后重跑。
-4. **版本化运行时与回滚**：构建在 `<dshHome>/runtime/<version>`（远端 `~/.dsh/runtime/<version>`）staging，成功后原子切换 `current`；新版本启动失败自动回滚 `previous`，更新菜单可手动「回滚 Harness」。
+4. **版本化运行时与回滚**：官方产物安装在 `<dshHome>/runtime/<version>`（远端 `~/.dsh/runtime/<version>`），成功后原子切换 `current`；新版本启动失败自动回滚 `previous`，更新菜单可手动「回滚 Harness」。
 
 ## 7. 数据与进程隔离
 
