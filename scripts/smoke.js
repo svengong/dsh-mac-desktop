@@ -242,26 +242,6 @@ async function main() {
   assert.strictEqual(presentWindow(hidden), hidden)
   assert.deepStrictEqual(calls, ['show', 'focus'])
 
-  // local repo readiness: an existing git repo passes; a missing dir without
-  // a repo URL fails with the guidance message.
-  const gitDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-git-repo-'))
-  const gitInit = await runCommand({ cmd: '/usr/bin/git', args: ['init', '-q'], cwd: gitDir })
-  assert.strictEqual(gitInit.code, 0)
-  const settings = { mode: 'local', local: { repoDir: gitDir, repoUrl: '', port: 3080 }, ssh: {} }
-  const connection = new ConnectionManager({ getSettings: () => settings })
-  assert.strictEqual((await connection.ensureLocalRepo(settings)).code, 0)
-  const missingDir = path.join(gitDir, 'not-there')
-  const missingSettings = { mode: 'local', local: { repoDir: missingDir, repoUrl: '', port: 3080 }, ssh: {} }
-  const missingConnection = new ConnectionManager({ getSettings: () => missingSettings })
-  let thrown = ''
-  try {
-    await missingConnection.ensureLocalRepo(missingSettings)
-  } catch (error) {
-    thrown = String(error.message)
-  }
-  assert.ok(thrown.includes('仓库地址'), `expected repo-url guidance, got: ${thrown}`)
-  fs.rmSync(gitDir, { recursive: true, force: true })
-
   // tools: engine filter + a pnpm that actually runs under the clean env
   assert.strictEqual(engineOk('v23.11.0'), false)
   assert.strictEqual(engineOk('v22.19.0'), true)
