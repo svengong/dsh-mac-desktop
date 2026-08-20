@@ -105,11 +105,19 @@ class WindowManager {
     }, 300)
   }
 
-  /** Record the workspace that currently owns the user's attention. */
+  /**
+   * Record the workspace that currently owns the user's attention. A
+   * detached window has no terminal and must not overwrite the last ACTIVE
+   * TERMINAL: startup should still restore the most recent bound device.
+   */
   markActive(workspace) {
     if (workspace === null || typeof workspace !== 'object') return
     this.state.lastActiveWorkspaceId = workspace.id
-    this.state.lastActiveDeviceKey = normalizeDeviceKey(workspace.deviceKey)
+    if (workspace.deviceKey === null || workspace.deviceKey === undefined) {
+      // Keep the previous terminal; only the workspace-id changes.
+    } else {
+      this.state.lastActiveDeviceKey = normalizeDeviceKey(workspace.deviceKey)
+    }
     this.touch(workspace)
   }
 
@@ -123,7 +131,11 @@ class WindowManager {
     }
     const previous = this.state.windows[workspace.id] ?? {}
     this.state.windows[workspace.id] = {
-      deviceKey: normalizeDeviceKey(workspace.deviceKey),
+      // Persist detached windows as a neutral key so they never masquerade
+      // as the local terminal for bounds/last-active-device restoration.
+      deviceKey: workspace.deviceKey === null || workspace.deviceKey === undefined
+        ? 'detached'
+        : normalizeDeviceKey(workspace.deviceKey),
       bounds: normalizeBounds(nextBounds, previous.bounds),
       activeView: workspace.activeView || previous.activeView || 'harness',
       updatedAt: new Date().toISOString(),
