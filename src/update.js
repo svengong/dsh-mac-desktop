@@ -1,18 +1,13 @@
 'use strict'
 
 /**
- * Updater — the check/build/restart pipeline behind the 「更新」 menu.
+ * Updater — the check/install/restart pipeline behind the 「更新」 menu.
  *
- * Both modes run the same steps; only the executor differs:
- *
- * - local: git/pnpm run directly with `cwd` = the local repo dir.
- * - ssh: each step runs on the remote through `connection.remoteRun` with a
- *   `cd` prefix, so remote tools resolve through the remote login shell.
- *
- * Steps: ensure repo (clone locally/remotely when missing) → git pull
- * --ff-only (skipped when the worktree is dirty or there is no upstream) →
- * pnpm install → pnpm run build → restart the harness service.
- * The shell itself never changes across an update: it only loads a fixed URL.
+ * The shell installs the harness from the official npm artifact
+ * (`@deepseek-ai/dsh`) exclusively — no source checkout, no pnpm build.
+ * Steps: registry preflight → npm install into a versioned runtime dir →
+ * verify → atomic `current` switch → restart the service. A failed new
+ * artifact rolls back to the previous version automatically.
  */
 
 const fs = require('node:fs')
@@ -59,35 +54,6 @@ class Updater {
     this.onBusyChange(value)
   }
 
-  localRun(args, options = {}) {
-    const tools = this.connection.resolvedTools()
-    return runCommand({
-      cmd: tools.git || 'git',
-      // Bypass user-global hooks: the shell's fetch/pull/status do not need
-      // developer-workflow hooks, and a hook that assumes a full dev
-      // environment (e.g. git-lfs) fails the clean-env pipeline.
-      args: ['-c', 'core.hooksPath=/dev/null', ...args],
-      cwd: this.getSettings().local.repoDir,
-      env: tools.env,
-      timeoutMs: options.timeoutMs,
-      onLine: options.onLine,
-      owner: this.owner(),
-    })
-  }
-
-  async remoteGit(args, options = {}) {
-    const settings = this.getSettings()
-    const dir = remotePath(settings.ssh.remoteRepoDir)
-    return this.connection.remoteRun(
-      settings.ssh.host,
-      `cd ${dir} && git -c core.hooksPath=/dev/null ${args.map(shellQuote).join(' ')}`,
-      {
-        timeoutMs: options.timeoutMs,
-        onLine: options.onLine,
-      },
-    )
-  }
-
   async runStep(label, run) {
     this.onLine(`\n==> ${label}`)
     const result = await run()
@@ -95,52 +61,10 @@ class Updater {
     return result
   }
 
-  /** Whether the configured repo is a git repo with an upstream branch. */
-  async gitFacts() {
-    const settings = this.getSettings()
-    const run = settings.mode === 'ssh'
-      ? args => this.remoteGit(args, { timeoutMs: 60_000 })
-      : args => this.localRun(args, { timeoutMs: 60_000 })
-    const branch = await run(['rev-parse', '--abbrev-ref', 'HEAD'])
-    if (branch.code !== 0) return { gitRepo: false, branch: '', upstream: '', ahead: 0, behind: 0, dirty: false, head: '' }
-    const head = await run(['rev-parse', 'HEAD'])
-    const upstream = await run(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}'])
-    const dirty = await run(['status', '--porcelain'])
-    let ahead = 0
-    let behind = 0
-    if (upstream.code === 0) {
-      const counts = await run(['rev-list', '--left-right', '--count', 'HEAD...@{u}'])
-      if (counts.code === 0) {
-        const match = /^(\d+)\s+(\d+)$/.exec(counts.lines.join('\n').trim())
-        if (match) {
-          ahead = Number(match[1])
-          behind = Number(match[2])
-        }
-      }
-    }
-    return {
-      gitRepo: true,
-      branch: (branch.lines[0] || '').trim(),
-      head: head.code === 0 ? (head.lines[0] || '').trim() : '',
-      upstream: upstream.code === 0 ? (upstream.lines[0] || '').trim() : '',
-      ahead,
-      behind,
-      // `dirty` means "a tracked file is modified, which would block a
-      // fast-forward pull". Untracked files (`?? ` in --porcelain) do NOT
-      // block `git pull --ff-only` and are deliberately excluded — otherwise
-      // incidental untracked files (agent notes, scratch output) would pin the
-      // checkout to its old HEAD forever and make every "update" a silent
-      // no-op that keeps reporting "behind".
-      dirty: dirty.code === 0 && dirty.lines.some(line => !line.startsWith('??')),
-    }
-  }
-
   /**
-   * Whether this device should prefer official npm artifacts over a source
-   * build: local or SSH-remote with an official (or default) repo URL.
-   * Custom forks keep the source pipeline. The registry preflight in
-   * queryArtifact decides whether the channel is actually usable; when the
-   * chain is broken the caller falls back to source building.
+   * Whether this device should use the official npm artifact. The shell now
+   * installs the official artifact exclusively (no source build), so this
+   * only distinguishes official-repo devices from custom forks.
    */
   preferArtifact(settings) {
     const url = settings.mode === 'local'
@@ -175,290 +99,45 @@ class Updater {
 
   async check() {
     const settings = this.getSettings()
-    if (this.preferArtifact(settings)) {
-      const artifact = await this.queryArtifact(settings)
-      if (artifact.ok) {
-        const current = await this.npmCurrentVersion(settings)
-        const currentVersion = current.startsWith('npm:') ? current.slice(4) : ''
-        const updateAvailable = currentVersion === '' || isNewerVersion(artifact.version, currentVersion)
-        this.onLine(`官方产物：${NPM_PACKAGE}@${artifact.version}${currentVersion !== '' ? `（当前 ${currentVersion}）` : '（未安装）'}${updateAvailable ? '，可更新。' : '，已最新。'}`)
-        return {
-          gitRepo: false, branch: '', upstream: '', ahead: 0, behind: 0, dirty: false,
-          artifact, currentNpm: currentVersion,
-          updateAvailable,
-          summary: updateAvailable ? `官方预构建版 v${artifact.version} 可用` : `官方预构建版 v${artifact.version}（已最新）`,
-        }
-      }
+    // The shell now installs the official npm artifact exclusively; there is
+    // no source-build fallback, so an unavailable registry is surfaced as the
+    // check result rather than a git branch comparison.
+    const artifact = await this.queryArtifact(settings)
+    if (!artifact.ok) {
       this.onLine(artifact.reason)
-      this.onLine('回退到源码构建检查。')
+      return { gitRepo: false, branch: '', upstream: '', ahead: 0, behind: 0, dirty: false, summary: artifact.reason }
     }
-    this.onLine('获取远端更新信息（git fetch）…')
-    const fetch = settings.mode === 'ssh'
-      ? await this.remoteGit(['fetch', '--quiet'], { timeoutMs: 120_000, onLine: line => this.onLine(line) })
-      : await this.localRun(['fetch', '--quiet'], { timeoutMs: 120_000, onLine: line => this.onLine(line) })
-    if (fetch.code !== 0) {
-      this.onLine(`git fetch 失败（退出码 ${fetch.code}）。请检查网络或 git 远程配置。`)
-      return { gitRepo: false, branch: '', upstream: '', ahead: 0, behind: 0, dirty: false, summary: 'git fetch 失败' }
-    }
-    const facts = await this.gitFacts()
-    if (!facts.gitRepo) {
-      this.onLine('当前仓库不是 git 仓库（或未配置 origin/upstream），无法检查更新。')
-      return { ...facts, summary: '不是 git 仓库，无法检查更新' }
-    }
-    if (facts.upstream === '') {
-      this.onLine(`当前分支 ${facts.branch} 没有上游分支，无法检查更新。`)
-      return { ...facts, summary: '没有上游分支，无法检查更新' }
-    }
-    this.onLine(`分支：${facts.branch}`)
-    this.onLine(`上游：${facts.upstream}`)
-    if (facts.dirty) this.onLine('工作区有未提交改动（更新时将跳过 git pull）。')
-    if (facts.ahead > 0) this.onLine(`本地领先上游 ${facts.ahead} 个提交。`)
-    if (facts.behind === 0) {
-      this.onLine('已是最新版本。')
-      return { ...facts, summary: '已是最新版本' }
-    }
-    this.onLine(`落后上游 ${facts.behind} 个提交，可以更新。`)
-    return { ...facts, summary: `落后上游 ${facts.behind} 个提交` }
-  }
-
-  /** Version token for the build we are about to run. */
-  async buildVersion(settings, facts) {
-    if (facts.head !== '' && !facts.dirty) return facts.head
-    if (settings.mode === 'local') {
-      try {
-        const stat = fs.statSync(path.join(settings.local.repoDir, 'apps/cli/lib/bin.js'))
-        return `dirty:${stat.mtimeMs}`
-      } catch {
-        return `dirty:${Date.now()}`
-      }
-    }
-    // stat -c %Y is GNU (Linux), stat -f %m is BSD (macOS). GNU stat's
-    // `-f %m` prints a filesystem-info block to STDOUT and exits 1, which
-    // would pollute the first line — so GNU must be tried FIRST (it fails
-    // silently on macOS, whose BSD stat writes errors to stderr only).
-    const result = await this.connection.remoteRun(
-      settings.ssh.host,
-      `stat -c %Y ${remotePath(settings.ssh.remoteRepoDir)}/apps/cli/lib/bin.js 2>/dev/null || stat -f %m ${remotePath(settings.ssh.remoteRepoDir)}/apps/cli/lib/bin.js 2>/dev/null || echo ${Date.now()}`,
-      { timeoutMs: 15_000 },
-    )
-    return `dirty:${(result.lines[0] || String(Date.now())).trim()}`
-  }
-
-  async localInstallBuild(settings, tools, cwd) {
-    await this.runStep('pnpm install', () => runCommand({
-      cmd: tools.pnpm,
-      args: [...tools.pnpmPrefix, 'install'],
-      cwd,
-      env: tools.env,
-      timeoutMs: LONG_TIMEOUT_MS,
-      onLine: line => this.onLine(line),
-      owner: this.owner(),
-    }))
-    await this.runStep('pnpm run build', () => runCommand({
-      cmd: tools.pnpm,
-      args: [...tools.pnpmPrefix, 'run', 'build'],
-      cwd,
-      env: tools.env,
-      timeoutMs: LONG_TIMEOUT_MS,
-      onLine: line => this.onLine(line),
-      owner: this.owner(),
-    }))
-  }
-
-  async remoteInstallBuild(settings, workDir) {
-    await this.runStep('pnpm install', () => this.connection.remoteRun(
-      settings.ssh.host,
-      `${REMOTE_PREFIX} cd ${workDir} && pnpm install`,
-      { timeoutMs: LONG_TIMEOUT_MS, onLine: line => this.onLine(line) },
-    ))
-    await this.runStep('pnpm run build', () => this.connection.remoteRun(
-      settings.ssh.host,
-      `${REMOTE_PREFIX} cd ${workDir} && pnpm run build`,
-      { timeoutMs: LONG_TIMEOUT_MS, onLine: line => this.onLine(line) },
-    ))
-  }
-
-  async prepareLocalRuntime(settings, facts, tools) {
-    const version = await this.buildVersion(settings, facts)
-    const token = runtimeStore.versionToken(version)
-    const manifest = runtimeStore.readLocalRootManifest(settings)
-    const activeDir = runtimeStore.localActiveRuntimeDir(settings)
-    if (manifest.current === token && activeDir !== null) {
-      this.onLine(`运行时 ${token} 已构建，跳过 staging install/build。`)
-      return { workDir: activeDir, version: token, activated: false, previous: manifest.previous }
-    }
-    if (facts.dirty) {
-      this.onLine('工作区有未提交改动：直接在源目录构建（此模式无上一版本快照）。')
-      await this.localInstallBuild(settings, tools, settings.local.repoDir)
-      return { workDir: settings.local.repoDir, version: token, activated: false, previous: null }
-    }
-    const buildDir = runtimeStore.localVersionDir(settings, version)
-    fs.rmSync(buildDir, { recursive: true, force: true })
-    this.onLine(`准备 staging 构建目录：${buildDir}`)
-    await this.runStep('git worktree add', () => this.localRun(
-      ['worktree', 'add', '--detach', buildDir, facts.head],
-      { timeoutMs: 10 * 60_000, onLine: line => this.onLine(line) },
-    ))
-    try {
-      await this.localInstallBuild(settings, tools, buildDir)
-    } catch (error) {
-      await this.localRun(['worktree', 'remove', '--force', buildDir]).catch(() => {})
-      throw error
-    }
-    runtimeStore.writeLocalRuntimeManifest(settings, version, { sourceVersion: facts.head })
-    const activated = runtimeStore.activateLocalRuntime(settings, version)
-    this.onLine(`已原子切换到运行时 ${activated}（上一版本：${manifest.current ?? '无'}）。`)
+    const current = await this.npmCurrentVersion(settings)
+    const currentVersion = current.startsWith('npm:') ? current.slice(4) : ''
+    const updateAvailable = currentVersion === '' || isNewerVersion(artifact.version, currentVersion)
+    this.onLine(`官方产物：${NPM_PACKAGE}@${artifact.version}${currentVersion !== '' ? `（当前 ${currentVersion}）` : '（未安装）'}${updateAvailable ? '，可更新。' : '，已最新。'}`)
     return {
-      workDir: runtimeStore.localActiveRuntimeDir(settings) ?? buildDir,
-      version: activated,
-      activated: true,
-      previous: manifest.current,
+      gitRepo: false, branch: '', upstream: '', ahead: 0, behind: 0, dirty: false,
+      artifact, currentNpm: currentVersion,
+      updateAvailable,
+      summary: updateAvailable ? `官方预构建版 v${artifact.version} 可用` : `官方预构建版 v${artifact.version}（已最新）`,
     }
-  }
-
-  async prepareRemoteRuntime(settings, facts, remoteRun) {
-    const version = await this.buildVersion(settings, facts)
-    const token = runtimeStore.versionToken(version)
-    const manifest = await runtimeStore.readRemoteRootManifest(settings, remoteRun)
-    const activeDir = await runtimeStore.remoteActiveRuntimeDir(settings, remoteRun)
-    if (manifest.current === token && activeDir !== null) {
-      this.onLine(`远端运行时 ${token} 已构建，跳过 staging install/build。`)
-      return { workDir: activeDir, version: token, activated: false, previous: manifest.previous }
-    }
-    if (facts.dirty) {
-      this.onLine('远端工作区有未提交改动：直接在源目录构建（此模式无上一版本快照）。')
-      await this.remoteInstallBuild(settings, remotePath(settings.ssh.remoteRepoDir))
-      return { workDir: remotePath(settings.ssh.remoteRepoDir), version: token, activated: false, previous: null }
-    }
-    const buildDir = runtimeStore.remoteVersionDir(version)
-    const source = remotePath(settings.ssh.remoteRepoDir)
-    this.onLine(`准备远端 staging 构建目录：${buildDir}`)
-    const add = await this.connection.remoteRun(
-      settings.ssh.host,
-      `rm -rf ${buildDir}; cd ${source} && git -c core.hooksPath=/dev/null worktree add --detach ${buildDir} ${facts.head}`,
-      { timeoutMs: 10 * 60_000, onLine: line => this.onLine(line) },
-    )
-    if (add.code !== 0) throw new Error(`远端 git worktree add 失败：${add.lines.join('\n')}`)
-    try {
-      await this.remoteInstallBuild(settings, buildDir)
-    } catch (error) {
-      await this.connection.remoteRun(
-        settings.ssh.host,
-        `cd ${source} && git worktree remove --force ${buildDir} 2>/dev/null || rm -rf ${buildDir}`,
-        { timeoutMs: 30_000 },
-      )
-      throw error
-    }
-    const activated = await runtimeStore.activateRemoteRuntime(settings, remoteRun, version)
-    this.onLine(`已原子切换远端运行时 ${activated}（上一版本：${manifest.current ?? '无'}）。`)
-    return { workDir: await runtimeStore.remoteActiveRuntimeDir(settings, remoteRun) ?? buildDir, version: activated, activated: true, previous: manifest.current }
   }
 
   /**
-   * Run the update pipeline: pull (optional) → staged install/build →
-   * atomic `current` switch → restart. A failed new runtime automatically
-   * falls back to the previous finished version.
-   * @param {object} options - includePull, toleratePullFailure.
+   * Run the update pipeline: install the official npm artifact into a
+   * versioned runtime dir → verify → atomic `current` switch → restart.
+   * A failed new artifact automatically rolls back to the previous version.
+   * @param {object} _options - retained for call-site compatibility.
    * @returns {Promise<{ok: boolean}>}
    */
-  async runPipeline({ includePull = true, toleratePullFailure = false } = {}) {
+  async runPipeline(_options = {}) {
     this.setBusy(true)
     try {
       const settings = this.getSettings()
       const remoteRun = (host, inner, options) => this.connection.remoteRun(host, inner, options)
       const executePipeline = async () => {
-        let tools = this.connection.resolvedTools()
-        // Phase 2: official npm artifact first (local + official repo URL).
-        // The artifact pipeline installs a prebuilt CLI into a versioned dir,
-        // verifies it, and atomically switches `current` — no checkout, no
-        // pnpm build. It falls back to the source pipeline below when the
-        // registry chain is broken or the install fails.
-        if (this.preferArtifact(settings)) {
-          const artifactOutcome = await this.artifactPipeline(settings)
-          if (artifactOutcome.choseArtifact) {
-            if (artifactOutcome.rolledBack) {
-              return { ok: false, error: artifactOutcome.error, rolledBack: true, rollbackVersion: artifactOutcome.rollbackVersion }
-            }
-            return { ok: true, artifact: true, version: artifactOutcome.version }
-          }
+        const artifactOutcome = await this.artifactPipeline(settings)
+        if (artifactOutcome.rolledBack) {
+          return { ok: false, error: artifactOutcome.error, rolledBack: true, rollbackVersion: artifactOutcome.rollbackVersion }
         }
-        await this.runStep('确保仓库就绪', () => settings.mode === 'ssh'
-          ? this.connection.ensureRemoteRepo(settings)
-          : this.connection.ensureLocalRepo(settings))
-        await this.ensureToolchain(settings)
-        if (settings.mode === 'local') tools = this.connection.resolvedTools({ refresh: true })
-        const facts = await this.gitFacts()
-        if (includePull && facts.gitRepo && facts.upstream !== '') {
-          if (facts.dirty) {
-            this.onLine('工作区有未提交改动，跳过 git pull。')
-          } else {
-            try {
-              await this.runStep('git pull --ff-only', () => settings.mode === 'ssh'
-                ? this.remoteGit(['pull', '--ff-only'], { timeoutMs: 10 * 60_000, onLine: line => this.onLine(line) })
-                : this.localRun(['pull', '--ff-only'], { timeoutMs: 10 * 60_000, onLine: line => this.onLine(line) }))
-            } catch (error) {
-              if (!toleratePullFailure) throw error
-              this.onLine(`git pull 失败（${error.message}），继续安装与构建。`)
-            }
-          }
-        }
-        if (settings.mode === 'ssh') {
-          const toolchain = await this.connection.remoteRun(settings.ssh.host, `${REMOTE_PREFIX} node --version && pnpm --version`, { timeoutMs: 60_000 })
-          if (toolchain.code !== 0) {
-            throw new Error(
-              `远程机器（${settings.ssh.host}）自包含工具链不可用（退出码 ${toolchain.code}）。\n` +
-              '远端 ~/.dsh-tools 引导失败，请打开服务日志查看下载/安装输出。',
-            )
-          }
-          this.onLine(`远程 node/pnpm：${toolchain.lines.map(line => line.trim()).filter(Boolean).join('，')}`)
-        } else {
-          if (tools.node === '') throw new Error('未找到兼容的 node（需 22.19+ 或 24+）。请安装 Node.js，或在「设置 → 高级」中指定 node 路径。')
-          const nodeVersion = await runCommand({ cmd: tools.node, args: ['--version'], env: tools.env, timeoutMs: 60_000, owner: this.owner() })
-          if (nodeVersion.code !== 0) throw new Error(`node 不可用（退出码 ${nodeVersion.code}）。`)
-          const pnpmVersion = await runCommand({
-            cmd: tools.pnpm,
-            args: [...tools.pnpmPrefix, '--version'],
-            env: tools.env,
-            cwd: settings.local.repoDir,
-            timeoutMs: 60_000,
-            owner: this.owner(),
-          })
-          if (pnpmVersion.code !== 0) throw new Error(`pnpm 不可用（退出码 ${pnpmVersion.code}）。`)
-          this.onLine(`node：${(nodeVersion.lines[0] || '').trim()}；pnpm：${(pnpmVersion.lines[0] || '').trim()}`)
-        }
-
-        const prepared = settings.mode === 'ssh'
-          ? await this.prepareRemoteRuntime(settings, facts, remoteRun)
-          : await this.prepareLocalRuntime(settings, facts, tools)
-        this.onLine(`运行时目录：${prepared.workDir}`)
-
-        try {
-          await this.runStep('重启服务', async () => {
-            await this.connection.restartService()
-            return { code: 0, lines: [] }
-          })
-        } catch (error) {
-          if (prepared.activated && prepared.previous !== null && prepared.previous !== '') {
-            const rollbackVersion = settings.mode === 'ssh'
-              ? await runtimeStore.rollbackRemoteRuntime(settings, remoteRun)
-              : runtimeStore.rollbackLocalRuntime(settings)
-            if (rollbackVersion !== null && rollbackVersion !== '') {
-              this.onLine(`新运行时启动失败，已回滚到 ${rollbackVersion}，尝试恢复旧服务…`)
-              try {
-                await this.connection.restartService()
-                this.onLine('旧运行时已恢复，本次更新未生效。')
-                return { ok: false, error, rolledBack: true, rollbackVersion }
-              } catch (rollbackError) {
-                this.onLine(`旧运行时恢复失败：${String(rollbackError.message || rollbackError)}`)
-              }
-            }
-          }
-          throw error
-        }
-        this.onLine('\n完成：服务已重启。')
-        return { ok: true }
+        return { ok: true, artifact: true, version: artifactOutcome.version }
       }
-
       const lockName = settings.mode === 'ssh'
         ? `build-${settings.ssh.host}-${settings.ssh.remoteRepoDir}`
         : `build-${path.basename(settings.local.repoDir)}`
@@ -472,9 +151,6 @@ class Updater {
       })
     } catch (error) {
       this.onLine(`\n✗ ${String(error.message || error)}`)
-      if (String(error.message || error).includes('pnpm install')) {
-        this.onLine('提示：常见原因——网络/代理导致 registry 不可达；pnpm 版本过低（该仓库要求 pnpm 10+）；目录不是 deepseek-harness 仓库。')
-      }
       return { ok: false, error }
     } finally {
       // A settled pipeline (ok or error) has no unfinished intent left;
@@ -493,14 +169,13 @@ class Updater {
   /**
    * The official-artifact update path: registry preflight → npm install into
    * a versioned runtime dir → verify → atomic `current` switch → restart.
-   * Returns {choseArtifact:false} when the artifact channel is unavailable so
-   * the caller falls back to the source pipeline.
+   * The artifact is the ONLY install channel now; an unavailable registry or
+   * a broken publish chain throws (no source-build fallback).
    */
   async artifactPipeline(settings) {
     const query = await this.queryArtifact(settings)
     if (!query.ok) {
-      this.onLine(query.reason)
-      return { choseArtifact: false }
+      throw new Error(query.reason)
     }
     await this.ensureToolchain(settings)
     const version = query.version
@@ -567,9 +242,8 @@ class Updater {
   /**
    * SSH-remote official-artifact install: npm install the prebuilt CLI into
    * ~/.dsh/runtime/<npm-token> on the remote, verify, atomically switch the
-   * remote `current`, then restart the remote service. Falls back to the
-   * source pipeline only through the caller's {choseArtifact:false} path; a
-   * failed install throws (and is rolled back if the switch already happened).
+   * remote `current`, then restart the remote service. A failed install
+   * throws (and is rolled back if the switch already happened).
    */
   async remoteArtifactPipeline(settings, version) {
     const remoteRun = (host, inner, options) => this.connection.remoteRun(host, inner, options)
