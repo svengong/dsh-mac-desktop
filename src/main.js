@@ -1083,6 +1083,7 @@ function boundWorkspaceFor(deviceKey, excludeWorkspace = null) {
     for (const workspace of session.windows) {
       if (workspace === excludeWorkspace) continue
       if (workspace.window === null || workspace.window.isDestroyed()) continue
+      if (workspace.userClosed === true) continue
       if (workspace.deviceKey !== deviceKey) continue
       return workspace
     }
@@ -1091,6 +1092,7 @@ function boundWorkspaceFor(deviceKey, excludeWorkspace = null) {
     if (workspace === excludeWorkspace) continue
     if (workspace.deviceKey !== deviceKey) continue
     if (workspace.window === null || workspace.window.isDestroyed()) continue
+    if (workspace.userClosed === true) continue
     return workspace
   }
   return null
@@ -1109,6 +1111,13 @@ function presentWorkspace(workspace) {
  * when the candidate terminal is already open in another window, focus that
  * window instead of creating a second bound instance.
  */
+/** Destroy closed ghost windows after the current window has bound the terminal. */
+function destroyClosedTerminalWindows(session, keepWorkspace) {
+  for (const other of [...session.windows]) {
+    if (other !== keepWorkspace && other.userClosed === true) destroyWorkspaceWindow(other)
+  }
+}
+
 /** Force-close one workspace window (its close handler normally hides). */
 function destroyWorkspaceWindow(workspace) {
   const win = workspace.window
@@ -1189,6 +1198,10 @@ function createWorkspace(deviceKey = null, options = {}) {
     harnessReady: false,
     loadError: '',
     progress: session === null ? null : session.progress,
+    // True while the user closed this window with the red button. Closed
+    // windows remain alive for Dock restore, but must NOT count as the
+    // terminal's open window for same-terminal save/switch decisions.
+    userClosed: false,
   }
   nextWorkspaceId += 1
   workspaces.set(workspace.id, workspace)
@@ -1224,11 +1237,17 @@ function createWorkspace(deviceKey = null, options = {}) {
       workspace.harnessView.webContents.focus()
     }
   })
+  win.on('show', () => {
+    workspace.userClosed = false
+    refreshTrayAndMenu()
+  })
   win.on('close', event => {
     if (!quitting) {
       event.preventDefault()
+      workspace.userClosed = true
       if (windowManager !== null) windowManager.touch(workspace)
       win.hide()
+      refreshTrayAndMenu()
     }
   })
   win.on('closed', () => disposeWorkspace(workspace))
@@ -2047,6 +2066,7 @@ function registerIpc() {
         }
         const session = attachWorkspace(workspace, deviceKey)
         refreshSessionSettings(session, deviceKey)
+        destroyClosedTerminalWindows(session, workspace)
         if (windowManager !== null) windowManager.markActive(workspace)
         if (previous !== null && switchingAway) void abandonSession(previous)
         return { ok: true }
@@ -2055,6 +2075,7 @@ function registerIpc() {
       persistConnectionCandidate(deviceKey, candidate, machineId)
       const session = attachWorkspace(workspace, deviceKey)
       refreshSessionSettings(session, deviceKey)
+      destroyClosedTerminalWindows(session, workspace)
       if (windowManager !== null) windowManager.markActive(workspace)
       // Never block the switch: cancel/abandon the previous terminal in the
       // background. Its old service keeps running and the task can be retried
