@@ -32,7 +32,7 @@ const {
 const { mergeUpdates } = require('./device-merge')
 const { terminalLabel } = require('./labels')
 const { resolveTools } = require('./tools')
-const { runCommand, killActiveChildren, spawnDetached } = require('./runner')
+const { runCommand, killActiveChildren, cancelOwnedChildren, spawnDetached } = require('./runner')
 const { sshCommandArgs, parseTarget, listSshHosts, isSshConfigAlias } = require('./ssh')
 const { ConnectionManager } = require('./connection')
 const { compareVersions } = require('./components')
@@ -166,13 +166,51 @@ function persistDocument(document) {
   return settingsDocument
 }
 
-/** The active-device settings view for one device key. */
+/**
+ * The active-device settings view for one device key. A detached window has
+ * no session yet; it reads the persisted active device as the candidate to
+ * prefill in the connection form, and the real key is only decided on save.
+ */
 function settingsViewFor(deviceKey) {
+  const key = deviceKey === null || deviceKey === undefined
+    ? (settingsDocument && settingsDocument.activeDeviceId) || 'local'
+    : deviceKey
   return normalizeSettings({
-    activeDeviceId: deviceKey,
+    activeDeviceId: key,
     devices: settingsDocument.devices,
     toolPaths: settingsDocument.toolPaths,
   })
+}
+
+/** Device key a detached window should prefill/act on. */
+function candidateDeviceKey() {
+  return (settingsDocument && settingsDocument.activeDeviceId) || 'local'
+}
+
+/**
+ * Coarse task label for the shell frame. The shell is above the harness and
+ * must be able to answer what is happening even while the web view is hidden
+ * or a second window is detached.
+ */
+function sessionTask(session) {
+  if (session === null || session === undefined) return { state: 'detached', label: '待连接' }
+  if (session.connection.status.state === 'restarting') {
+    return { state: 'restarting', label: '服务重启中…' }
+  }
+  if (session.workerPollTimer !== null) {
+    return { state: 'updating', label: '官方产物更新中…' }
+  }
+  if (session.updater !== null && session.updater.busy) {
+    return { state: 'building', label: 'Harness 构建/更新中…' }
+  }
+  if (session.updateManager !== null && session.updateManager.busy) {
+    const snapshot = session.updateManager.snapshot()
+    const updating = snapshot.components.some(row => row.status === 'updating')
+    return updating
+      ? { state: 'updating', label: '组件更新中…' }
+      : { state: 'checking', label: '检查更新中…' }
+  }
+  return { state: 'idle', label: '' }
 }
 
 /** Store one full device document under its canonical key. */
@@ -199,20 +237,41 @@ function sessionFor(deviceKey) {
     autoReconnectAttempts: 0,
     connecting: false,
     workerPollTimer: null,
+    // Task banner shared by every window attached to this terminal. Keeping it
+    // on the session (not the initiating workspace) means a window opened or
+    // attached mid-update immediately sees the same blocking state instead of
+    // a stale/white harness page.
+    progress: null,
+    // Promise of the currently-running init/build/check/update task, used by
+    // cancelSessionTask to wait for lock release after the process is killed.
+    taskPromise: null,
+    connectionTaskPromise: null,
   }
   // `key` mutates when the ssh alias is merged into its machine identity after
   // connect, so every consumer reads the CURRENT key instead of the captured
   // construction-time one.
   const getSettings = () => settingsViewFor(session.key)
+  // The owner token is STABLE for the lifetime of a session. `key` may be
+  // re-homed after machine-id merge, but children spawned before the merge
+  // must still be cancellable under the token they were registered with.
+  session.ownerToken = `session:${deviceKey}`
+  session.owner = () => session.ownerToken
   session.connection = new ConnectionManager({
     getSettings,
+    getOwner: () => session.owner(),
     onLog: line => routeSessionLine(session, line),
   })
   session.updater = new Updater({
     getSettings,
     connection: session.connection,
     onLine: line => routeSessionLine(session, line),
-    onBusyChange: () => refreshTrayAndMenu(),
+    // The shell frame sits above the harness, so every busy/idle transition
+    // must refresh its status line as well as the menu/tray. `broadcastSession`
+    // is safe as soon as `updateManager` is assigned below.
+    onBusyChange: () => {
+      broadcastSession(session)
+      refreshTrayAndMenu()
+    },
   })
   session.updateManager = new UpdateManager({
     getSettings,
@@ -237,6 +296,64 @@ function stopSession(session) {
   session.autoReconnectTimer = null
   session.connection.stop()
   if (session.key !== 'local') sessions.delete(session.key)
+}
+
+const TASK_CANCEL_TIMEOUT_MS = 15 * 1000
+
+/** Track the active task promise so window-switch cancellation can await it. */
+function trackSessionTask(session, promise) {
+  const tracked = Promise.resolve(promise)
+  session.taskPromise = tracked
+  tracked.finally(() => {
+    if (session.taskPromise === tracked) session.taskPromise = null
+  }).catch(() => {})
+  return tracked
+}
+
+/**
+ * Cancel one terminal's in-flight init/build/check/update. The official
+ * artifact worker is intentionally NOT killed here: it is detached by design
+ * and a later local window picks its status back up.
+ */
+async function cancelSessionTask(session) {
+  if (session === null || session === undefined) return
+  const pending = [session.taskPromise, session.connectionTaskPromise].filter(promise => promise !== null && promise !== undefined)
+  if (pending.length === 0) return
+  const hadProgress = session.progress === null ? false : true
+  routeSessionLine(session, '正在取消当前终端的更新/构建任务…')
+  cancelOwnedChildren(session.owner(), 'SIGTERM')
+  await Promise.race([
+    Promise.allSettled(pending),
+    new Promise(resolve => setTimeout(resolve, TASK_CANCEL_TIMEOUT_MS)),
+  ])
+  const stillPending = [session.taskPromise, session.connectionTaskPromise].some(promise => promise !== null && promise !== undefined)
+  if (hadProgress) {
+    setSessionProgress(session, {
+      title: '更新已取消',
+      status: '窗口已切换，旧版本继续运行。可从更新管理重新更新。',
+      actions: [
+        { label: '重试', name: 'run-update', primary: true },
+        { label: '放弃', name: 'dismiss-progress' },
+      ],
+    })
+  }
+  if (stillPending) {
+    routeSessionLine(session, '取消超时，已强制放弃任务；如需可从更新管理重试。')
+  } else {
+    routeSessionLine(session, '已取消，旧版本继续运行。')
+  }
+}
+
+/**
+ * Release a session that no window references. Cancel in-flight work FIRST,
+ * then stop the backend so remote locks have a chance to be removed by the
+ * pipeline's finally block before the tunnel dies. Local sessions stay alive
+ * to keep the resident service and detached artifact worker reusable.
+ */
+async function abandonSession(session) {
+  if (session === null || session === undefined) return
+  await cancelSessionTask(session)
+  if (session.windows.size === 0 && session.key !== 'local') stopSession(session)
 }
 
 // ── official-artifact update worker (Phase 2/3) ─────────────────────────────
@@ -285,6 +402,15 @@ function spawnUpdateWorker(session, view, version) {
   session.workerPollTimer.unref()
 }
 
+/** Set the progress banner directly on a session, even with no open window. */
+function setSessionProgress(session, progress) {
+  session.progress = progress
+  for (const workspace of session.windows) {
+    workspace.progress = progress
+    updateHarnessVisibility(workspace)
+  }
+}
+
 /** Poll the worker status file and mirror its progress into the session UI. */
 function observeUpdateWorker(session) {
   const view = settingsViewFor(session.key)
@@ -303,28 +429,26 @@ function observeUpdateWorker(session) {
     if (phase === 'done') {
       routeSessionLine(session, `官方产物 v${status.version} 已就绪，正在重启服务…`)
       runtimeStore.clearUpdateStatus(view)
-      for (const workspace of session.windows) setProgress(workspace, { title: '更新完成', status: '正在重启服务…' })
+      setSessionProgress(session, { title: '更新完成', status: '正在重启服务…' })
       session.connection.restartService().then(() => {
-        for (const workspace of session.windows) setProgress(workspace, null)
+        setSessionProgress(session, null)
         reloadSessionWindows(session)
         routeSessionLine(session, '服务已重启，使用新版本。')
       }).catch(error => {
-        for (const workspace of session.windows) setProgress(workspace, null)
+        setSessionProgress(session, null)
         routeSessionLine(session, `✗ 重启服务失败：${String(error.message || error)}`)
       })
     } else if (phase === 'error') {
       routeSessionLine(session, `✗ 官方产物更新失败：${status.error || '未知错误'}`)
       runtimeStore.clearUpdateStatus(view)
-      for (const workspace of session.windows) {
-        setProgress(workspace, {
-          title: '更新失败（官方产物）',
-          status: status.error || '未知错误',
-          actions: [
-            { label: '重试', name: 'run-update', primary: true },
-            { label: '放弃', name: 'dismiss-progress' },
-          ],
-        })
-      }
+      setSessionProgress(session, {
+        title: '更新失败（官方产物）',
+        status: status.error || '未知错误',
+        actions: [
+          { label: '重试', name: 'run-update', primary: true },
+          { label: '放弃', name: 'dismiss-progress' },
+        ],
+      })
     } else {
       routeSessionLine(session, '更新任务进程已退出且未完成，可稍后重试。')
       runtimeStore.clearUpdateStatus(view)
@@ -332,9 +456,7 @@ function observeUpdateWorker(session) {
     return
   }
   const phaseText = phase === 'starting' ? '启动中…' : phase === 'downloading' ? `下载官方预构建版 v${status.version}…` : phase === 'installing' ? '安装中…' : phase === 'switching' ? '原子切换运行时…' : '进行中…'
-  for (const workspace of session.windows) {
-    setProgress(workspace, { title: '更新（官方产物）', status: phaseText })
-  }
+  setSessionProgress(session, { title: '更新（官方产物）', status: phaseText })
 }
 
 function stopObservingWorker(session) {
@@ -440,7 +562,7 @@ function resumePendingUpdate() {
         if (pending.intent === 'artifact') {
           spawnUpdateWorker(session, view, pending.version)
         } else {
-          session.updater.runPipeline({ includePull: true, toleratePullFailure: true }).then(outcome => {
+          trackSessionTask(session, session.updater.runPipeline({ includePull: true, toleratePullFailure: true })).then(outcome => {
             if (outcome.ok) reloadSessionWindows(session)
           })
         }
@@ -478,6 +600,56 @@ function saveUpdateForSession(session, patch) {
   return view
 }
 
+/** Persist a validated connection candidate and return its settings view. */
+function persistConnectionCandidate(deviceKey, candidate, machineId) {
+  const previousUpdate = settingsDocument.devices[deviceKey]?.update
+  const device = {
+    mode: candidate.mode,
+    machineId,
+    local: candidate.local,
+    ssh: candidate.ssh,
+    update: previousUpdate ?? candidate.update,
+  }
+  persistDevice(deviceKey, device)
+  settingsDocument = persistDocument({
+    activeDeviceId: deviceKey,
+    devices: settingsDocument.devices,
+    toolPaths: settingsDocument.toolPaths,
+  })
+  return settingsViewFor(deviceKey)
+}
+
+/**
+ * Same-terminal save: only switch focus to the window that is already open.
+ * The current window stays untouched (detached or still bound to its own
+ * terminal). This is the ONLY cross-window focus jump allowed.
+ */
+function openExistingTerminalWindow(existingTarget, targetBusy, targetUnchanged) {
+  const session = existingTarget.session
+  presentWorkspace(existingTarget)
+  if (targetBusy) {
+    setWorkspaceView(existingTarget, 'harness')
+    return
+  }
+  if (targetUnchanged && session.connection.status.state === 'ready') {
+    setWorkspaceView(existingTarget, 'harness')
+    return
+  }
+  existingTarget.pendingOpen = true
+  setWorkspaceView(existingTarget, 'harness')
+  startWithSettings(existingTarget)
+}
+
+/** Reload one session's update manager and every settings panel after a save. */
+function refreshSessionSettings(session, deviceKey) {
+  const view = settingsViewFor(deviceKey)
+  session.updateManager.settings = view
+  session.updateManager.reloadComponents()
+  broadcastSession(session)
+  for (const attached of session.windows) attached.setupDialog.reload()
+  return view
+}
+
 // ── workspaces / windows ─────────────────────────────────────────────────────
 
 function workspaceViewBounds(win) {
@@ -500,21 +672,32 @@ function layoutWorkspaceViews(workspace) {
 }
 
 function workspaceTerminal(workspace) {
+  if (workspace.session === null) return '待连接'
   return terminalLabel(settingsViewFor(workspace.deviceKey))
 }
 
 function workspaceTitle(workspace) {
+  if (workspace.session === null) return 'DSH-[' + '待连接' + ']'
   const url = workspace.session.connection.url()
-  return `DSH-[${workspaceTerminal(workspace)}]-${url}`
+  return 'DSH-[' + workspaceTerminal(workspace) + ']-' + url
 }
 
 function sendWorkspaceState(workspace) {
   if (workspace.window === null || workspace.window.isDestroyed()) return
+  const session = workspace.session
+  const status = session === null ? idleStatus() : session.connection.status
+  const task = sessionTask(session)
+  const hasOpenWindow = session === null
+    ? boundWorkspaceFor(candidateDeviceKey(), workspace) !== null
+    : false
   workspace.window.webContents.send('shell:state', {
     view: workspace.activeView,
     terminal: workspaceTerminal(workspace),
-    status: workspace.session.connection.status.detail,
-    connState: workspace.session.connection.status.state,
+    detached: session === null,
+    hasOpenWindow,
+    status: status.detail,
+    connState: status.state,
+    task,
     harnessReady: workspace.harnessReady,
     loadError: workspace.loadError,
     progress: workspace.progress,
@@ -522,33 +705,54 @@ function sendWorkspaceState(workspace) {
 }
 
 /**
- * Keep the harness view visible only when it is front-most AND its page has
- * finished loading. Until `did-finish-load` flips `harnessReady`, the shell
- * frame's loading panel stays visible instead of a blank web view.
+ * Keep the harness view visible only when it is front-most, its page has
+ * finished loading, AND the connection reports ready. Connecting,
+ * restarting and error states hide the web view so the shell frame can
+ * never show a white or stale page.
  */
 function updateHarnessVisibility(workspace) {
   if (workspace.window === null || workspace.window.isDestroyed()) return
-  const show = workspace.activeView === 'harness' && workspace.harnessReady && workspace.progress === null
+  const ready = workspace.session !== null
+    && workspace.session.connection.status.state === 'ready'
+  const show = workspace.activeView === 'harness'
+    && ready && workspace.harnessReady && workspace.progress === null
   workspace.harnessView.setVisible(show)
   if (show) workspace.harnessView.webContents.focus()
   sendWorkspaceState(workspace)
 }
 
 /**
- * Set the workspace's blocking progress banner (shown by the loading panel in
- * place of the harness view) or clear it. A non-null progress keeps the
- * harness view hidden so the build/update status and retry action stay visible.
+ * Set the blocking progress banner shown by the loading panel in place
+ * of the harness view. Progress is owned by the SESSION so every window
+ * attached to a busy terminal (including one attached mid-update) sees
+ * the same state instead of a stale or white harness page.
  */
 function setProgress(workspace, progress) {
   workspace.progress = progress
-  updateHarnessVisibility(workspace)
+  if (workspace.session === null) {
+    updateHarnessVisibility(workspace)
+    return
+  }
+  workspace.session.progress = progress
+  for (const other of workspace.session.windows) {
+    other.progress = progress
+    updateHarnessVisibility(other)
+  }
 }
 
 /**
  * Point the harness view at a URL and keep it hidden until the page loads:
- * `did-finish-load` sets `harnessReady` and `updateHarnessVisibility` shows it.
+ * did-finish-load sets harnessReady and updateHarnessVisibility shows it.
  */
 function loadHarnessUrl(workspace, url) {
+  if (workspace.session === null) {
+    workspace.loadedUrl = ''
+    workspace.harnessReady = false
+    workspace.loadError = ''
+    workspace.harnessView.setVisible(false)
+    sendWorkspaceState(workspace)
+    return
+  }
   workspace.loadedUrl = url
   workspace.harnessReady = false
   workspace.loadError = ''
@@ -561,24 +765,29 @@ function loadHarnessUrl(workspace, url) {
 }
 
 /**
- * Show one top-level workspace view. `view` is `harness` or one of the
- * settings sections (`connection` / `updates`). This is the single switch
- * used by the shell frame, menus, tray, and save flows.
+ * Show one top-level workspace view: harness or one settings section.
+ * This is the single switch used by the shell frame, menus, tray, and
+ * save flows. A detached window can show settings before any terminal
+ * is selected; its harness tab stays on the waiting prompt.
  */
 function setWorkspaceView(workspace, view) {
   if (!['harness', 'connection', 'updates'].includes(view)) view = 'harness'
   workspace.activeView = view
   if (view === 'harness') {
     workspace.setupDialog.close()
-    updateHarnessVisibility(workspace)
+    const session = workspace.session
+    const url = session === null ? '' : session.connection.url()
+    if (session !== null && session.connection.status.state === 'ready' && url !== ''
+      && (workspace.loadedUrl !== url || !workspace.harnessReady)) {
+      loadHarnessUrl(workspace, url)
+    } else {
+      updateHarnessVisibility(workspace)
+    }
   } else {
     workspace.harnessView.setVisible(false)
-    workspace.setupDialog.setDeviceKey(workspace.deviceKey, view)
+    const deviceKey = workspace.session === null ? candidateDeviceKey() : workspace.deviceKey
+    workspace.setupDialog.setDeviceKey(deviceKey, view)
     workspace.setupDialog.open(view)
-    // The settings view is created lazily on first use, so it has missed
-    // the window's initial resize/layout pass. Give it the frame-aware
-    // bounds now; otherwise it keeps WebContentsView's default 0x0 and
-    // renders as a white panel.
     layoutWorkspaceViews(workspace)
   }
   sendWorkspaceState(workspace)
@@ -655,10 +864,11 @@ function workspaceForEvent(event) {
 
 /** Return `workspace`, or the focused workspace, or a fresh local window. */
 function withWorkspace(workspace) {
-  return workspace ?? activeWorkspace() ?? createWorkspace('local')
+  return workspace ?? activeWorkspace() ?? createInitialWorkspace()
 }
 
 function loadAppUrl(workspace) {
+  if (workspace.session === null) return
   const session = workspace.session
   const url = session.connection.url()
   workspace.activeView = 'harness'
@@ -666,20 +876,44 @@ function loadAppUrl(workspace) {
   loadHarnessUrl(workspace, url)
   if (windowManager !== null) windowManager.touch(workspace)
   refreshTrayAndMenu()
-  presentWindow(workspace.window)
+}
+
+/**
+ * Make the workspace's harness view follow one session WITHOUT changing the
+ * active view and WITHOUT raising/focusing the window. When the user is on
+ * connection/updates, the harness URL is prepared in the background so the
+ * later click on Harness is instant; when the harness view is already
+ * front-most, it loads/updates in place.
+ */
+function syncWorkspaceHarness(workspace, session) {
+  workspace.pendingOpen = false
+  if (session.connection.status.state !== 'ready') {
+    updateHarnessVisibility(workspace)
+    return
+  }
+  const url = session.connection.url()
+  if (workspace.loadedUrl !== url || workspace.harnessReady === false) {
+    loadHarnessUrl(workspace, url)
+  } else {
+    updateHarnessVisibility(workspace)
+  }
 }
 
 function connectSession(session) {
-  if (session.connecting) return
+  if (session.connecting) return session.connectionTaskPromise ?? Promise.resolve()
   session.connecting = true
-  Promise.resolve(session.connection.connect()).then(
+  const task = Promise.resolve(session.connection.connect()).then(
     () => {
       session.connecting = false
       reconcileMachineIdentity(session)
       checkHostCompatibility(session)
     },
     () => { session.connecting = false },
-  )
+  ).finally(() => {
+    if (session.connectionTaskPromise === task) session.connectionTaskPromise = null
+  })
+  session.connectionTaskPromise = task
+  return task
 }
 
 /**
@@ -753,12 +987,58 @@ function mergeAliasIntoMachine(aliasKey, machineId) {
     toolPaths: settingsDocument.toolPaths,
   })
 
-  const session = sessions.get(aliasKey)
-  if (session !== undefined) {
+  const aliasSession = sessions.get(aliasKey)
+  if (aliasSession !== undefined) {
     sessions.delete(aliasKey)
-    session.key = targetKey
-    sessions.set(targetKey, session)
-    for (const workspace of session.windows) workspace.deviceKey = targetKey
+    const targetSessionExisting = sessions.get(targetKey)
+    if (targetSessionExisting !== undefined && targetSessionExisting !== aliasSession) {
+      // The canonical machine session already exists. One terminal keeps one
+      // bound window: move alias windows over only when the target session has
+      // no window yet; otherwise detach the alias windows back to choosers and
+      // switch focus to the already-open machine window.
+      let focusTarget = null
+      for (const workspace of [...aliasSession.windows]) {
+        aliasSession.windows.delete(workspace)
+        if (targetSessionExisting.windows.size === 0) {
+          workspace.deviceKey = targetKey
+          workspace.session = targetSessionExisting
+          workspace.progress = targetSessionExisting.progress
+          targetSessionExisting.windows.add(workspace)
+          if (targetSessionExisting.connection.status.state === 'ready') {
+            workspace.pendingOpen = false
+            loadHarnessUrl(workspace, targetSessionExisting.connection.url())
+          } else {
+            workspace.pendingOpen = true
+            connectSession(targetSessionExisting)
+          }
+          if (workspace.window !== null && !workspace.window.isDestroyed()) {
+            workspace.window.setTitle(workspaceTitle(workspace))
+            sendWorkspaceState(workspace)
+          }
+        } else {
+          // Same-terminal connection is only a WINDOW SWITCH: keep the current
+          // window as a detached chooser instead of closing it, and focus the
+          // window that was already bound to this machine.
+          workspace.session = null
+          workspace.deviceKey = null
+          workspace.pendingOpen = false
+          workspace.loadedUrl = ''
+          workspace.harnessReady = false
+          workspace.loadError = ''
+          workspace.progress = null
+          workspace.harnessView.setVisible(false)
+          workspace.harnessView.webContents.loadURL('about:blank')
+          setWorkspaceView(workspace, 'connection')
+          focusTarget = [...targetSessionExisting.windows][0] ?? focusTarget
+        }
+      }
+      if (focusTarget !== null) presentWorkspace(focusTarget)
+      if (aliasSession.windows.size === 0) void abandonSession(aliasSession)
+    } else {
+      aliasSession.key = targetKey
+      sessions.set(targetKey, aliasSession)
+      for (const workspace of aliasSession.windows) workspace.deviceKey = targetKey
+    }
   }
   // Reload the machine device's live update manager so a merge immediately
   // refreshes the update rows after the alias's session is re-homed.
@@ -796,38 +1076,103 @@ function reconcileMachineIdentity(session) {
   }
 }
 
+/** Find another LIVE window already bound to one terminal (VS Code-style single instance). */
+function boundWorkspaceFor(deviceKey, excludeWorkspace = null) {
+  const session = sessions.get(deviceKey)
+  if (session !== undefined) {
+    for (const workspace of session.windows) {
+      if (workspace === excludeWorkspace) continue
+      if (workspace.window === null || workspace.window.isDestroyed()) continue
+      if (workspace.deviceKey !== deviceKey) continue
+      return workspace
+    }
+  }
+  for (const workspace of workspaces.values()) {
+    if (workspace === excludeWorkspace) continue
+    if (workspace.deviceKey !== deviceKey) continue
+    if (workspace.window === null || workspace.window.isDestroyed()) continue
+    return workspace
+  }
+  return null
+}
+
+/** Present one workspace and make it the active window. */
+function presentWorkspace(workspace) {
+  if (workspace === null || workspace.window === null || workspace.window.isDestroyed()) return workspace
+  presentWindow(workspace.window)
+  if (windowManager !== null) windowManager.markActive(workspace)
+  return workspace
+}
+
+/**
+ * For terminal-scoped menu/tray actions, a detached window is only a chooser:
+ * when the candidate terminal is already open in another window, focus that
+ * window instead of creating a second bound instance.
+ */
+/** Force-close one workspace window (its close handler normally hides). */
+function destroyWorkspaceWindow(workspace) {
+  const win = workspace.window
+  if (win === null || win.isDestroyed()) {
+    disposeWorkspace(workspace)
+    return
+  }
+  win.destroy()
+}
+
 function openWorkspaceWindow(workspace) {
   const session = workspace.session
+  if (session === null) return
   if (session.connection.status.state === 'ready') {
-    workspace.pendingOpen = false
-    loadAppUrl(workspace)
+    syncWorkspaceHarness(workspace, session)
     return
   }
   workspace.pendingOpen = true
   connectSession(session)
 }
 
-function createWorkspace(deviceKey = 'local') {
-  const session = sessionFor(deviceKey)
-  const bounds = windowManager === null ? null : windowManager.boundsFor(deviceKey)
+/** The device the first/recovered window should bind to on launch. */
+function defaultWorkspaceDeviceKey() {
+  if (windowManager !== null) {
+    const last = windowManager.lastActiveDeviceKey()
+    if (settingsDocument.devices[last] !== undefined) return last
+  }
+  return candidateDeviceKey()
+}
+
+function deviceSettingsComplete(deviceKey) {
+  const view = settingsViewFor(deviceKey)
+  return view.mode === 'local' ? view.local.repoDir !== '' : view.ssh.host !== ''
+}
+
+/**
+ * Create the startup/first window: bind to the current terminal and connect
+ * it (initializing the harness when needed). Additional windows go through
+ * actions.newWindow and start DETACHED instead.
+ */
+function createInitialWorkspace() {
+  const deviceKey = defaultWorkspaceDeviceKey()
+  const workspace = createWorkspace(deviceKey, { autoOpen: false })
+  if (deviceSettingsComplete(deviceKey)) startWithSettings(workspace)
+  else setWorkspaceView(workspace, 'connection')
+  return workspace
+}
+
+function createWorkspace(deviceKey = null, options = {}) {
+  const detached = deviceKey === null
+  const session = detached ? null : sessionFor(deviceKey)
+  const boundsKey = detached ? candidateDeviceKey() : deviceKey
+  const bounds = windowManager === null ? null : windowManager.boundsFor(boundsKey)
   const win = createBrowserWindow(bounds)
   const harnessView = new WebContentsView({
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
-      // Never throttle the harness renderer when its window loses focus: with
-      // several workspace windows open, Chromium's default background
-      // throttling pauses rAF and drops timer cadence on the inactive windows,
-      // which surfaces as a laggy/flashy UI and first-click stalls the moment
-      // the user switches back. Each harness must stay responsive regardless
-      // of which window is front-most.
       backgroundThrottling: false,
     },
   })
   win.contentView.addChildView(harnessView)
   harnessView.setVisible(false)
-  // The remote page never owns the window title.
   harnessView.webContents.on('page-title-updated', event => event.preventDefault())
   harnessView.webContents.loadURL('about:blank')
 
@@ -838,16 +1183,16 @@ function createWorkspace(deviceKey = 'local') {
     window: win,
     harnessView,
     setupDialog: new SetupDialog(win),
-    pendingOpen: true,
-    activeView: 'harness',
+    pendingOpen: session !== null,
+    activeView: options.initialView !== undefined ? options.initialView : 'harness',
     loadedUrl: '',
     harnessReady: false,
     loadError: '',
-    progress: null,
+    progress: session === null ? null : session.progress,
   }
   nextWorkspaceId += 1
   workspaces.set(workspace.id, workspace)
-  session.windows.add(workspace)
+  if (session !== null) session.windows.add(workspace)
   win.setTitle(workspaceTitle(workspace))
 
   win.once('ready-to-show', () => {
@@ -855,7 +1200,12 @@ function createWorkspace(deviceKey = 'local') {
     sendWorkspaceState(workspace)
     if (windowManager !== null) windowManager.touch(workspace)
     win.show()
-    openWorkspaceWindow(workspace)
+    refreshTrayAndMenu()
+    if (options.initialView !== undefined) {
+      setWorkspaceView(workspace, options.initialView)
+    } else if (options.autoOpen !== false) {
+      openWorkspaceWindow(workspace)
+    }
   })
   win.on('resize', () => {
     layoutWorkspaceViews(workspace)
@@ -867,11 +1217,8 @@ function createWorkspace(deviceKey = 'local') {
   win.on('focus', () => {
     if (windowManager !== null) windowManager.markActive(workspace)
     refreshTrayAndMenu()
-    // A WebContentsView does not re-acquire focus on its own when its window
-    // regains focus (e.g. switching between two workspace windows). Route
-    // focus back to the harness so its clicks/keys land on the first
-    // interaction instead of being lost to the shell frame's webContents.
-    if (workspace.activeView === 'harness'
+    if (workspace.session !== null
+      && workspace.activeView === 'harness'
       && workspace.harnessView !== null
       && !workspace.harnessView.webContents.isDestroyed()) {
       workspace.harnessView.webContents.focus()
@@ -886,32 +1233,28 @@ function createWorkspace(deviceKey = 'local') {
   })
   win.on('closed', () => disposeWorkspace(workspace))
   win.webContents.on('did-fail-load', (_event, code, description) => {
-    session.connection.log(`[窗口] 框架加载失败 ${code} ${description}`)
+    if (session !== null) {
+      session.connection.log('[window] frame load failed ' + code + ' ' + description)
+    }
   })
   harnessView.webContents.on('did-start-loading', () => {
-    // Only a real harness URL hides the view (about:blank stays hidden); this
-    // also covers reloadIgnoringCache so a post-update reload shows the
-    // loading panel instead of a blank web view.
     if (workspace.loadedUrl === '') return
     workspace.harnessReady = false
     updateHarnessVisibility(workspace)
   })
   harnessView.webContents.on('did-finish-load', () => {
-    // about:blank (loadedUrl === '') must never mark the harness ready; only
-    // a real harness URL flips visibility so the loading panel yields at the
-    // right moment.
     if (workspace.loadedUrl === '') return
     workspace.harnessReady = true
     workspace.loadError = ''
     updateHarnessVisibility(workspace)
   })
   harnessView.webContents.on('did-fail-load', (_event, code, description) => {
-    // -3 (ERR_ABORTED) is a cancelled navigation (e.g. switching devices to
-    // about:blank), not a real failure worth surfacing.
     if (code === -3) return
     workspace.harnessReady = false
     workspace.loadError = description
-    session.connection.log(`[窗口] 加载失败 ${code} ${description}`)
+    if (session !== null) {
+      session.connection.log('[window] load failed ' + code + ' ' + description)
+    }
     updateHarnessVisibility(workspace)
   })
 
@@ -921,29 +1264,34 @@ function createWorkspace(deviceKey = 'local') {
 function disposeWorkspace(workspace) {
   const session = workspace.session
   if (windowManager !== null) windowManager.touch(workspace)
-  session.windows.delete(workspace)
+  if (session !== null) session.windows.delete(workspace)
   workspace.setupDialog.close()
   for (const view of [workspace.harnessView, workspace.setupDialog.view]) {
     if (view !== null && view !== undefined && !view.webContents.isDestroyed()) {
       try {
         view.webContents.close()
       } catch {
-        // Window teardown already owns this webContents.
       }
     }
   }
   workspace.window = null
   workspaces.delete(workspace.id)
-  if (session.windows.size === 0 && session.key !== 'local') stopSession(session)
+  // Cancel in-flight work and release locks before tearing down an orphaned
+  // remote session. Local sessions stay resident; a detached artifact worker
+  // keeps running and the next local window observes its status.
+  if (session !== null && session.windows.size === 0 && quitting === false) void abandonSession(session)
   refreshTrayAndMenu()
 }
 
-/** Move a workspace to another device session. */
+/** Move a workspace to another device session (or out of the detached state). */
 function attachWorkspace(workspace, deviceKey) {
-  if (workspace.deviceKey === deviceKey) return workspace.session
+  if (workspace.session !== null && workspace.deviceKey === deviceKey) return workspace.session
   const previous = workspace.session
-  previous.windows.delete(workspace)
-  if (previous.windows.size === 0 && previous.key !== 'local') stopSession(previous)
+  if (previous !== null) {
+    previous.windows.delete(workspace)
+    // Do not stop/cancel here: save flows cancel busy work and abandon the
+    // previous session only after the new binding is in place.
+  }
 
   const session = sessionFor(deviceKey)
   workspace.deviceKey = deviceKey
@@ -952,9 +1300,8 @@ function attachWorkspace(workspace, deviceKey) {
   workspace.loadedUrl = ''
   workspace.harnessReady = false
   workspace.loadError = ''
-  workspace.progress = null
+  workspace.progress = session.progress
   session.windows.add(workspace)
-  // Never let a stale device's page flash while the new backend is connecting.
   workspace.harnessView.setVisible(false)
   workspace.harnessView.webContents.loadURL('about:blank')
   if (windowManager !== null) windowManager.touch(workspace)
@@ -965,15 +1312,29 @@ function attachWorkspace(workspace, deviceKey) {
   return session
 }
 
+
 /** Reload every window attached to one session after its service restarts. */
 function reloadSessionWindows(session) {
+  const url = session.connection.url()
   for (const workspace of session.windows) {
-    if (workspace.window !== null && !workspace.window.isDestroyed()) {
-      // Mark not-ready first so the loading panel takes over during the reload
-      // instead of flashing the stale page.
-      workspace.harnessReady = false
-      workspace.harnessView.webContents.reloadIgnoringCache()
-    }
+    if (workspace.window === null || workspace.window.isDestroyed()) continue
+    // Reload the CURRENT service URL, not whatever the harness view happened
+    // to have committed. A restart may move the service to a new OS-chosen
+    // port (`--port 0`), and reloadIgnoringCache() would re-request the stale
+    // URL — a dead page that surfaces as a white harness view and, for a
+    // window created mid-update, leaves its WebContentsView in a reload loop
+    // that swallows the shell frame's top button clicks. loadHarnessUrl re-
+    // hides the view and shows the loading panel until did-finish-load, so
+    // every window (including one born from about:blank) settles on the right
+    // page instead of staying stuck.
+    workspace.pendingOpen = false
+    // If the status event already started this exact URL, don't abort that
+    // navigation with a second loadURL call. Same-URL loads only happen when
+    // the page is actually settled and this is an explicit post-update reload.
+    const inFlight = workspace.loadedUrl === url
+      && workspace.harnessReady === false
+      && workspace.loadError === ''
+    if (inFlight === false) loadHarnessUrl(workspace, url)
   }
 }
 
@@ -995,7 +1356,9 @@ function activeStatus() {
 
 function activeSettingsView() {
   const workspace = activeWorkspace()
-  return workspace === null ? settingsViewFor('local') : settingsViewFor(workspace.deviceKey)
+  if (workspace === null) return settingsViewFor(candidateDeviceKey())
+  const view = settingsViewFor(workspace.deviceKey)
+  return workspace.session === null ? { ...view, detached: true } : view
 }
 
 function activeUpdateSummary() {
@@ -1022,9 +1385,29 @@ function refreshMenu() {
   }))
 }
 
+/**
+ * macOS Dock right-click menu. Do NOT add our own window list here: macOS
+ * already renders the native window list above this custom menu, and adding
+ * the workspaces again produced two groups (native titles with URLs + our
+ * terminal-only labels).
+ */
+function refreshDockMenu() {
+  if (app.dock === undefined || app.dock === null) return
+  try {
+    app.dock.setMenu(Menu.buildFromTemplate([
+      { label: '打开 Harness', click: () => actions.openMain() },
+      { type: 'separator' },
+      { label: '新建窗口', click: () => actions.newWindow() },
+    ]))
+  } catch {
+    // Dock menu is cosmetic on macOS.
+  }
+}
+
 function refreshTrayAndMenu() {
   if (trayController !== null) trayController.update(activeStatus(), activeSettingsView())
   refreshMenu()
+  refreshDockMenu()
 }
 
 /** Broadcast one session snapshot to its windows and the shared menu/tray. */
@@ -1045,13 +1428,21 @@ function onSessionStatus(session, status) {
     if (workspace.window === null || workspace.window.isDestroyed()) continue
     workspace.window.setTitle(workspaceTitle(workspace))
     sendWorkspaceState(workspace)
+    workspace.setupDialog.send('dialog:live', {
+      state: status.state,
+      url: status.url,
+      detail: status.detail,
+    })
     if (status.state === 'ready' && workspace.pendingOpen) {
-      workspace.pendingOpen = false
-      loadAppUrl(workspace)
+      // Do not yank the user out of connection/updates and do not raise a
+      // background window: sync the harness URL in the current view context.
+      syncWorkspaceHarness(workspace, session)
     } else if (status.state === 'ready' && workspace.loadedUrl !== '' && workspace.loadedUrl !== status.url) {
       // A restarted service may report a new OS-chosen port. Reload in place
       // without yanking focus from the window the user is actually using.
       loadHarnessUrl(workspace, status.url)
+    } else {
+      updateHarnessVisibility(workspace)
     }
   }
   if (status.state === 'ready') {
@@ -1123,7 +1514,7 @@ function scheduleAutoCheck(session) {
     session.autoCheckTimer = null
     if (session.connection.status.state !== 'ready') return
     try {
-      await session.updateManager.checkAll()
+      await trackSessionTask(session, session.updateManager.checkAll())
       const key = session.updateManager.notificationKey()
       const available = session.updateManager.snapshot().available
       if (key !== '' && key !== view.update.lastNotifiedKey) {
@@ -1137,9 +1528,9 @@ function scheduleAutoCheck(session) {
 }
 
 /** Shared tail for panel-driven component updates. */
-async function finishManagedUpdate(workspace, outcome) {
-  if (outcome.ok && outcome.restarted) reloadSessionWindows(workspace.session)
-  broadcastSession(workspace.session)
+async function finishManagedUpdate(workspace, session, outcome) {
+  if (outcome.ok && outcome.restarted) reloadSessionWindows(session)
+  broadcastSession(session)
 }
 
 function validateSettings(next) {
@@ -1157,8 +1548,30 @@ function validateSettings(next) {
   return null
 }
 
+/** Connection-relevant parts of two normalized device documents. */
+function sameDeviceConfig(a, b) {
+  if (a.mode !== b.mode) return false
+  if (a.mode === 'local') {
+    return a.local.repoDir === b.local.repoDir
+      && a.local.repoUrl === b.local.repoUrl
+      && a.local.dshHome === b.local.dshHome
+  }
+  return a.ssh.host === b.ssh.host
+    && a.ssh.remoteRepoUrl === b.ssh.remoteRepoUrl
+    && a.ssh.remoteRepoDir === b.ssh.remoteRepoDir
+    && a.ssh.remotePort === b.ssh.remotePort
+    && a.ssh.localPort === b.ssh.localPort
+}
+
+/** Run initialization when needed, tracked so a window switch can cancel it. */
+function startWithSettings(workspace) {
+  if (workspace.session === null) return Promise.resolve()
+  return trackSessionTask(workspace.session, startWithSettingsInner(workspace))
+}
+
 /** Run the initialization build when needed, then connect one workspace. */
-async function startWithSettings(workspace) {
+async function startWithSettingsInner(workspace) {
+  if (workspace.session === null) return
   const session = workspace.session
   let built = false
   try {
@@ -1168,25 +1581,28 @@ async function startWithSettings(workspace) {
     // cannot even reach the host, connect() surfaces the real failure with a
     // proper dialog instead of a pointless build pipeline.
     session.connection.log(`构建检查失败：${error.message}`)
-    setWorkspaceView(workspace, 'harness')
+    if (workspace.session !== session) return
+    syncWorkspaceHarness(workspace, session)
     workspace.pendingOpen = true
     connectSession(session)
     return
   }
-  if (!built) {
+  if (workspace.session !== session) return
+  if (built === false) {
     const busyMessage = busyTaskMessage(session)
     if (busyMessage !== '') {
-      setWorkspaceView(workspace, 'harness')
+      syncWorkspaceHarness(workspace, session)
       setProgress(workspace, {
         title: '初始化构建',
         status: `${busyMessage} 稍后请从「更新 → 仅更新 Harness」重试。`,
       })
       return
     }
-    setWorkspaceView(workspace, 'harness')
+    syncWorkspaceHarness(workspace, session)
     // Phase 2/3: official artifact first — no checkout, no build, and the
     // worker survives shell quit.
     const usedWorker = await startArtifactUpdateIfPossible(session)
+    if (workspace.session !== session) return
     if (usedWorker) {
       setProgress(workspace, { title: '初始化（官方产物）', status: '正在后台下载官方预构建版…' })
       return
@@ -1196,7 +1612,8 @@ async function startWithSettings(workspace) {
       status: '首次使用：确保仓库 → 工具链引导 → pnpm install → pnpm run build → 启动服务',
     })
     const outcome = await session.updater.runPipeline({ includePull: true, toleratePullFailure: true })
-    if (!outcome.ok) {
+    if (workspace.session !== session) return
+    if (outcome.ok === false) {
       setProgress(workspace, {
         title: '初始化构建',
         status: '构建失败。可修复后重试（日志已写入文件）。',
@@ -1206,24 +1623,33 @@ async function startWithSettings(workspace) {
     }
     setProgress(workspace, null)
   }
-  setWorkspaceView(workspace, 'harness')
+  if (workspace.session !== session) return
+  syncWorkspaceHarness(workspace, session)
   workspace.pendingOpen = true
   connectSession(session)
 }
 
-async function runInit(workspace) {
+function runInit(workspace) {
+  if (workspace.session === null) return Promise.resolve()
+  return trackSessionTask(workspace.session, runInitInner(workspace))
+}
+
+async function runInitInner(workspace) {
+  if (workspace.session === null) return
   const session = workspace.session
-  if (!canStartBusyTask(session)) return
+  if (canStartBusyTask(session) === false) return
   const usedWorker = await startArtifactUpdateIfPossible(session)
+  if (workspace.session !== session) return
   if (usedWorker) {
     setProgress(workspace, { title: '初始化（官方产物）', status: '正在后台下载官方预构建版…' })
     return
   }
   setProgress(workspace, { title: '初始化构建', status: '执行中…' })
   const outcome = await session.updater.runPipeline({ includePull: true, toleratePullFailure: true })
+  if (workspace.session !== session) return
   if (outcome.ok) {
     setProgress(workspace, null)
-    setWorkspaceView(workspace, 'harness')
+    syncWorkspaceHarness(workspace, session)
     workspace.pendingOpen = true
     connectSession(session)
   } else {
@@ -1248,6 +1674,9 @@ function isSessionBusy(session) {
   if (session === null || session === undefined) return false
   if (session.updater !== null && session.updater.busy) return true
   if (session.updateManager !== null && session.updateManager.busy) return true
+  // The detached artifact worker is also a per-terminal task: another update
+  // must not race it, but a same-config save may still attach to its progress.
+  if (session.workerPollTimer !== null) return true
   return false
 }
 
@@ -1266,16 +1695,26 @@ function canStartBusyTask(session) {
 
 const actions = {
   newWindow() {
-    return createWorkspace('local')
+    // Additional windows are intentionally DETACHED: no session, no
+    // auto-connect. They open on the connection page and bind only after
+    // the user saves a terminal. This keeps a window created mid-update
+    // completely out of the restarting harness view tree.
+    return createWorkspace(null, { initialView: 'connection' })
   },
 
   openMain(workspace) {
     const target = withWorkspace(workspace)
-    if (target.session.connection.status.state !== 'ready') {
-      dialog.showErrorBox('尚未连接', `当前状态：${target.session.connection.status.detail}\n\n可在「连接 → 重新连接」或「连接设置」中处理。`)
+    if (target.session === null) {
+      setWorkspaceView(target, 'connection')
+      presentWindow(target.window)
       return target
     }
-    loadAppUrl(target)
+    if (target.session.connection.status.state !== 'ready') {
+      dialog.showErrorBox('尚未连接', '当前状态：' + target.session.connection.status.detail + '\n\n可在「连接 → 重新连接」或「连接设置」中处理。')
+      return target
+    }
+    setWorkspaceView(target, 'harness')
+    presentWindow(target.window)
     return target
   },
 
@@ -1286,16 +1725,26 @@ const actions = {
     return target
   },
 
-  openUpdates(workspace) {
+  openUpdates(workspace, focus = true) {
     const target = withWorkspace(workspace)
+    if (target.session === null) {
+      setWorkspaceView(target, 'connection')
+      if (focus !== false) presentWindow(target.window)
+      return target
+    }
     setWorkspaceView(target, 'updates')
     broadcastSession(target.session)
-    presentWindow(target.window)
+    if (focus !== false) presentWindow(target.window)
     return target
   },
 
   reconnect(workspace) {
     const target = withWorkspace(workspace)
+    if (target.session === null) {
+      setWorkspaceView(target, 'connection')
+      presentWindow(target.window)
+      return target
+    }
     if (!canStartBusyTask(target.session)) return target
     target.session.autoReconnectAttempts = 0
     target.pendingOpen = true
@@ -1304,6 +1753,11 @@ const actions = {
 
   async resetBackend(workspace) {
     const target = withWorkspace(workspace)
+    if (target.session === null) {
+      setWorkspaceView(target, 'connection')
+      presentWindow(target.window)
+      return target
+    }
     if (!canStartBusyTask(target.session)) return target
     try {
       await target.session.connection.resetService()
@@ -1319,6 +1773,11 @@ const actions = {
 
   async rollbackHarness(workspace) {
     const target = withWorkspace(workspace)
+    if (target.session === null) {
+      setWorkspaceView(target, 'connection')
+      presentWindow(target.window)
+      return target
+    }
     if (!canStartBusyTask(target.session)) return target
     const session = target.session
     const settings = settingsViewFor(session.key)
@@ -1346,63 +1805,91 @@ const actions = {
   },
 
   async checkUpdates(workspace) {
-    const target = actions.openUpdates(workspace)
-    if (!canStartBusyTask(target.session)) return target
-    try {
-      await target.session.updateManager.checkAll()
-    } catch (error) {
-      routeSessionLine(target.session, `✗ 检查更新失败：${String(error.message || error)}`)
+    const target = actions.openUpdates(workspace, false)
+    if (target.session === null) {
+      setWorkspaceView(target, 'connection')
+      presentWindow(target.window)
+      return target
     }
-    broadcastSession(target.session)
+    if (!canStartBusyTask(target.session)) return target
+    const session = target.session
+    try {
+      await trackSessionTask(session, session.updateManager.checkAll())
+    } catch (error) {
+      routeSessionLine(session, `✗ 检查更新失败：${String(error.message || error)}`)
+    }
+    broadcastSession(session)
   },
 
   async updateAll(workspace) {
-    const target = actions.openUpdates(workspace)
+    const target = actions.openUpdates(workspace, false)
+    if (target.session === null) {
+      setWorkspaceView(target, 'connection')
+      presentWindow(target.window)
+      return target
+    }
     if (!canStartBusyTask(target.session)) return target
-    routeSessionLine(target.session, '\n==> 更新全部组件')
+    const session = target.session
+    routeSessionLine(session, '\n==> 更新全部组件')
     try {
-      const outcome = await target.session.updateManager.updateAll()
-      await finishManagedUpdate(target, outcome)
+      const outcome = await trackSessionTask(session, session.updateManager.updateAll())
+      await finishManagedUpdate(target, session, outcome)
     } catch (error) {
-      routeSessionLine(target.session, `✗ 更新全部失败：${String(error.message || error)}`)
-      broadcastSession(target.session)
+      routeSessionLine(session, `✗ 更新全部失败：${String(error.message || error)}`)
+      broadcastSession(session)
     }
   },
 
   async updateAndRestart(workspace) {
     const target = withWorkspace(workspace)
-    if (!canStartBusyTask(target.session)) return target
-    // Phase 2/3: local official-artifact updates go through the detached
-    // worker — no source checkout, no pnpm build, survives shell quit.
-    const usedWorker = await startArtifactUpdateIfPossible(target.session)
-    if (usedWorker) {
-      setProgress(target, { title: '更新并重启（官方产物）', status: '正在后台下载官方预构建版…' })
+    if (target.session === null) {
+      setWorkspaceView(target, 'connection')
+      presentWindow(target.window)
       return target
     }
-    setProgress(target, { title: '更新并重启', status: '执行中…' })
-    const outcome = await target.session.updater.runPipeline({ includePull: true })
-    if (outcome.ok) {
-      // Mark windows not-ready + reload first, then clear the banner, so the
-      // loading panel takes over without flashing the stale page.
-      reloadSessionWindows(target.session)
-      setProgress(target, null)
-    } else {
-      const diagnosis = await diagnoseFailure(target.session)
-      setProgress(target, {
-        title: '更新失败',
-        status: `${String(outcome.error?.message || outcome.error)}\n\n${diagnosis}`,
-        actions: [
-          { label: '重试', name: 'run-update', primary: true },
-          { label: '改用官方产物', name: 'run-artifact' },
-          { label: '放弃', name: 'dismiss-progress' },
-        ],
-      })
-    }
-    refreshMenu()
+    if (!canStartBusyTask(target.session)) return target
+
+    const task = trackSessionTask(target.session, (async () => {
+      const session = target.session
+      // Phase 2/3: local official-artifact updates go through the detached
+      // worker: no source checkout, no pnpm build, survives shell quit.
+      const usedWorker = await startArtifactUpdateIfPossible(session)
+      if (target.session !== session) return
+      if (usedWorker) {
+        setProgress(target, { title: '更新并重启（官方产物）', status: '正在后台下载官方预构建版…' })
+        return
+      }
+      setProgress(target, { title: '更新并重启', status: '执行中…' })
+      const outcome = await session.updater.runPipeline({ includePull: true })
+      if (target.session !== session) return
+      if (outcome.ok) {
+        reloadSessionWindows(session)
+        setProgress(target, null)
+      } else {
+        const diagnosis = await diagnoseFailure(session)
+        setProgress(target, {
+          title: '更新失败',
+          status: `${String(outcome.error?.message || outcome.error)}\n\n${diagnosis}`,
+          actions: [
+            { label: '重试', name: 'run-update', primary: true },
+            { label: '改用官方产物', name: 'run-artifact' },
+            { label: '放弃', name: 'dismiss-progress' },
+          ],
+        })
+      }
+      refreshMenu()
+    })())
+    await task
+    return target
   },
 
   async openLogs(workspace) {
     const target = withWorkspace(workspace)
+    if (target.session === null) {
+      setWorkspaceView(target, 'connection')
+      presentWindow(target.window)
+      return target
+    }
     const session = target.session
     const view = settingsViewFor(session.key)
     if (view.mode === 'ssh') {
@@ -1467,16 +1954,19 @@ function registerIpc() {
   registerDialogIpc({
     getState(event) {
       const workspace = workspaceForEvent(event) ?? withWorkspace(null)
-      const view = settingsViewFor(workspace.deviceKey)
+      const detached = workspace.session === null
+      const deviceKey = detached ? candidateDeviceKey() : workspace.deviceKey
+      const view = settingsViewFor(deviceKey)
       const tools = resolveTools(view)
+      const live = detached ? idleStatus() : workspace.session.connection.status
       return {
         settings: view,
-        terminal: terminalLabel(view),
+        terminal: detached ? '待连接' : terminalLabel(view),
         sshHosts: listSshHosts(),
         live: {
-          state: workspace.session.connection.status.state,
-          url: workspace.session.connection.status.url,
-          detail: workspace.session.connection.status.detail,
+          state: live.state,
+          url: live.url,
+          detail: live.detail,
         },
         detected: {
           node: tools.node,
@@ -1502,53 +1992,74 @@ function registerIpc() {
 
     async save(event, rawSettings) {
       const workspace = workspaceForEvent(event) ?? withWorkspace(null)
-      const busyMessage = busyTaskMessage(workspace.session)
-      if (busyMessage !== '') return { ok: false, error: busyMessage }
       const candidate = normalizeSettings(rawSettings)
       const error = validateSettings(candidate)
       if (error !== null) return { ok: false, error }
-      // Connection saves never carry update settings from another device.
-      // A newly selected target keeps its own update section (or starts
-      // with the harness-only default), and switching back restores it.
-      // Preserve the machine identity the current terminal already resolved:
-      // the settings form carries no machineId, and re-keying by alias alone
-      // would split an already-merged machine back apart. Switching to a
-      // DIFFERENT host drops the identity so the next connect re-learns it.
-      const currentDevice = settingsDocument.devices[workspace.deviceKey]
-      const hostChanged = currentDevice !== undefined
+
+      // Resolve the machine identity the form alone cannot carry: the saved
+      // device key for this workspace, or an already-merged machine device
+      // that has the same SSH host. Without this a detached window would
+      // re-key machine:<id> back to ssh:<host> and split the terminal.
+      const detached = workspace.session === null
+      const currentKey = detached ? candidateDeviceKey() : workspace.deviceKey
+      let currentDevice = settingsDocument.devices[currentKey]
+      if (candidate.mode === 'ssh') {
+        const byHost = Object.values(settingsDocument.devices).find(device =>
+          device.mode === 'ssh' && device.ssh.host === candidate.ssh.host && device.machineId !== '')
+        if (byHost !== undefined) currentDevice = byHost
+      }
+      const keepMachineId = currentDevice !== undefined
         && currentDevice.mode === 'ssh'
-        && currentDevice.ssh.host !== candidate.ssh.host
-      const keepMachineId = workspace.deviceKey.startsWith('machine:')
-        && currentDevice !== undefined
-        && !hostChanged
+        && currentDevice.ssh.host === candidate.ssh.host
+        && currentDevice.machineId !== ''
       const machineId = keepMachineId ? currentDevice.machineId : ''
       const deviceKey = deviceKeyOf({ ...candidate, machineId })
-      const previousUpdate = settingsDocument.devices[deviceKey]?.update
-      const device = {
-        mode: candidate.mode,
-        machineId,
-        local: candidate.local,
-        ssh: candidate.ssh,
-        update: previousUpdate ?? candidate.update,
-      }
-      persistDevice(deviceKey, device)
-      settingsDocument = persistDocument({
-        activeDeviceId: deviceKey,
-        devices: settingsDocument.devices,
-        toolPaths: settingsDocument.toolPaths,
-      })
 
+      const targetSession = sessions.get(deviceKey) ?? null
+      const existingDevice = settingsDocument.devices[deviceKey]
+      const targetUnchanged = existingDevice !== undefined && sameDeviceConfig(existingDevice, candidate)
+      const targetBusy = targetSession !== null && isSessionBusy(targetSession)
+      const previous = workspace.session
+      const switchingAway = previous !== null && deviceKey !== workspace.deviceKey
+
+      // One bound window per terminal. The CURRENT window always stays: when
+      // the target terminal already has another window, the current window
+      // binds in place and the other duplicate windows are closed. The view
+      // and focus of the current window do not change.
+      const duplicate = boundWorkspaceFor(deviceKey, workspace)
+      if (duplicate !== null) {
+        if (targetBusy && targetUnchanged === false) {
+          return { ok: false, error: busyTaskMessage(targetSession) }
+        }
+        persistConnectionCandidate(deviceKey, candidate, machineId)
+        refreshSessionSettings(duplicate.session, deviceKey)
+        openExistingTerminalWindow(duplicate, targetBusy, targetUnchanged)
+        // The current window stays exactly as it was (usually a detached
+        // chooser or another terminal). Connecting to an already-open
+        // terminal is only a window switch, never a close/rebind.
+        return { ok: true }
+      }
+
+      // Target terminal has no bound window yet.
+      if (targetBusy) {
+        if (targetUnchanged === false) {
+          return { ok: false, error: busyTaskMessage(targetSession) }
+        }
+        const session = attachWorkspace(workspace, deviceKey)
+        refreshSessionSettings(session, deviceKey)
+        if (windowManager !== null) windowManager.markActive(workspace)
+        if (previous !== null && switchingAway) void abandonSession(previous)
+        return { ok: true }
+      }
+
+      persistConnectionCandidate(deviceKey, candidate, machineId)
       const session = attachWorkspace(workspace, deviceKey)
-      const view = settingsViewFor(deviceKey)
-      session.updateManager.settings = view
-      session.updateManager.reloadComponents()
-      broadcastSession(session)
-      // Any other window attached to this device already has a kept-alive
-      // settings view with the pre-save form; reload every panel so a
-      // multi-window save can never be overwritten from a stale copy.
-      for (const attached of session.windows) attached.setupDialog.reload()
+      refreshSessionSettings(session, deviceKey)
       if (windowManager !== null) windowManager.markActive(workspace)
-      setWorkspaceView(workspace, 'harness')
+      // Never block the switch: cancel/abandon the previous terminal in the
+      // background. Its old service keeps running and the task can be retried
+      // later from that terminal's single window.
+      if (previous !== null && switchingAway) void abandonSession(previous)
       startWithSettings(workspace)
       return { ok: true }
     },
@@ -1561,11 +2072,25 @@ function registerIpc() {
 
     updatesGetState(event) {
       const workspace = workspaceForEvent(event) ?? withWorkspace(null)
+      if (workspace.session === null) {
+        const view = settingsViewFor(candidateDeviceKey())
+        return {
+          detached: true,
+          busy: false,
+          autoCheckOnLaunch: view.update?.autoCheckOnLaunch === false ? false : true,
+          lastCheckAt: view.update?.lastCheckAt ?? '',
+          components: [],
+          available: [],
+        }
+      }
       return workspace.session.updateManager.snapshot()
     },
 
     updatesGetLog(event) {
       const workspace = workspaceForEvent(event) ?? withWorkspace(null)
+      if (workspace.session === null) {
+        return '当前窗口尚未连接终端。请先在「连接」中选择并保存终端。'
+      }
       // The panel is created lazily and may have missed every earlier line;
       // return the connection's bounded ring so the tab can show the latest
       // log immediately instead of starting with an empty console.
@@ -1576,6 +2101,17 @@ function registerIpc() {
       const workspace = workspaceForEvent(event) ?? withWorkspace(null)
       const session = workspace.session
       const taskNames = ['check-all', 'check-one', 'update-one', 'update-all', 'restart-service']
+      if (session === null) {
+        if (name === 'close' || name === 'open-settings') {
+          setWorkspaceView(workspace, name === 'close' ? 'harness' : 'connection')
+          return { ok: true }
+        }
+        if (name === 'copy-log' || name === 'reveal-log') {
+          // Global log helpers stay useful before a terminal is selected.
+        } else {
+          return { ok: false, error: '请先连接终端' }
+        }
+      }
       const busyMessage = busyTaskMessage(session)
       if (taskNames.includes(name) && busyMessage !== '') {
         return { ok: false, error: busyMessage }
@@ -1592,7 +2128,7 @@ function registerIpc() {
             saveUpdateForSession(session, { autoCheckOnLaunch: Boolean(payload?.value) })
             break
           case 'restart-service':
-            await session.connection.restartService()
+            await trackSessionTask(session, session.connection.restartService())
             break
           case 'save-sources':
             if (!Array.isArray(payload?.components)) {
@@ -1634,7 +2170,7 @@ function registerIpc() {
             }
             break
           case 'check-all':
-            void session.updateManager.checkAll().then(
+            void trackSessionTask(session, session.updateManager.checkAll()).then(
               () => broadcastSession(session),
               error => {
                 routeSessionLine(session, `✗ 检查更新失败：${String(error.message || error)}`)
@@ -1644,7 +2180,7 @@ function registerIpc() {
             break
           case 'check-one': {
             const id = String(payload?.id ?? '')
-            void session.updateManager.checkOne(id).then(
+            void trackSessionTask(session, session.updateManager.checkOne(id)).then(
               () => broadcastSession(session),
               error => {
                 routeSessionLine(session, `✗ 检查失败：${String(error.message || error)}`)
@@ -1655,8 +2191,8 @@ function registerIpc() {
           }
           case 'update-one': {
             const id = String(payload?.id ?? '')
-            void session.updateManager.updateOne(id).then(
-              outcome => finishManagedUpdate(workspace, outcome),
+            void trackSessionTask(session, session.updateManager.updateOne(id)).then(
+              outcome => finishManagedUpdate(workspace, session, outcome),
               error => {
                 routeSessionLine(session, `✗ 更新失败：${String(error.message || error)}`)
                 broadcastSession(session)
@@ -1665,8 +2201,8 @@ function registerIpc() {
             break
           }
           case 'update-all':
-            void session.updateManager.updateAll().then(
-              outcome => finishManagedUpdate(workspace, outcome),
+            void trackSessionTask(session, session.updateManager.updateAll()).then(
+              outcome => finishManagedUpdate(workspace, session, outcome),
               error => {
                 routeSessionLine(session, `✗ 更新全部失败：${String(error.message || error)}`)
                 broadcastSession(session)
@@ -1697,6 +2233,18 @@ function registerIpc() {
   ipcMain.handle('shell:action', (event, name) => {
     const workspace = workspaceForEvent(event) ?? withWorkspace(null)
     switch (name) {
+      case 'focus-terminal-window': {
+        const target = workspace.session === null
+          ? boundWorkspaceFor(candidateDeviceKey(), workspace)
+          : workspace
+        if (target === null) break
+        presentWorkspace(target)
+        setWorkspaceView(target, 'harness')
+        break
+      }
+      case 'open-connection':
+        setWorkspaceView(workspace, 'connection')
+        break
       case 'run-init':
         void runInit(workspace)
         break
@@ -1705,6 +2253,7 @@ function registerIpc() {
         break
       case 'run-artifact':
         void (async () => {
+          if (workspace.session === null) return
           const view = settingsViewFor(workspace.deviceKey)
           if (workspace.session.key !== 'local') {
             routeSessionLine(workspace.session, '官方产物仅支持本地模式（SSH 走远端源码构建）。')
@@ -1804,6 +2353,25 @@ async function runSmoke() {
     const result = await runCommand({ cmd: '/bin/echo', args: ['dsh-smoke'] })
     if (result.code !== 0 || result.lines[0] !== 'dsh-smoke') throw new Error('runner failed')
   })
+  await check('runner owner cancellation', async () => {
+    const task = runCommand({ cmd: '/bin/sleep', args: ['30'], owner: 'smoke-owner' })
+    await new Promise(resolve => setTimeout(resolve, 250))
+    if (cancelOwnedChildren('smoke-owner', 'SIGTERM') === 0) throw new Error('owner child not tracked')
+    const result = await task
+    if (result.code === null && result.signal === 'SIGTERM') return
+    throw new Error('owner child was not cancelled: ' + JSON.stringify(result))
+  })
+  await check('session task cancellation', async () => {
+    const fakeSession = { key: 'smoke-session', owner: () => 'session:smoke-session', taskPromise: null, connectionTaskPromise: null, windows: new Set(), progress: null }
+    const child = runCommand({ cmd: '/bin/sleep', args: ['30'], owner: fakeSession.owner() })
+    trackSessionTask(fakeSession, child)
+    await new Promise(resolve => setTimeout(resolve, 250))
+    await cancelSessionTask(fakeSession)
+    if (fakeSession.taskPromise !== null) throw new Error('session task promise did not settle after cancel')
+    const result = await child
+    if (result.code === null && result.signal === 'SIGTERM') return
+    throw new Error('session child was not cancelled: ' + JSON.stringify(result))
+  })
   await check('dock icon press feedback', async () => {
     const calls = []
     flashDockIconPress({ setIcon: iconPath => calls.push(iconPath) }, 10)
@@ -1853,7 +2421,7 @@ if (!gotLock) {
 } else {
   app.on('second-instance', () => {
     if (settingsDocument === null) return
-    const workspace = activeWorkspace() ?? createWorkspace('local')
+    const workspace = activeWorkspace() ?? createInitialWorkspace()
     if (workspace.window !== null && !workspace.window.isDestroyed()) presentWindow(workspace.window)
   })
 
@@ -1873,6 +2441,11 @@ if (!gotLock) {
     settingsDocument = cleanDocument(settingsStore.load())
     windowManager = new WindowManager(path.join(app.getPath('userData'), 'window-state.json'))
 
+    // Migrate the pre-scoping shared tunnel state once per launch. Tunnels
+    // are rebuilt by each session on connect; this prevents a new alias from
+    // killing another alias's live tunnel later.
+    runtimeStore.reapLegacyLocalTunnelState(settingsViewFor('local'))
+
     const logsDir = path.join(app.getPath('userData'), 'logs')
     fs.mkdirSync(logsDir, { recursive: true })
     const stamp = new Date().toISOString().replace(/[:T]/g, '-').slice(0, 19)
@@ -1890,29 +2463,12 @@ if (!gotLock) {
       isBusy: () => isSessionBusy(activeSession()),
     })
 
-    try {
-      app.dock.setMenu(Menu.buildFromTemplate([
-        { label: '新建窗口', click: () => actions.newWindow() },
-      ]))
-    } catch {
-      // Dock menu is macOS-only and cosmetic.
-    }
-
     refreshTrayAndMenu()
 
-    // Restore the device the user last had in front, not just the device that
-    // happened to be persisted by the last settings save.
-    const lastDevice = windowManager.lastActiveDeviceKey()
-    const firstDevice = settingsDocument.devices[lastDevice] !== undefined
-      ? lastDevice
-      : settingsDocument.activeDeviceId
-    const first = createWorkspace(firstDevice)
-    const firstView = settingsViewFor(first.deviceKey)
-    const complete = firstView.mode === 'local'
-      ? firstView.local.repoDir !== ''
-      : firstView.ssh.host !== ''
-    if (complete) startWithSettings(first)
-    else setWorkspaceView(first, 'connection')
+    // The FIRST window binds to the current terminal and connects (or starts
+    // initialization). Additional windows are detached until the user saves a
+    // terminal in their connection page.
+    const first = createInitialWorkspace()
 
     // Phase 1: pick up an update the previous run left unfinished (killed
     // pipeline or a detached worker that finished while the shell was gone).
@@ -1923,7 +2479,7 @@ if (!gotLock) {
       // macOS already fronts a visible window on dock activation; the shell
       // only needs to recover hidden/minimized windows or recreate one.
       if (hasVisibleWindows) return
-      const workspace = activeWorkspace() ?? createWorkspace('local')
+      const workspace = activeWorkspace() ?? createInitialWorkspace()
       if (workspace.window === null || workspace.window.isDestroyed()) return
       if (presentWindow(workspace.window) === null) openWorkspaceWindow(workspace)
     })

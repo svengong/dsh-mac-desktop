@@ -187,9 +187,10 @@ function expandHome(dir) {
 }
 
 class ConnectionManager extends EventEmitter {
-  constructor({ getSettings, onLog }) {
+  constructor({ getSettings, onLog, getOwner }) {
     super()
     this.getSettings = getSettings
+    this.getOwner = getOwner || (() => null)
     this.onLog = onLog || (() => {})
     this.status = { state: 'idle', mode: 'local', url: '', detail: '未连接', serviceOwner: 'none' }
     this.localChild = null
@@ -209,6 +210,11 @@ class ConnectionManager extends EventEmitter {
     // retry timers from a previous connect generation must never spawn a
     // second service or clobber the current child reference.
     this.connectEpoch = 0
+  }
+
+  /** Owner used by runner.js so one terminal's update task can be cancelled. */
+  owner() {
+    return this.getOwner()
   }
 
   url() {
@@ -310,6 +316,7 @@ class ConnectionManager extends EventEmitter {
           cmd: tools.git,
           args: ['-C', settings.local.repoDir, 'rev-parse', 'HEAD'],
           timeoutMs: 10_000,
+          owner: this.owner(),
         })
         head = result.code === 0 ? result.lines.map(line => line.trim()).find(Boolean) : ''
       }
@@ -329,6 +336,7 @@ class ConnectionManager extends EventEmitter {
           cmd: tools.git,
           args: ['-C', settings.local.repoDir, 'status', '--porcelain'],
           timeoutMs: 10_000,
+          owner: this.owner(),
         })
         const hasTrackedChanges = dirty.code === 0 && dirty.lines.some(line => !line.startsWith('??'))
         if (hasTrackedChanges) {
@@ -431,6 +439,7 @@ class ConnectionManager extends EventEmitter {
       args: sshCommandArgs(target, command),
       timeoutMs,
       onLine: filteredOnLine,
+      owner: this.owner(),
     })
     // Substring-aware marker extraction: a command whose final line has no
     
@@ -450,6 +459,7 @@ class ConnectionManager extends EventEmitter {
         cmd: tools.ssh,
         args: sshCommandArgs(target, `command -v ${candidate}`),
         timeoutMs: 15_000,
+        owner: this.owner(),
       })
       const found = result.code === 0 ? result.lines.map(line => line.trim()).find(line => line.startsWith('/')) : ''
       if (found) {
@@ -602,61 +612,36 @@ class ConnectionManager extends EventEmitter {
   /** Restart the harness service in place (the update flow's last step). */
   async restartService() {
     const settings = this.getSettings()
-    if (settings.mode === 'ssh') {
-      // Start the new remote service first (it reports the OS-chosen port),
-      // then rebuild the local forward to that exact port.
-      await this.restartRemoteService(settings)
-      await this.startTunnelOnFreePort(settings, this.remotePort)
-      await waitReady(this.url())
-      // Emit the new URL: windows follow the port that actually serves, and
-      // a stale title/URL after a restart is a dead page for every window.
-      this.setStatus({
-        state: 'ready',
-        url: this.url(),
-        detail: `已重启（${displayLabel(settings.ssh.host)}，隧道转发）`,
-        serviceOwner: 'remote',
-      })
-      return
-    }
-    const version = await this.serviceVersion(settings)
-    this.localVersion = version
-    if (this.localChild !== null) {
-      this.log('重启本地服务…')
-      this.killChild(this.localChild)
-      this.localChild = null
-      this.localPort = null
-      await this.spawnLocalService(settings, 0, version)
-      await waitReady(this.url())
-      this.localRetries = 0
-      this.setStatus({
-        state: 'ready',
-        url: this.url(),
-        detail: `已重启（端口 ${this.localPort}）`,
-        serviceOwner: 'self',
-      })
-      return
-    }
-    const url = this.url()
-    const probe = await probeOnce(url)
-    if (probe.up) {
-      // An externally-owned service (the shell adopted an already-listening
-      // port) still needs a restart for plugin/preset updates to take effect:
-      // the host process must reload its profile. Resolve the real listener —
-      // the state file's pid first, then `lsof` on the ACTUAL url port (not
-      // the configured default) when that pid has gone stale — and start a
-      // fresh owned service. Deriving the port from the URL that just answered
-      // keeps the probe and the kill on the same endpoint even when the
-      // service runs on an OS-chosen port.
-      const state = this.readLocalState(settings)
-      let pid = state !== null && Number.isInteger(state.pid) ? state.pid : 0
-      if (!pidAlive(pid)) pid = await findListeningPid(urlPort(url))
-      if (pidAlive(pid)) {
-        this.log(`重启本地服务（外部托管，pid ${pid}）…`)
-        try {
-          process.kill(pid, 'SIGTERM')
-        } catch {
-          // Already gone; fall through to a fresh spawn.
-        }
+    // Let the shell frame answer 'what is happening now?' while the harness
+    // web view is being torn down and brought back on a possibly new port.
+    this.setStatus({
+      state: 'restarting',
+      url: this.url(),
+      detail: '正在重启服务…',
+    })
+    try {
+      if (settings.mode === 'ssh') {
+        // Start the new remote service first (it reports the OS-chosen port),
+        // then rebuild the local forward to that exact port.
+        await this.restartRemoteService(settings)
+        await this.startTunnelOnFreePort(settings, this.remotePort)
+        await waitReady(this.url())
+        // Emit the new URL: windows follow the port that actually serves, and
+        // a stale title/URL after a restart is a dead page for every window.
+        this.setStatus({
+          state: 'ready',
+          url: this.url(),
+          detail: `已重启（${displayLabel(settings.ssh.host)}，隧道转发）`,
+          serviceOwner: 'remote',
+        })
+        return
+      }
+      const version = await this.serviceVersion(settings)
+      this.localVersion = version
+      if (this.localChild !== null) {
+        this.log('重启本地服务…')
+        this.killChild(this.localChild)
+        this.localChild = null
         this.localPort = null
         await this.spawnLocalService(settings, 0, version)
         await waitReady(this.url())
@@ -669,18 +654,56 @@ class ConnectionManager extends EventEmitter {
         })
         return
       }
-      this.log('服务由外部进程托管，跳过重启')
-      return
+      const url = this.url()
+      const probe = await probeOnce(url)
+      if (probe.up) {
+        // An externally-owned service (the shell adopted an already-listening
+        // port) still needs a restart for plugin/preset updates to take effect:
+        // the host process must reload its profile. Resolve the real listener —
+        // the state file's pid first, then `lsof` on the ACTUAL url port (not
+        // the configured default) when that pid has gone stale — and start a
+        // fresh owned service. Deriving the port from the URL that just answered
+        // keeps the probe and the kill on the same endpoint even when the
+        // service runs on an OS-chosen port.
+        const state = this.readLocalState(settings)
+        let pid = state !== null && Number.isInteger(state.pid) ? state.pid : 0
+        if (!pidAlive(pid)) pid = await findListeningPid(urlPort(url))
+        if (pidAlive(pid)) {
+          this.log(`重启本地服务（外部托管，pid ${pid}）…`)
+          try {
+            process.kill(pid, 'SIGTERM')
+          } catch {
+            // Already gone; fall through to a fresh spawn.
+          }
+          this.localPort = null
+          await this.spawnLocalService(settings, 0, version)
+          await waitReady(this.url())
+          this.localRetries = 0
+          this.setStatus({
+            state: 'ready',
+            url: this.url(),
+            detail: `已重启（端口 ${this.localPort}）`,
+            serviceOwner: 'self',
+          })
+          return
+        }
+        this.log('服务由外部进程托管，跳过重启')
+        this.setStatus({ state: 'ready', url, detail: '服务由外部进程托管，跳过重启' })
+        return
+      }
+      this.localPort = null
+      await this.spawnLocalService(settings, 0, version)
+      await waitReady(this.url())
+      this.setStatus({
+        state: 'ready',
+        url: this.url(),
+        detail: `已重启（端口 ${this.localPort}）`,
+        serviceOwner: 'self',
+      })
+    } catch (error) {
+      this.setStatus({ state: 'error', detail: String(error.message || error), serviceOwner: 'none' })
+      throw error
     }
-    this.localPort = null
-    await this.spawnLocalService(settings, 0, version)
-    await waitReady(this.url())
-    this.setStatus({
-      state: 'ready',
-      url: this.url(),
-      detail: `已重启（端口 ${this.localPort}）`,
-      serviceOwner: 'self',
-    })
   }
 
   // ── local mode ────────────────────────────────────────────────────────────
@@ -765,6 +788,7 @@ class ConnectionManager extends EventEmitter {
         env: tools.env,
         timeoutMs: 10 * 60_000,
         onLine: line => this.log(`[git] ${line}`),
+        owner: this.owner(),
       })
       if (result.code !== 0) throw new Error(`本地 git clone 失败：${result.lines.join('\n')}`)
       return { code: 0, lines: [] }
@@ -962,6 +986,7 @@ class ConnectionManager extends EventEmitter {
       cmd: tools.ssh,
       args: sshCommandArgs(target, 'echo dsh-ok'),
       timeoutMs: 15_000,
+      owner: this.owner(),
     })
     if (test.code !== 0) {
       const output = test.lines.join('\n')
@@ -1212,7 +1237,20 @@ class ConnectionManager extends EventEmitter {
           if (this.status.state !== 'connecting' && this.status.state !== 'ready') return
           // Re-acquire a fresh local forward port: the old one may still be
           // held by the dying ssh process or taken by another process.
-          this.startTunnelOnFreePort(settings, rport).catch(error => {
+          this.startTunnelOnFreePort(settings, rport).then(async () => {
+            if (epoch !== this.connectEpoch || this.stopped) return
+            const ready = await waitReady(this.url(), 15_000)
+            if (epoch !== this.connectEpoch || this.stopped) return
+            this.tunnelRetries = 0
+            this.setStatus({
+              state: 'ready',
+              url: this.url(),
+              detail: ready.isDsh
+                ? `隧道已恢复（${displayLabel(settings.ssh.host)}）`
+                : `隧道已恢复，但端口响应可能不是 DeepSeek Harness`,
+              serviceOwner: 'remote',
+            })
+          }).catch(error => {
             if (this.stopped) return
             this.log(`隧道重连失败：${String(error.message || error)}`)
             this.setStatus({ state: 'error', detail: String(error.message || error) })

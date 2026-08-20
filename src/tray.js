@@ -18,7 +18,7 @@ function createTray({ actions, getStatus, getSettings, getUpdateSummary, isBusy 
   const tray = new Tray(image)
 
   const update = (status, settings = null) => {
-    const terminal = terminalLabel(settings)
+    const terminal = settings !== null && settings.detached === true ? '待连接' : terminalLabel(settings)
     const summary = getUpdateSummary ? getUpdateSummary() : { availableCount: 0 }
     const busy = isBusy ? isBusy() : false
     const suffix = summary.availableCount > 0 ? ` · ${summary.availableCount} 个更新` : ''

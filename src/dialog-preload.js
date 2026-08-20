@@ -21,6 +21,7 @@ contextBridge.exposeInMainWorld('desktopDialog', {
   save: settings => ipcRenderer.invoke('dialog:save', settings),
   closePanel: () => ipcRenderer.invoke('dialog:close-panel'),
   onSection: callback => subscribe('dialog:section', callback),
+  onLive: callback => subscribe('dialog:live', callback),
 
   updates: {
     getState: () => ipcRenderer.invoke('updates:get-state'),

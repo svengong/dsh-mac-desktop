@@ -119,7 +119,14 @@ function removeLocalState(settings) {
 
 /** The local machine's ssh-tunnel state file path (independent of web service). */
 function localTunnelStatePath(settings) {
-  return path.join(expandHome(settings.local.dshHome), LOCAL_TUNNEL_STATE_FILE)
+  // Tunnel state must be scoped PER CONNECTION TARGET. Two SSH aliases that
+  // reach the same machine still own different local `ssh -N -L` processes;
+  // sharing one state file made a new alias reap the other alias's live
+  // tunnel as if it were stale.
+  const key = settings.mode === 'ssh'
+    ? 'ssh-' + encodeURIComponent(`${settings.ssh.host}|${settings.ssh.remoteRepoDir}`)
+    : 'local'
+  return path.join(expandHome(settings.local.dshHome), `desktop-tunnel-${key}.state.json`)
 }
 
 function isValidTunnelState(state) {
@@ -153,6 +160,33 @@ function writeLocalTunnelState(settings, state) {
 function removeLocalTunnelState(settings) {
   try {
     fs.rmSync(localTunnelStatePath(settings), { force: true })
+  } catch {
+    // Best-effort.
+  }
+}
+
+/**
+ * One-time migration: versions before per-connection tunnel state shared one
+ * `desktop-tunnel.state.json` across every SSH alias. That file has no target
+ * identity, so it cannot be reaped safely per alias; reap it once at shell
+ * startup instead. Sessions then create their own scoped state files.
+ */
+function reapLegacyLocalTunnelState(settings) {
+  const file = path.join(expandHome(settings.local.dshHome), LOCAL_TUNNEL_STATE_FILE)
+  try {
+    const state = JSON.parse(fs.readFileSync(file, 'utf8'))
+    if (isValidTunnelState(state) && pidAlive(state.pid)) {
+      try {
+        process.kill(state.pid, 'SIGTERM')
+      } catch {
+        // Already gone.
+      }
+    }
+  } catch {
+    // Missing/corrupt legacy state is fine.
+  }
+  try {
+    fs.rmSync(file, { force: true })
   } catch {
     // Best-effort.
   }
@@ -688,6 +722,7 @@ module.exports = {
   readLocalState,
   readLocalRootManifest,
   readLocalTunnelState,
+  reapLegacyLocalTunnelState,
   readRemoteRootManifest,
   readRemoteState,
   remoteActiveRuntimeDir,

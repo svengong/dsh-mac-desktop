@@ -23,7 +23,7 @@ function buildMenu({ actions, getStatus, getSettings, isBusy, getUpdateSummary }
   const settings = getSettings() || { mode: 'local' }
   const status = getStatus()
   const summary = getUpdateSummary ? getUpdateSummary() : { availableCount: 0 }
-  const terminal = terminalLabel(settings)
+  const terminal = settings.detached === true ? '待连接' : terminalLabel(settings)
   const available = summary.availableCount > 0
   const updateHeadline = available
     ? `有 ${summary.availableCount} 个更新可用`
