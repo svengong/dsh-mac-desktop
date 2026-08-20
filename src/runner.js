@@ -48,7 +48,7 @@ function linePump(onLine) {
  * process registry so the app-quit teardown (`killActiveChildren`) can
  * terminate in-flight builds and services that no session reference covers.
  */
-function runCommand({ cmd, args = [], cwd, env, timeoutMs = DEFAULT_TIMEOUT_MS, onLine }) {
+function runCommand({ cmd, args = [], cwd, env, timeoutMs = DEFAULT_TIMEOUT_MS, onLine, owner = null }) {
   return new Promise((resolve, reject) => {
     let child
     try {
@@ -62,7 +62,7 @@ function runCommand({ cmd, args = [], cwd, env, timeoutMs = DEFAULT_TIMEOUT_MS, 
       reject(new Error(`无法启动 ${cmd}: ${error.message}`))
       return
     }
-    trackChild(child)
+    trackChild(child, owner)
     const lines = []
     let timedOut = false
     let settled = false
@@ -160,11 +160,51 @@ function spawnDetached({ cmd, args = [], cwd, env }) {
 // a tunnel) even when no session/connection reference points at it anymore.
 
 const activeChildren = new Set()
+const ownedChildren = new Map()
 
-function trackChild(child) {
+function trackChild(child, owner = null) {
   if (child === null || child === undefined) return
   activeChildren.add(child)
-  child.once('close', () => activeChildren.delete(child))
+  if (owner !== null && owner !== undefined && owner !== '') {
+    let owned = ownedChildren.get(owner)
+    if (owned === undefined) {
+      owned = new Set()
+      ownedChildren.set(owner, owned)
+    }
+    owned.add(child)
+  }
+  child.once('close', () => {
+    activeChildren.delete(child)
+    if (owner !== null && owner !== undefined && owner !== '') {
+      const owned = ownedChildren.get(owner)
+      if (owned !== undefined) {
+        owned.delete(child)
+        if (owned.size === 0) ownedChildren.delete(owner)
+      }
+    }
+  })
+}
+
+/** SIGTERM the whole process group of every child owned by one terminal task. */
+function cancelOwnedChildren(owner, signal = 'SIGTERM') {
+  if (owner === null || owner === undefined || owner === '') return 0
+  const owned = ownedChildren.get(owner)
+  if (owned === undefined || owned.size === 0) return 0
+  let killed = 0
+  for (const child of [...owned]) {
+    if (child.exitCode !== null || child.signalCode !== null) continue
+    killed += 1
+    try {
+      process.kill(-child.pid, signal)
+    } catch {
+      try {
+        child.kill(signal)
+      } catch {
+        // Already gone.
+      }
+    }
+  }
+  return killed
 }
 
 function killActiveChildren() {
@@ -181,6 +221,6 @@ function killActiveChildren() {
     }
   }
   activeChildren.clear()
+  ownedChildren.clear()
 }
-
-module.exports = { runCommand, spawnService, spawnDetached, DEFAULT_TIMEOUT_MS, killActiveChildren, trackChild }
+module.exports = { runCommand, spawnService, spawnDetached, DEFAULT_TIMEOUT_MS, killActiveChildren, cancelOwnedChildren, trackChild }

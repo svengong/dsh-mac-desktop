@@ -69,7 +69,7 @@ async function queryNpmArtifact({ registryUrl = '', timeoutMs = 20_000 } = {}) {
  * created inside it. Returns the resolved bin path on success.
  * @param {object} options - nodeBin, npmBin, runtimeDir, spec, env, onLine, timeoutMs.
  */
-async function installNpmArtifact({ nodeBin, npmBin, runtimeDir, spec, env, onLine, timeoutMs = 20 * 60_000 }) {
+async function installNpmArtifact({ nodeBin, npmBin, runtimeDir, spec, env, onLine, timeoutMs = 20 * 60_000, owner = null }) {
   const npm = npmBin !== '' && npmBin !== null && npmBin !== undefined
     ? npmBin
     : path.join(path.dirname(nodeBin), 'npm')
@@ -81,6 +81,7 @@ async function installNpmArtifact({ nodeBin, npmBin, runtimeDir, spec, env, onLi
     env,
     timeoutMs,
     onLine: onLine === undefined ? undefined : line => onLine(`[npm] ${line}`),
+    owner,
   })
   if (result.code !== 0) {
     const tail = result.lines.slice(-8).join('\n')
