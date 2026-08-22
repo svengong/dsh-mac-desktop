@@ -6,17 +6,17 @@
  * The shell keys devices by `machine:<id>` after an ssh connect resolves
  * the remote machine identity (~/.dsh/.desktop-machine-id). When that id
  * is rebuilt (file deleted, remote home reset), the new `machine:<newid>`
- * device would start EMPTY while every configured component stays under the
- * old key. `mergeSameHostUpdates` gathers the update sections of every ssh
+ * device would start EMPTY while the Harness update state stays under the
+ * old key. `mergeUpdates` gathers the update sections of every ssh
  * device pointing at the same host (old machine ids, other aliases) so the
- * new machine device inherits the full component list instead of losing it.
+ * new machine device inherits the Harness row instead of losing it.
  */
 
 /**
- * Merge two `update` sections. Components are deduplicated by identity
- * (`packageName`/`installSpec` for npm, `presetId` for git presets); the
- * check timestamps keep the newer value. Idempotent: merging the same
- * sources repeatedly yields the same component list.
+ * Merge two `update` sections. Only the built-in Harness component is kept;
+ * other entries are intentionally dropped. Check timestamps keep the
+ * newer value. Idempotent: merging the same sources repeatedly yields the
+ * same component list.
  */
 function mergeUpdates(primary, secondary) {
   const left = primary ?? {}
@@ -27,9 +27,8 @@ function mergeUpdates(primary, secondary) {
   const rightComponents = Array.isArray(right.components) ? right.components : []
   for (const def of [...leftComponents, ...rightComponents]) {
     if (def === null || typeof def !== 'object') continue
-    const key = def.kind === 'git-preset'
-      ? `preset:${def.presetId ?? def.id}`
-      : `npm:${def.packageName ?? def.installSpec ?? def.id}`
+    if (def.kind !== 'harness' && def.id !== 'harness') continue
+    const key = `harness:${def.id ?? 'harness'}`
     if (seen.has(key)) continue
     seen.add(key)
     components.push(def)

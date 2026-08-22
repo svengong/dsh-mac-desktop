@@ -15,9 +15,9 @@ const path = require('node:path')
 const { normalizeSettings } = require('../src/settings')
 const { terminalLabel, terminalPrefix } = require('../src/labels')
 const {
-  compareVersions, hashTreeSync, isNewerVersion, normalizeUserComponent, packageNameOfSpec, pluginSpecKind, versionOf,
+  compareVersions, isNewerVersion, versionOf,
 } = require('../src/components')
-const { UpdateManager, workspacePatchScript } = require('../src/update-manager')
+const { UpdateManager } = require('../src/update-manager')
 const { parseTarget, shellQuote, remotePath, tunnelArgs, parseSshConfig, listSshHosts } = require('../src/ssh')
 const { runCommand, spawnService, killActiveChildren } = require('../src/runner')
 const { ConnectionManager } = require('../src/connection')
@@ -73,9 +73,8 @@ async function main() {
   assert.strictEqual(multi.update.lastCheckAt, '')
   assert.strictEqual(multi.devices['ssh:first'].update.lastCheckAt, 'first-check')
 
-  // update section normalization: the harness row always exists, legacy
-  // override-only built-in entries without a kind are dropped, full
-  // user-defined plugin/preset entries are preserved, and defaults stay sane.
+  // update section normalization: only the built-in Harness row remains;
+  // legacy plugin/preset/user components are dropped.
   const withUpdates = normalizeSettings({
     mode: 'local',
     update: {
@@ -92,34 +91,10 @@ async function main() {
     },
   })
   assert.strictEqual(withUpdates.update.autoCheckOnLaunch, false)
-  assert.strictEqual(withUpdates.update.components.length, 4)
+  assert.strictEqual(withUpdates.update.components.length, 1)
+  assert.strictEqual(withUpdates.update.components[0].id, 'harness')
   assert.strictEqual(withUpdates.update.components[0].enabled, false)
-  assert.strictEqual(withUpdates.update.components[1].id, 'anchored-standard')
-  assert.strictEqual(withUpdates.update.components[1].repoUrl, 'https://example.com/preset.git')
-  assert.strictEqual(withUpdates.update.components[1].enabled, false)
-  assert.strictEqual(withUpdates.update.components[2].id, 'custom-npm')
-  assert.strictEqual(withUpdates.update.components[2].packageName, 'dsh-custom')
-  assert.strictEqual(withUpdates.update.components[2].installSpec, 'dsh-custom')
-  assert.strictEqual(withUpdates.update.components[3].id, 'custom-preset')
-  assert.strictEqual(withUpdates.update.components[3].checkoutDir, '~/OpenSoft/custom-preset')
-  assert.strictEqual(withUpdates.update.components[3].title, 'custom')
-  assert.ok(withUpdates.update.components.some(item => item.id === 'better-sidebar') === false)
-  assert.ok(withUpdates.update.components.some(item => item.id === 'unknown') === false)
-  assert.ok(withUpdates.update.components.some(item => item.id === 'bad-script') === false)
   assert.strictEqual(normalizeSettings({ local: { port: 0 } }).local.port, 3080)
-
-  // npm plugin specs: the shell accepts the full pnpm add surface and only
-  // uses package-name extraction for registry version checks.
-  assert.strictEqual(packageNameOfSpec('@scope/pkg@^1.2.3'), '@scope/pkg')
-  assert.strictEqual(packageNameOfSpec('npm:dsh-example@1'), 'dsh-example')
-  assert.strictEqual(packageNameOfSpec('github:owner/repo'), '')
-  assert.strictEqual(pluginSpecKind('dsh-example'), 'registry')
-  assert.strictEqual(pluginSpecKind('github:owner/repo'), 'git')
-  assert.strictEqual(pluginSpecKind('file:./hello-plugin'), 'path')
-  assert.strictEqual(pluginSpecKind('https://example.com/plugin.tgz'), 'url')
-  const gitPlugin = normalizeUserComponent({ id: 'git-plugin', kind: 'npm', installSpec: 'github:you/hello-plugin' })
-  assert.strictEqual(gitPlugin.installSpec, 'github:you/hello-plugin')
-  assert.strictEqual(gitPlugin.packageName, 'git-plugin')
 
   // version comparison subset used by the update manager
   assert.strictEqual(versionOf('^0.12.1'), '0.12.1')
@@ -252,36 +227,8 @@ async function main() {
   const pnpmRun = await runCommand({ cmd: tools.pnpm, args: [...tools.pnpmPrefix, '--version'], env: tools.env })
   assert.strictEqual(pnpmRun.code, 0, `pnpm not runnable under clean env: ${pnpmRun.lines.join('\n')}`)
 
-  // preset fingerprinting: same content hashes equal; one byte differs
-  const treeA = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-tree-a-'))
-  const treeB = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-tree-b-'))
-  fs.writeFileSync(path.join(treeA, 'preset.yml'), 'name: a\n')
-  fs.writeFileSync(path.join(treeB, 'preset.yml'), 'name: a\n')
-  assert.strictEqual(hashTreeSync(treeA), hashTreeSync(treeB))
-  fs.writeFileSync(path.join(treeB, 'preset.yml'), 'name: b\n')
-  assert.notStrictEqual(hashTreeSync(treeA), hashTreeSync(treeB))
-  fs.rmSync(treeA, { recursive: true, force: true })
-  fs.rmSync(treeB, { recursive: true, force: true })
-
-  // better-sidebar workspace patch: creates the official allowBuilds +
-  // minimumReleaseAgeExclude entries and is idempotent.
-  const profileDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-profile-'))
-  const workspaceFile = path.join(profileDir, 'pnpm-workspace.yaml')
-  fs.writeFileSync(workspaceFile, 'packages:\n  - .\n')
-  const patchNode = (await resolveTools({ local: { repoDir: '', repoUrl: '' }, toolPaths: { node: '', git: '', pnpm: '', shell: '/bin/zsh' } })).node
-  let patch = await runCommand({ cmd: patchNode, args: ['-e', workspacePatchScript(), workspaceFile] })
-  assert.strictEqual(patch.code, 0, `workspace patch failed: ${patch.lines.join('\n')}`)
-  assert.strictEqual(patch.lines[0], 'updated')
-  const patched = fs.readFileSync(workspaceFile, 'utf8')
-  assert.ok(patched.includes('allowBuilds:') && patched.includes('node-pty: true'))
-  assert.ok(patched.includes('minimumReleaseAgeExclude:') && patched.includes('- dsh-better-sidebar'))
-  patch = await runCommand({ cmd: patchNode, args: ['-e', workspacePatchScript(), workspaceFile] })
-  assert.strictEqual(patch.lines[0], 'unchanged')
-  fs.rmSync(profileDir, { recursive: true, force: true })
-
-  // update manager snapshot: harness row first, valid persisted components
-  // follow (full built-in-style entries included), kind-less entries are
-  // dropped, no network calls.
+  // update manager snapshot: only the built-in Harness row is present,
+  // no network calls.
   const manager = new UpdateManager({
     getSettings: () => normalizeSettings({
       update: {
@@ -300,67 +247,12 @@ async function main() {
     onState: () => {},
   })
   const snapshot = manager.snapshot()
-  assert.strictEqual(snapshot.components.length, 3)
+  assert.strictEqual(snapshot.components.length, 1)
   assert.strictEqual(snapshot.components[0].id, 'harness')
-  assert.strictEqual(snapshot.components[1].id, 'better-sidebar')
-  assert.strictEqual(snapshot.components[1].packageName, 'dsh-better-sidebar')
-  assert.strictEqual(snapshot.components[2].id, 'custom-npm')
-  assert.strictEqual(snapshot.components[2].packageName, 'dsh-custom')
   assert.ok(snapshot.components.some(row => row.id === 'anchored-standard') === false)
+  assert.ok(snapshot.components.some(row => row.id === 'better-sidebar') === false)
+  assert.ok(snapshot.components.some(row => row.id === 'custom-npm') === false)
   assert.strictEqual(snapshot.autoCheckOnLaunch, true)
-
-  // preset checkout dirs are mode-specific: ssh mode maps an accidental
-  // local-home absolute path back to `~/...` and keeps `~/` remote paths.
-  const sshManager = new UpdateManager({
-    getSettings: () => normalizeSettings({ mode: 'ssh', ssh: { host: 'dev' } }),
-    saveUpdate: () => {},
-    connection: { resolvedTools: () => resolveTools({ local: { repoDir: '', repoUrl: '' }, toolPaths: { node: '', git: '', pnpm: '', shell: '/bin/zsh' } }) },
-    harnessUpdater: { check: async () => ({ gitRepo: false, branch: '', upstream: '', ahead: 0, behind: 0, dirty: false, summary: 'not a repo' }) },
-    onLog: () => {},
-    onState: () => {},
-  })
-  const legacyCheckout = `${os.homedir()}${path.sep}OpenSoft${path.sep}dsh-anchored-standard`
-  assert.strictEqual(sshManager.presetCheckoutDir({ id: 'anchored-standard', checkoutDir: legacyCheckout }), '~/OpenSoft/dsh-anchored-standard')
-  assert.strictEqual(sshManager.presetCheckoutDir({ id: 'anchored-standard', checkoutDir: '' }), '~/OpenSoft/anchored-standard')
-  assert.strictEqual(sshManager.presetCheckoutDir({ id: 'anchored-standard', checkoutDir: '~/OpenSoft/anchored-standard' }), '~/OpenSoft/anchored-standard')
-  assert.strictEqual(sshManager.presetCheckoutDir({ id: 'anchored-standard', checkoutDir: '/home/sven/src' }), '/home/sven/src')
-
-  // ssh preset comparison must wrap each raw remote path exactly once; the
-  // previous double-wrap made diff look for a literal `"$HOME"` path and exit 2.
-  const diffCalls = []
-  const fakeRemote = {
-    resolvedTools: () => resolveTools({ local: { repoDir: '', repoUrl: '' }, toolPaths: { node: '', git: '', pnpm: '', shell: '/bin/zsh' } }),
-    async remoteRun(host, command) {
-      diffCalls.push(command)
-      if (command.includes('--is-inside-work-tree')) return { code: 0, lines: ['true'] }
-      if (command.includes('fetch') && command.includes('--quiet')) return { code: 0, lines: [] }
-      if (command.includes('--abbrev-ref') && command.includes('HEAD')) return { code: 0, lines: ['main'] }
-      if (command.includes('--symbolic-full-name')) return { code: 0, lines: ['origin/main'] }
-      if (command.includes('--porcelain')) return { code: 0, lines: [] }
-      if (command.includes('--left-right')) return { code: 0, lines: ['0\t0'] }
-      if (command.includes('diff -qr')) return { code: 0, lines: ['0'] }
-      throw new Error(`unexpected remote command: ${command}`)
-    },
-  }
-  const presetCheckManager = new UpdateManager({
-    getSettings: () => normalizeSettings({
-      mode: 'ssh',
-      ssh: { host: 'dev' },
-      update: { components: [
-        { id: 'remote-preset', kind: 'git-preset', repoUrl: 'https://example.com/preset.git', checkoutDir: '~/OpenSoft/preset', sourceDir: 'preset', presetId: 'preset-id' },
-      ] },
-    }),
-    saveUpdate: () => {},
-    connection: fakeRemote,
-    harnessUpdater: { check: async () => ({ gitRepo: false, branch: '', upstream: '', ahead: 0, behind: 0, dirty: false, summary: 'not a repo' }) },
-    onLog: () => {},
-    onState: () => {},
-  })
-  await presetCheckManager.checkPresetComponent(presetCheckManager.component('remote-preset'))
-  const diffCommand = diffCalls.find(command => command.includes('diff -qr'))
-  assert.ok(diffCommand !== undefined, 'diff command missing')
-  assert.ok(diffCommand.includes(`diff -qr "$HOME"/'OpenSoft/preset/preset' "$HOME"/'.dsh/.agent-presets/preset-id'`), diffCommand)
-  assert.ok(diffCommand.includes(`'\"$HOME\"'`) === false, `double-wrapped diff target: ${diffCommand}`)
 
   // runtime store: parse the CLI's OS-chosen port announcement and round-trip
   // local state. Remote state/locks stay smoke-free here because they need ssh.
@@ -523,13 +415,11 @@ async function main() {
   assert.strictEqual(prefUpdater.preferArtifact({ mode: 'local', local: { repoUrl: 'https://github.com/someone/harness-fork.git' } }), false)
   assert.strictEqual(prefUpdater.preferArtifact({ mode: 'ssh', ssh: { remoteRepoUrl: '' } }), true)
 
-  // device-merge: machine-id drift must not lose configured components.
-  const npmDef = { id: 'p1', kind: 'npm', packageName: 'dsh-better-sidebar', installSpec: 'dsh-better-sidebar', profile: 'web' }
-  const presetDef = { id: 'p2', kind: 'git-preset', presetId: 'anchored-standard' }
+  // device-merge: machine-id drift must not lose the Harness component.
   const harnessDef = { id: 'harness', kind: 'harness' }
-  // mergeUpdates dedupes by identity and keeps the newer timestamp
-  const m1 = mergeUpdates({ components: [harnessDef, npmDef] }, { components: [npmDef, presetDef], lastCheckAt: '2026-08-18T00:00:00Z' })
-  assert.strictEqual(m1.components.length, 3)
+  const m1 = mergeUpdates({ components: [harnessDef] }, { components: [harnessDef], lastCheckAt: '2026-08-18T00:00:00Z' })
+  assert.strictEqual(m1.components.length, 1)
+  assert.strictEqual(m1.components[0].id, 'harness')
   assert.strictEqual(m1.lastCheckAt, '2026-08-18T00:00:00Z')
 
   console.log('smoke: all checks passed')

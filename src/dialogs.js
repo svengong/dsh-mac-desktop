@@ -1,7 +1,7 @@
 'use strict'
 
 /**
- * Embedded settings panel (connection + update manager) as a WebContentsView
+ * Embedded settings panel (connection + settings) as a WebContentsView
  * inside each workspace window. The workspace frame (`ui/shell.html`) switches
  * between the harness view and the settings sections; the panel exposes only
  * a narrow contextBridge API. Progress/update logs stream into the shell

@@ -156,7 +156,7 @@ function spawnDetached({ cmd, args = [], cwd, env }) {
 // ── process registry ──────────────────────────────────────────────────────
 //
 // Every child this module spawns is tracked here so app quit can terminate
-// in-flight work (a pnpm install running in a staging dir, a plugin install,
+// in-flight work (a pnpm install running in a staging dir, a Harness install,
 // a tunnel) even when no session/connection reference points at it anymore.
 
 const activeChildren = new Set()

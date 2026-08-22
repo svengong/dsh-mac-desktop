@@ -23,7 +23,7 @@
         <span class="nav-icon">⌁</span><span>连接</span>
       </button>
       <button type="button" data-section="updates">
-        <span class="nav-icon">↻</span><span>更新管理</span>
+        <span class="nav-icon">↻</span><span>设置</span>
         <span class="badge warn nav-badge" id="nav-update-count" hidden>0</span>
       </button>
     </nav>
@@ -98,21 +98,17 @@
       </section>
 
       <section id="section-updates" class="settings-section hidden">
-        <p class="section-lead">统一检查 Harness 与当前设备自己的 npm 插件、git 预设；更新源只属于当前连接的设备。</p>
+        <p class="section-lead">检查与更新当前设备的 Harness。</p>
         <div class="top-actions">
-          <button id="check-all" class="button" type="button">检查全部</button>
-          <button id="update-all" class="button primary" type="button">更新全部并重启</button>
+          <button id="check-all" class="button" type="button">检查更新</button>
+          <button id="update-all" class="button primary" type="button">更新 Harness 并重启</button>
           <button id="restart-service" class="button" type="button">重启服务</button>
-          <button id="add-npm" class="button small" type="button">＋ npm 插件</button>
-          <button id="add-preset" class="button small" type="button">＋ Git 预设</button>
           <span style="flex:1"></span>
           <label class="switch-row">
             <span style="color:var(--ds-text-muted);font-size:12px">启动自动检查</span>
             <button id="auto-check" class="switch" type="button" role="switch" aria-label="启动自动检查"></button>
           </label>
         </div>
-
-        <div id="add-form-wrap" class="card" style="display:none"></div>
 
         <div class="component-list" id="update-components" style="margin-bottom:12px" aria-live="polite"></div>
 
@@ -146,7 +142,6 @@ const params = new URLSearchParams(location.search)
 const embedded = params.get('embedded') === '1'
 if (embedded) document.body.classList.add('embedded')
 let sshHostEntries = []
-let nextPluginSeq = 1
 let activeMode = 'local'
 let activeSection = ['connection', 'updates'].includes(params.get('section')) ? params.get('section') : 'connection'
 let updateState = { busy: false, autoCheckOnLaunch: true, lastCheckAt: '', components: [], available: [] }
@@ -172,7 +167,7 @@ function refreshSections() {
   }
   const meta = {
     connection: ['连接', '选择运行 DeepSeek Harness 的方式'],
-    updates: ['更新管理', '检查与升级当前设备的 Harness、npm 插件和 git 预设'],
+    updates: ['设置', '检查与更新当前设备的 Harness'],
   }
   $('section-title').textContent = meta[activeSection][0]
   $('section-subtitle').textContent = meta[activeSection][1]
@@ -253,242 +248,9 @@ $('test-ssh').addEventListener('click', async () => {
   result.style.color = outcome.ok ? 'var(--ds-success)' : 'var(--ds-danger)'
 })
 
-// ── plugin source editor ────────────────────────────────────────────────────
+// ── settings runtime ────────────────────────────────────────────────────────
 
-function repoDisplayName(url) {
-  return String(url || '').replace(/\/+$/, '').split('/').pop()?.replace(/\.git$/, '') || ''
-}
-function stripQuotes(value) {
-  const cleaned = String(value || '').trim()
-  if (cleaned.length >= 2 && ((cleaned.startsWith('"') && cleaned.endsWith('"')) || (cleaned.startsWith("'") && cleaned.endsWith("'")))) {
-    return cleaned.slice(1, -1).trim()
-  }
-  return cleaned
-}
-function packageNameFromSpec(spec) {
-  let value = stripQuotes(spec)
-  if (value === '') return ''
-  if (value.startsWith('npm:')) value = value.slice(4)
-  if (value.startsWith('@')) {
-    const slash = value.indexOf('/')
-    if (slash <= 1) return ''
-    const scope = value.slice(0, slash)
-    const rest = value.slice(slash + 1)
-    const at = rest.indexOf('@')
-    const name = at === -1 ? rest : rest.slice(0, at)
-    return name === '' ? '' : `${scope}/${name}`
-  }
-  if (/^(github:|gitlab:|bitbucket:|git\+|git@|file:|link:|\.|\.\.|\/|~|https?:\/\/)/.test(value)) return ''
-  const at = value.indexOf('@')
-  return (at === -1 ? value : value.slice(0, at)).trim() || ''
-}
-/**
- * Accept either a raw pnpm `add` spec or a full official command:
- * `dsh plugin --profile web add dsh-example` → spec `dsh-example`,
- * profile `web`. The shell only forwards the spec after the official `add`
- * verb; the command is never shell-executed.
- */
-function applyInstallCommand(entry, value) {
-  const cleaned = stripQuotes(value)
-  const command = /^dsh\s+plugin\b[\s\S]*?\badd\s+([\s\S]+)$/i.exec(cleaned)
-  if (command) {
-    const profile = /(?:^|\s)--profile\s+(\S+)/.exec(cleaned)
-    if (profile) entry.profile = profile[1]
-    entry.installSpec = stripQuotes(command[1].trim())
-  } else {
-    entry.installSpec = cleaned
-  }
-  if (!entry._packageNameEdited) {
-    entry.packageName = packageNameFromSpec(entry.installSpec) || ''
-  }
-  if (!entry._titleEdited) {
-    entry.title = packageNameFromSpec(entry.installSpec) || '新 npm 插件'
-  }
-}
-function pluginDescription(entry) {
-  if (entry.kind === 'npm') {
-    const spec = entry.installSpec || entry.packageName || entry.id
-    return `dsh plugin --profile ${entry.profile || 'web'} add ${spec}`
-  }
-  return `git pull 后同步 ${entry.sourceDir || 'preset'} → ~/.dsh/.agent-presets/${entry.presetId || entry.id}`
-}
-function nextPluginId() {
-  let id = `plugin-${nextPluginSeq}`; nextPluginSeq += 1
-  while (updateState.components.some(entry => entry.id === id)) { id = `plugin-${nextPluginSeq}`; nextPluginSeq += 1 }
-  return id
-}
-function fieldEl(labelText, control) {
-  const field = document.createElement('div'); field.className = 'field'
-  const label = document.createElement('label'); label.className = 'field-label'; label.textContent = labelText
-  field.appendChild(label); field.appendChild(control); return field
-}
-function inputEl(entry, key, placeholder) {
-  const input = document.createElement('input'); input.className = 'input mono'; input.type = 'text'
-  input.placeholder = placeholder || ''; input.value = entry[key] || ''
-  input.addEventListener('input', () => { entry[key] = input.value }); return input
-}
-function pickerInputEl(entry, key) {
-  const wrap = document.createElement('div'); wrap.className = 'picker'
-  const input = inputEl(entry, key, '~/OpenSoft/plugin')
-  const button = document.createElement('button'); button.className = 'button'; button.type = 'button'; button.textContent = '选择…'
-  button.addEventListener('click', async () => { const dir = await api.pickDirectory(); if (dir) { input.value = dir; entry[key] = dir } })
-  wrap.appendChild(input); wrap.appendChild(button); return wrap
-}
-function checkoutDirEl(entry) {
-  if (activeMode === 'ssh') return inputEl(entry, 'checkoutDir', '~/OpenSoft/plugin')
-  return pickerInputEl(entry, 'checkoutDir')
-}
-// ── plugin source add form ────────────────────────────────────────────────
-
-let addingEntry = null
-
-function openAddForm(kind) {
-  const id = nextPluginId()
-  addingEntry = kind === 'npm'
-    ? { id, name: '', title: '新 npm 插件', _titleEdited: false, kind: 'npm', installSpec: '', packageName: '', profile: 'web', registryUrl: 'https://registry.npmjs.org', enabled: true }
-    : { id, name: id, title: id, _titleEdited: false, kind: 'git-preset', repoUrl: '', checkoutDir: `~/OpenSoft/${id}`, sourceDir: 'preset', presetId: id, enabled: true }
-  renderAddForm()
-}
-
-function renderAddForm() {
-  const wrap = $('add-form-wrap')
-  wrap.textContent = ''
-  if (addingEntry === null) { wrap.style.display = 'none'; return }
-  wrap.style.display = ''
-  const head = document.createElement('div'); head.className = 'card-head'
-  const h = document.createElement('h2'); h.className = 'card-title'
-  h.textContent = addingEntry.kind === 'npm' ? '添加 npm 插件' : '添加 Git 预设'
-  head.appendChild(h); wrap.appendChild(head)
-  const body = document.createElement('div'); body.className = 'card-body'
-  body.appendChild(addEntryCard(addingEntry))
-  const actions = document.createElement('div')
-  actions.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;margin-top:10px'
-  const cancel = document.createElement('button'); cancel.className = 'button'; cancel.type = 'button'; cancel.textContent = '取消'
-  cancel.addEventListener('click', () => { addingEntry = null; renderAddForm() })
-  const submit = document.createElement('button'); submit.className = 'button primary'; submit.type = 'button'; submit.textContent = '添加'
-  submit.addEventListener('click', submitAdd)
-  actions.appendChild(cancel); actions.appendChild(submit)
-  body.appendChild(actions); wrap.appendChild(body)
-}
-
-function addEntryCard(entry) {
-  const main = document.createElement('div')
-  const titleInput = inputEl(entry, 'title', entry.kind === 'npm' ? '自动识别' : entry.id)
-  titleInput.addEventListener('input', () => { entry._titleEdited = true })
-  main.appendChild(fieldEl('显示名', titleInput))
-  const fields = document.createElement('div'); fields.className = 'row-grid source-fields'
-  if (entry.kind === 'npm') {
-    const packageInput = inputEl(entry, 'packageName', '自动从安装参数识别')
-    packageInput.addEventListener('input', () => { entry._packageNameEdited = packageInput.value.trim() !== '' })
-    const specInput = document.createElement('input')
-    specInput.className = 'input mono'; specInput.type = 'text'; specInput.value = entry.installSpec || ''
-    specInput.placeholder = 'dsh plugin --profile web add dsh-example'
-    specInput.addEventListener('input', () => {
-      applyInstallCommand(entry, specInput.value)
-      if (!entry._packageNameEdited) packageInput.value = entry.packageName || ''
-    })
-    const specField = fieldEl('安装命令 / pnpm add 参数', specInput)
-    specField.style.gridColumn = '1 / -1'
-    const specHint = document.createElement('p'); specHint.className = 'field-hint'
-    specHint.textContent = '可直接粘贴完整命令，也可只填 pnpm add 参数：dsh-example、@scope/pkg@^1、github:owner/repo、file:./plugin、./plugin.tgz'
-    specField.appendChild(specHint); fields.appendChild(specField)
-    fields.appendChild(fieldEl('包名（用于 registry 版本检查）', packageInput))
-    fields.appendChild(fieldEl('profile', inputEl(entry, 'profile', 'web')))
-    const registryField = fieldEl('npm registry', inputEl(entry, 'registryUrl', 'https://registry.npmjs.org'))
-    registryField.style.gridColumn = '1 / -1'; fields.appendChild(registryField)
-  } else {
-    const repoInput = inputEl(entry, 'repoUrl', 'https://github.com/you/plugin.git')
-    repoInput.addEventListener('input', () => { if (!entry._titleEdited) { entry.title = repoDisplayName(entry.repoUrl) || entry.presetId || entry.id } })
-    const presetInput = inputEl(entry, 'presetId', entry.id)
-    presetInput.addEventListener('input', () => { if (!entry._titleEdited) { entry.title = repoDisplayName(entry.repoUrl) || entry.presetId || entry.id } })
-    fields.appendChild(fieldEl('仓库地址', repoInput))
-    fields.appendChild(fieldEl(activeMode === 'ssh' ? '远端源目录（remote path）' : '本地源目录', checkoutDirEl(entry)))
-    fields.appendChild(fieldEl('源子目录（以插件 README 为准）', inputEl(entry, 'sourceDir', 'preset')))
-    fields.appendChild(fieldEl('安装名（$DSH_HOME/.agent-presets/…）', presetInput))
-  }
-  main.appendChild(fields)
-  return main
-}
-
-function componentFromEntry(entry) {
-  if (entry.kind === 'npm') {
-    const spec = (entry.installSpec || entry.packageName || '').trim()
-    const title = (entry.title || '').trim() || packageNameFromSpec(spec) || spec || entry.id
-    return {
-      id: entry.id, kind: 'npm', title,
-      installSpec: spec,
-      packageName: (entry.packageName || '').trim() || packageNameFromSpec(spec) || entry.id,
-      profile: (entry.profile || '').trim() || 'web',
-      registryUrl: (entry.registryUrl || '').trim() || 'https://registry.npmjs.org',
-      enabled: true,
-    }
-  }
-  const title = (entry.title || '').trim() || (entry.presetId || '').trim() || repoDisplayName(entry.repoUrl) || entry.id
-  return {
-    id: entry.id, kind: 'git-preset', title,
-    repoUrl: (entry.repoUrl || '').trim(),
-    checkoutDir: (entry.checkoutDir || '').trim(),
-    sourceDir: (entry.sourceDir || '').trim() || 'preset',
-    presetId: (entry.presetId || '').trim() || entry.id,
-    enabled: true,
-  }
-}
-
-function componentFromRow(row) {
-  if (row.kind === 'npm') {
-    return {
-      id: row.id, kind: 'npm', title: row.title || row.name || row.id,
-      installSpec: row.installSpec || row.packageName || row.id,
-      packageName: row.packageName || '',
-      profile: row.profile || 'web',
-      registryUrl: row.registryUrl || 'https://registry.npmjs.org',
-      enabled: row.enabled !== false,
-    }
-  }
-  return {
-    id: row.id, kind: 'git-preset', title: row.title || row.presetId || row.id,
-    repoUrl: row.repoUrl || '',
-    checkoutDir: row.checkoutDir || '',
-    sourceDir: row.sourceDir || 'preset',
-    presetId: row.presetId || row.id,
-    enabled: row.enabled !== false,
-  }
-}
-
-function validateAddEntry(entry) {
-  if (entry.kind === 'npm') {
-    const spec = (entry.installSpec || '').trim()
-    if (spec === '') return `npm 插件 ${entry.title || entry.id} 缺少安装命令/参数`
-    if (spec.includes('\n')) return '安装参数不能包含换行'
-  }
-  if (entry.kind === 'git-preset' && (entry.repoUrl || '').trim() === '' && (entry.checkoutDir || '').trim() === '') {
-    return `Git 预设 ${entry.title || entry.id} 需要仓库地址或本地源目录`
-  }
-  return null
-}
-
-function submitAdd() {
-  if (addingEntry === null) return
-  const error = validateAddEntry(addingEntry)
-  if (error !== null) { status(error, false); return }
-  const components = updateState.components
-    .filter(row => row.id !== 'harness')
-    .map(componentFromRow)
-  components.push(componentFromEntry(addingEntry))
-  api.updates.action('save-sources', { components }).then(result => {
-    if (result && result.ok === false) { status(result.error || '添加失败', false); return }
-    status('已添加，下次检查生效', true)
-    addingEntry = null
-    renderAddForm()
-  })
-}
-
-$('add-npm').addEventListener('click', () => openAddForm('npm'))
-$('add-preset').addEventListener('click', () => openAddForm('git-preset'))
-
-// ── update manager runtime ──────────────────────────────────────────────────
-
-const KIND_TEXT = { harness: 'Harness', npm: 'npm 插件', 'git-preset': 'Git 预设' }
+const KIND_TEXT = { harness: 'Harness' }
 function runtimeDot(row) {
   const state = row.updateAvailable ? 'available' : row.status
   const busy = row.status === 'checking' || row.status === 'updating'
@@ -498,15 +260,9 @@ function runtimeDot(row) {
 function badge(text, cls) { const span = document.createElement('span'); span.className = `badge ${cls || ''}`; span.textContent = text; return span }
 function runtimeMeta(row) {
   const parts = []
-  if (row.kind === 'npm') parts.push(`${row.packageName || row.name} · ${row.profile || 'web'}`)
-  if (row.kind === 'git-preset') parts.push(row.repoUrl || row.checkoutDir)
   if (row.current) parts.push(`当前 ${row.current}`)
   if (row.latest && row.latest !== row.current) parts.push(`最新 ${row.latest}`)
   return parts.join('  ·  ')
-}
-function sourceOf(row) {
-  if (row.kind === 'git-preset') return row.repoUrl || row.checkoutDir || ''
-  return row.installSpec || row.packageName || ''
 }
 function renderUpdates() {
   const list = $('update-components'); list.textContent = ''
@@ -528,17 +284,10 @@ function renderUpdates() {
     const main = document.createElement('div'); main.className = 'component-main'
     const titleRow = document.createElement('div'); titleRow.className = 'component-title-row'
     titleRow.appendChild(runtimeDot(row))
-    const title = document.createElement('span'); title.className = 'component-title'; title.textContent = row.title || row.presetId || row.name || row.id; titleRow.appendChild(title)
+    const title = document.createElement('span'); title.className = 'component-title'; title.textContent = row.title || row.name || row.id; titleRow.appendChild(title)
     titleRow.appendChild(badge(KIND_TEXT[row.kind] || row.kind, row.enabled ? 'info' : 'danger')); main.appendChild(titleRow)
     const desc = document.createElement('p'); desc.className = 'component-desc'; desc.textContent = row.enabled ? row.description : `${row.description}（已停用）`; main.appendChild(desc)
     const meta = document.createElement('p'); meta.className = 'component-meta'; meta.textContent = runtimeMeta(row); meta.title = runtimeMeta(row); main.appendChild(meta)
-    const source = sourceOf(row)
-    if (row.kind !== 'harness' && source !== '') {
-      const srcRow = document.createElement('div'); srcRow.className = 'component-meta'
-      const code = document.createElement('code'); code.textContent = source; code.title = source
-      code.style.cssText = 'display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ds-text-secondary)'
-      srcRow.appendChild(code); main.appendChild(srcRow)
-    }
     const summary = document.createElement('p'); summary.className = 'component-summary'; summary.textContent = row.error || row.summary
     if (row.error) summary.style.color = 'var(--ds-danger)'
     main.appendChild(summary); item.appendChild(main)
@@ -547,7 +296,7 @@ function renderUpdates() {
       const busy = updateState.busy || row.status === 'checking' || row.status === 'updating'
       if (row.updateAvailable) {
         const button = document.createElement('button'); button.className = 'button primary'; button.type = 'button'
-        button.textContent = row.kind === 'harness' ? '更新并重启' : '更新'; button.disabled = busy
+        button.textContent = '更新并重启'; button.disabled = busy
         button.addEventListener('click', () => api.updates.action('update-one', { id: row.id })); actions.appendChild(button)
       } else {
         const button = document.createElement('button'); button.className = 'button'; button.type = 'button'
@@ -555,25 +304,6 @@ function renderUpdates() {
         button.addEventListener('click', () => api.updates.action('check-one', { id: row.id })); actions.appendChild(button)
       }
     } else actions.appendChild(badge('已停用', ''))
-    if (row.kind !== 'harness' && source !== '') {
-      const copy = document.createElement('button'); copy.className = 'button quiet small'; copy.type = 'button'; copy.textContent = '复制'
-      copy.setAttribute('aria-label', `复制 ${row.title || row.id} 安装源`)
-      copy.addEventListener('click', () => api.updates.action('copy-source', { id: row.id }))
-      actions.appendChild(copy)
-    }
-    if (row.kind !== 'harness' && !row.builtin) {
-      const del = document.createElement('button'); del.className = 'button quiet small'; del.type = 'button'; del.textContent = '删除'
-      del.setAttribute('aria-label', `删除 ${row.title || row.id}`)
-      del.addEventListener('click', () => {
-        if (del.textContent === '删除') {
-          del.textContent = '确认删除？'
-          setTimeout(() => { if (del.textContent === '确认删除？') del.textContent = '删除' }, 3000)
-        } else {
-          api.updates.action('delete-component', { id: row.id })
-        }
-      })
-      actions.appendChild(del)
-    }
     item.appendChild(actions); list.appendChild(item)
   }
   const count = updateState.available.filter(row => row.enabled).length
