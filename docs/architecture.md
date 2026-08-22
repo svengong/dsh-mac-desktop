@@ -83,6 +83,11 @@ BrowserWindow (shell.html 边框)
 
 **远端恢复**：state 匹配但服务已死（崩溃/远端重启）时，锁内探活（node fetch + `__DSH_BOOT__`）→ 自动 reap + relaunch，不会建隧道到死端口空等。
 
+**无感自动重连（seamless reconnect）**：harness 可能因外部因素重启——插件安装触发进程退出或进程内重载、外部托管服务换端口、远端服务在隧道仍活时崩溃。壳用两层机制兜住，均不打断用户手动操作：
+
+1. **close watcher 发布新端口**：自管本地服务退出时，`spawnLocalService` 的 close watcher 转 `restarting`（壳边框切加载面板）→ 按版本重解析后重启 → 成功后 `setStatus({state:'ready', url: this.url()})` 发布 OS 新分配端口，`onSessionStatus` 据此刷新窗口。此前重启后从不发布新 URL，窗口仍指向死端口，是「必须手动重连」的根因之一。
+2. **健康看门狗**：`status.state === 'ready'` 期间每 `HEALTH_INTERVAL_MS`(4s) 探测一次服务 URL，连续 `HEALTH_FAILURE_THRESHOLD`(2) 次失败判定服务已不可用，自动 `connect()` 重连（走既有 reap→launch→ready 流程）。覆盖 close 事件观察不到的进程内重载、外部托管、远端崩溃场景。非 `ready` 态（connecting/restarting/error）看门狗退避，避免与 close watcher / 重连定时器抢跑。
+
 ## 6. 更新架构（产物优先 + 可恢复 + 生命周期解耦）
 
 1. **仅官方产物**：`artifact.js` 先做 registry 预检（最新版本 + 依赖链完整性），`npm install --prefix` 装进 `runtime/<version>`（npm 布局），校验后原子切换 `current`。registry 链断则更新失败并给出明确原因，不再回退源码构建。

@@ -123,6 +123,8 @@ BrowserWindow (shell.html 边框)
 - 失败触发 `connect-failed`，main 最多自动重试 2 次（10s/20s）；session 被 stop 后定时器作废。
 - ready 后执行一次性启动自动检查（按设备开关）。
 - 构建/更新按设备互斥：同一终端的第二次构建/更新、重连、重置后端、保存连接设置被 `isSessionBusy(session)` 拦截；不同终端的构建互不干扰。
+- **无感自动重连**：harness 因外部因素重启（插件安装、进程内重载、外部托管换端口、远端崩溃）时，壳自动恢复不打断用户——
+  自管本地服务退出由 `spawnLocalService` 的 close watcher 转 `restarting` 后重启并发布新端口 `ready`；其余场景由健康看门狗（`startHealthMonitor`/`healthTick`）在 `ready` 态每 4s 探测、连续 2 次失败自动 `connect()`。见 `architecture.md`「无感自动重连」。
 
 ## 6. 更新管理
 
