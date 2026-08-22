@@ -56,6 +56,36 @@ function nvmBinDirs() {
   }
 }
 
+/**
+ * Directories where pnpm is commonly installed. The shell's clean child PATH
+ * intentionally does not inherit the launchservices PATH, so these are added
+ * explicitly to make `pnpm` (and therefore `dsh plugin`) resolvable from
+ * GUI-launched children.
+ */
+function pnpmPathDirs() {
+  const home = process.env.HOME || ''
+  const dirs = []
+  const push = dir => {
+    if (dir !== '' && !dirs.includes(dir)) dirs.push(dir)
+  }
+  if (process.env.PNPM_HOME) push(process.env.PNPM_HOME)
+  if (home !== '') {
+    push(path.join(home, '.local', 'share', 'pnpm'))
+    push(path.join(home, '.local', 'bin'))
+    push(path.join(home, '.npm-global', 'bin'))
+    push(path.join(home, '.npm-packages', 'bin'))
+    push(path.join(home, '.volta', 'bin'))
+    push(path.join(home, '.asdf', 'shims'))
+    push(path.join(home, '.nodenv', 'shims'))
+    push(path.join(home, 'bin'))
+  }
+  if (process.env.APPDATA) push(path.join(process.env.APPDATA, 'npm'))
+  if (process.env.LOCALAPPDATA) push(path.join(process.env.LOCALAPPDATA, 'pnpm'))
+  for (const dir of COMMON_DIRS) push(dir)
+  for (const dir of nvmBinDirs()) push(dir)
+  return dirs
+}
+
 function findInDirs(name, dirs) {
   for (const dir of dirs) {
     const found = executableAt(`${dir}/${name}`)
@@ -151,7 +181,7 @@ function pnpmCandidates(settings, nodePath) {
  * The clean environment for all local children: deterministic and independent
  * of the launchservices PATH. Keeps the inherited environment (HOME, secrets)
  * but replaces PATH with node's dir, the repo's local tool bins, the repo's
- * node_modules/.bin, and the system base.
+ * node_modules/.bin, common pnpm install dirs, and the system base.
  */
 function childEnv(settings, nodePath) {
   const repoDir = settings.local && typeof settings.local.repoDir === 'string' ? settings.local.repoDir : ''
@@ -162,6 +192,7 @@ function childEnv(settings, nodePath) {
     parts.push(path.join(repoDir, '.dsh-tools', 'node_modules', '.bin'))
     parts.push(path.join(repoDir, 'node_modules', '.bin'))
   }
+  parts.push(...pnpmPathDirs())
   parts.push(BASE_SYSTEM_PATH)
   return {
     ...process.env,

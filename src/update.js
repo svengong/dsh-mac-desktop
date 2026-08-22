@@ -320,7 +320,11 @@ class Updater {
     let tools = this.connection.resolvedTools()
     if (tools.node === '') await this.bootstrapLocalNode(settings)
     tools = this.connection.resolvedTools({ refresh: true })
-    if (tools.pnpm !== '') return
+    // A corepack-only "pnpm" is not enough for the official `dsh plugin`
+    // path, which execs a real `pnpm` from PATH. Install a standalone pnpm
+    // into `.dsh-tools` so child processes (and harness upgrades) always see
+    // a real pnpm executable.
+    if (tools.pnpm !== '' && tools.pnpmPrefix.length === 0) return
     await this.installLocalPnpm(settings, tools.node)
   }
 
