@@ -8,11 +8,7 @@
  * build — download → verify → atomic `current` switch, like VS Code's
  * extension/update model. This module owns:
  *
- * - `queryNpmArtifact`: registry preflight — latest version + whether the
- *   whole dependency chain is publishable (the CLI's web-app dependency
- *   `@deepseek-ai/dsh-frontend` has historically 404'd, which makes a raw
- *   `npm install` fail; the shell must detect that up front and surface a
- *   clear reason instead of a broken install);
+ * - `queryNpmArtifact`: registry preflight — resolves the latest version.
  * - `installNpmArtifact`: `npm install --prefix <runtimeDir>` of the pinned
  *   spec into a fresh version dir (idempotent, resumable);
  * - `verifyNpmArtifact`: the installed bin exists and reports the expected
@@ -28,8 +24,8 @@ const { NPM_PACKAGE, npmArtifactVersion } = require('./runtime-layout')
 const DEFAULT_REGISTRY = 'https://registry.npmjs.org'
 
 /**
- * Registry preflight for the official npm artifact. Returns the latest
- * version when the chain is complete, or a failure reason. Never throws.
+ * Registry preflight for the official npm artifact. Resolves the latest
+ * published version. Never throws.
  * @returns {object} {ok, version, reason} - reason is set when !ok.
  */
 async function queryNpmArtifact({ registryUrl = '', timeoutMs = 20_000 } = {}) {
@@ -38,23 +34,13 @@ async function queryNpmArtifact({ registryUrl = '', timeoutMs = 20_000 } = {}) {
     const meta = await fetchJson(`${registry}/${NPM_PACKAGE}`, timeoutMs)
     const latest = typeof meta['dist-tags']?.latest === 'string' ? meta['dist-tags'].latest : ''
     if (latest === '') return { ok: false, version: '', reason: `registry 未报告 ${NPM_PACKAGE} 的 latest 版本` }
-    // The CLI's web boot depends on @deepseek-ai/dsh-web-app, which in turn
-    // needs the published frontend dist. Probe that one package (the chain's
-    // historical break point) so a broken chain falls back BEFORE install.
-    const webApp = await fetchJson(`${registry}/@deepseek-ai%2Fdsh-web-app/latest`, timeoutMs)
-    const webDeps = webApp?.dependencies ?? {}
-    const frontendSpec = webDeps['@deepseek-ai/dsh-frontend'] ?? ''
-    if (frontendSpec !== '') {
-      try {
-        await fetchJson(`${registry}/@deepseek-ai%2Fdsh-frontend/latest`, timeoutMs)
-      } catch (error) {
-        return {
-          ok: false,
-          version: latest,
-          reason: `官方产物链不完整：${NPM_PACKAGE}@${latest} 依赖的 @deepseek-ai/dsh-frontend 未发布（${error.message}）。官方产物暂不可用，无法更新。`,
-        }
-      }
-    }
+    // Do NOT preflight transitive dependencies here. An earlier probe pinned
+    // @deepseek-ai/dsh-web-app/latest and hard-coded the frontend package
+    // name, but that name was renamed (dsh-frontend → dsh-web-frontend) and
+    // latest lagged behind the version dsh actually depends on — so the probe
+    // kept 404ing a perfectly installable artifact. The install's own
+    // dependency resolution is authoritative: a genuinely broken chain fails
+    // inside installNpmArtifact with a clear error instead.
     return { ok: true, version: latest, reason: '' }
   } catch (error) {
     return { ok: false, version: '', reason: `查询官方产物失败：${error.message}` }
