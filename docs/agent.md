@@ -27,6 +27,7 @@ Electron macOS 薄壳：主窗口顶部 46px 壳边框，下面是 harness WebCo
 | SSH banner 隔离 | `src/connection.js#remoteRun` | 远程命令用随机 sentinel 包裹，网关登录 banner（`authz success` 等）被隔离在 payload 之外 |
 | 加载面板 | `src/main.js`、`src/ui/shell.html`、`src/ui/shell.css` | 连接/加载/构建/更新期间用主窗口内置面板展示 spinner + 状态 + 实时日志，替代独立进度窗口 |
 | 移除进度窗口 | `src/dialogs.js`、`src/ui/progress.html` | ProgressDialog 已删除；进度经 `shell:state` / `shell:log` 进加载面板，重试走 `shell:action` |
+| 无感自动重连 | `src/connection.js` | close watcher 重启后发布新端口 `ready`；`ready` 态每 4s 健康探测，连续 2 次失败自动 `connect()`（`startHealthMonitor`/`healthTick`/`HEALTH_INTERVAL_MS`/`HEALTH_FAILURE_THRESHOLD`），覆盖插件安装/进程内重载/外部托管/远端崩溃 |
 
 ## 3. 必须遵守的不变量
 
@@ -137,6 +138,13 @@ for f in /tmp/settings.html.js /tmp/shell.html.js; do node --check "$f"; done
 16. **版本只在更新管线里变更，连接不触发升级。** `serviceVersion` 在
     manifest.current 有效时返回它；只有「获取新版本」（更新管线）才会切换
     current，连接只负责「升级到 current」。
+17. **服务重启后必须发布新端口 `ready`，否则窗口卡死在死端口。** `--port 0` 重启
+    可能换端口；close watcher / 隧道重连 / 健康看门狗恢复成功后都要
+    `setStatus({state:'ready', url: this.url()})`，`onSessionStatus` 才能据此
+    刷新窗口。只更新 `localPort` 而不发 status，窗口仍指向旧 URL。
+18. **健康看门狗只跑在 `ready` 态，且要连败计数防抖。** 非 ready
+    （connecting/restarting/error）退避，避免与 close watcher、`onSessionConnectFailed`
+    重试、更新流水线抢跑造成双重连/无限重连。
 
 ## 7. 文档同步要求
 
