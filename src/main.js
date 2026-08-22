@@ -330,7 +330,7 @@ async function cancelSessionTask(session) {
   if (hadProgress) {
     setSessionProgress(session, {
       title: '更新已取消',
-      status: '窗口已切换，旧版本继续运行。可从更新管理重新更新。',
+      status: '窗口已切换，旧版本继续运行。可从设置重新更新。',
       actions: [
         { label: '重试', name: 'run-update', primary: true },
         { label: '放弃', name: 'dismiss-progress' },
@@ -338,7 +338,7 @@ async function cancelSessionTask(session) {
     })
   }
   if (stillPending) {
-    routeSessionLine(session, '取消超时，已强制放弃任务；如需可从更新管理重试。')
+    routeSessionLine(session, '取消超时，已强制放弃任务；如需可从设置重试。')
   } else {
     routeSessionLine(session, '已取消，旧版本继续运行。')
   }
@@ -488,7 +488,7 @@ async function diagnoseFailure(session) {
   lines.push(`node：${tools.node || '未找到'}`)
   lines.push(`pnpm：${tools.pnpm || '未找到'}`)
   lines.push(view.mode === 'ssh' ? `模式：SSH ${view.ssh.host}` : '模式：本地')
-  lines.push('提示：完整日志已写入日志文件，可从「更新管理」查看。')
+  lines.push('提示：完整日志已写入日志文件，可从「设置」查看。')
   return lines.join('\n')
 }
 
@@ -632,7 +632,7 @@ function openExistingTerminalWindow(existingTarget, targetBusy, targetUnchanged)
   startWithSettings(existingTarget)
 }
 
-/** Reload one session's update manager and every settings panel after a save. */
+/** Reload one session's settings state and every settings panel after a save. */
 function refreshSessionSettings(session, deviceKey) {
   const view = settingsViewFor(deviceKey)
   session.updateManager.settings = view
@@ -873,7 +873,7 @@ function loadAppUrl(workspace) {
 /**
  * Make the workspace's harness view follow one session WITHOUT changing the
  * active view and WITHOUT raising/focusing the window. When the user is on
- * connection/updates, the harness URL is prepared in the background so the
+ * connection/settings, the harness URL is prepared in the background so the
  * later click on Harness is instant; when the harness view is already
  * front-most, it loads/updates in place.
  */
@@ -1032,7 +1032,7 @@ function mergeAliasIntoMachine(aliasKey, machineId) {
       for (const workspace of aliasSession.windows) workspace.deviceKey = targetKey
     }
   }
-  // Reload the machine device's live update manager so a merge immediately
+  // Reload the machine device's live settings state so a merge immediately
   // refreshes the update rows after the alias's session is re-homed.
   const targetSession = sessions.get(targetKey)
   if (targetSession !== undefined && targetSession.updateManager !== null) {
@@ -1445,7 +1445,7 @@ function onSessionStatus(session, status) {
       detail: status.detail,
     })
     if (status.state === 'ready' && workspace.pendingOpen) {
-      // Do not yank the user out of connection/updates and do not raise a
+      // Do not yank the user out of connection/settings and do not raise a
       // background window: sync the harness URL in the current view context.
       syncWorkspaceHarness(workspace, session)
     } else if (status.state === 'ready' && workspace.loadedUrl !== '' && workspace.loadedUrl !== status.url) {
@@ -1508,7 +1508,7 @@ function notifyUpdatesAvailable(session, available) {
     title: '发现更新',
     message: title,
     detail: lines,
-    buttons: ['打开更新管理', '稍后'],
+    buttons: ['打开设置', '稍后'],
     defaultId: 0,
   }).then(result => {
     if (result.response === 0) open()
@@ -1841,12 +1841,12 @@ const actions = {
     }
     if (!canStartBusyTask(target.session)) return target
     const session = target.session
-    routeSessionLine(session, '\n==> 更新全部组件')
+    routeSessionLine(session, '\n==> 更新 Harness')
     try {
       const outcome = await trackSessionTask(session, session.updateManager.updateAll())
       await finishManagedUpdate(target, session, outcome)
     } catch (error) {
-      routeSessionLine(session, `✗ 更新全部失败：${String(error.message || error)}`)
+      routeSessionLine(session, `✗ 更新 Harness 失败：${String(error.message || error)}`)
       broadcastSession(session)
     }
   },
@@ -2142,35 +2142,6 @@ function registerIpc() {
           case 'restart-service':
             await trackSessionTask(session, session.connection.restartService())
             break
-          case 'save-sources':
-            if (!Array.isArray(payload?.components)) {
-              return { ok: false, error: 'components 必须为数组' }
-            }
-            saveUpdateForSession(session, { components: payload.components })
-            break
-
-          case 'copy-source': {
-            const id = String(payload?.id ?? '')
-            const row = session.updateManager.component(id)
-            if (row.kind === 'harness') return { ok: false, error: 'Harness 无安装源可复制' }
-            const source = row.kind === 'git-preset'
-              ? (row.repoUrl || row.checkoutDir || '')
-              : (row.installSpec || row.packageName || '')
-            if (source === '') return { ok: false, error: '该组件无安装源可复制' }
-            clipboard.writeText(source)
-            break
-          }
-
-          case 'delete-component': {
-            const id = String(payload?.id ?? '')
-            if (id === '' || id === 'harness') return { ok: false, error: '不能删除该组件' }
-            const update = session.updateManager.settings.update ?? {}
-            const components = (Array.isArray(update.components) ? update.components : [])
-              .filter(component => component.id !== id)
-            saveUpdateForSession(session, { components })
-            break
-          }
-
           case 'copy-log':
             if (sessionLogFile !== '' && fs.existsSync(sessionLogFile)) {
               clipboard.writeText(fs.readFileSync(sessionLogFile, 'utf8'))
@@ -2216,7 +2187,7 @@ function registerIpc() {
             void trackSessionTask(session, session.updateManager.updateAll()).then(
               outcome => finishManagedUpdate(workspace, session, outcome),
               error => {
-                routeSessionLine(session, `✗ 更新全部失败：${String(error.message || error)}`)
+                routeSessionLine(session, `✗ 更新 Harness 失败：${String(error.message || error)}`)
                 broadcastSession(session)
               },
             )
@@ -2395,7 +2366,7 @@ async function runSmoke() {
     const update = menu.items.find(item => item.label === '更新 · 本地')
     if (!update) throw new Error('Update menu missing')
     const labels = update.submenu.items.map(item => item.label)
-    for (const label of ['更新管理…', '检查更新…', '更新全部并重启…', '仅更新 Harness…']) {
+    for (const label of ['设置…', '检查更新…', '更新 Harness…']) {
       if (!labels.includes(label)) throw new Error(`Update menu missing: ${label}`)
     }
     if (!labels.includes('有 2 个更新可用')) throw new Error('Update menu summary missing')

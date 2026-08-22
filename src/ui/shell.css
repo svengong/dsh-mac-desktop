@@ -955,29 +955,9 @@ body.embedded .settings-titlebar .titlebar-actions {
   gap: 6px;
 }
 
-/* Source-editor cards stack title + switch row + fields vertically. */
-.component.source-plugin {
-  position: relative;
-  flex-direction: column;
-  align-items: stretch;
-}
-
-.component.source-plugin .component-main { width: 100%; flex: none; }
-.component.source-plugin .component-title-row { width: 100%; padding-right: 74px; }
-.component.source-plugin .component-actions { position: absolute; top: 10px; right: 12px; z-index: 1; }
-.component.source-plugin .source-fields { width: 100%; }
-
-.source-fields {
-  margin-top: 12px;
-  padding: 10px 12px;
-  border: 0.5px solid var(--ds-border);
-  border-radius: 8px;
-  background: var(--ds-surface-raised);
-}
-
 /* ── log console ─────────────────────────────────────────────────────────── */
 
-/* Update-management console is deliberately fixed-height and always the last
+/* Settings console is deliberately fixed-height and always the last
    card in the tab: components above stay scannable, the log never pushes the
    page taller, and its own scrollbar always starts pinned to the newest line. */
 .updates-log {

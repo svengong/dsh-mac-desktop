@@ -71,10 +71,9 @@ function buildMenu({ actions, getStatus, getSettings, isBusy, getUpdateSummary }
       submenu: [
         { label: updateHeadline, enabled: false },
         { type: 'separator' },
-        { label: '更新管理…', accelerator: 'CmdOrCtrl+U', click: () => actions.openUpdates() },
+        { label: '设置…', accelerator: 'CmdOrCtrl+U', click: () => actions.openUpdates() },
         { label: '检查更新…', enabled: !isBusy(), click: () => actions.checkUpdates() },
-        { label: '更新全部并重启…', enabled: !isBusy() && available, click: () => actions.updateAll() },
-        { label: '仅更新 Harness…', enabled: !isBusy(), click: () => actions.updateAndRestart() },
+        { label: '更新 Harness…', enabled: !isBusy(), click: () => actions.updateAndRestart() },
         { label: '回滚 Harness…', enabled: !isBusy(), click: () => actions.rollbackHarness() },
         { type: 'separator' },
         { label: '打开服务日志…', click: () => actions.openLogs() },
