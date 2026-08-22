@@ -11,8 +11,8 @@
  * - `queryNpmArtifact`: registry preflight — latest version + whether the
  *   whole dependency chain is publishable (the CLI's web-app dependency
  *   `@deepseek-ai/dsh-frontend` has historically 404'd, which makes a raw
- *   `npm install` fail; the shell must detect that up front and fall back
- *   to the source pipeline with a clear reason instead of a broken install);
+ *   `npm install` fail; the shell must detect that up front and surface a
+ *   clear reason instead of a broken install);
  * - `installNpmArtifact`: `npm install --prefix <runtimeDir>` of the pinned
  *   spec into a fresh version dir (idempotent, resumable);
  * - `verifyNpmArtifact`: the installed bin exists and reports the expected
@@ -30,9 +30,7 @@ const DEFAULT_REGISTRY = 'https://registry.npmjs.org'
 /**
  * Registry preflight for the official npm artifact. Returns the latest
  * version when the chain is complete, or a failure reason. Never throws.
- * @returns {object} {ok, version, reason} - reason is set when !ok or when
- * the chain is incomplete (so callers can surface *why* source build was
- * chosen instead of a silent fallback).
+ * @returns {object} {ok, version, reason} - reason is set when !ok.
  */
 async function queryNpmArtifact({ registryUrl = '', timeoutMs = 20_000 } = {}) {
   const registry = String(registryUrl || DEFAULT_REGISTRY).replace(/\/$/, '')
@@ -53,7 +51,7 @@ async function queryNpmArtifact({ registryUrl = '', timeoutMs = 20_000 } = {}) {
         return {
           ok: false,
           version: latest,
-          reason: `官方产物链不完整：${NPM_PACKAGE}@${latest} 依赖的 @deepseek-ai/dsh-frontend 未发布（${error.message}）。已自动改用源码构建。`,
+          reason: `官方产物链不完整：${NPM_PACKAGE}@${latest} 依赖的 @deepseek-ai/dsh-frontend 未发布（${error.message}）。官方产物暂不可用，无法更新。`,
         }
       }
     }

@@ -513,7 +513,7 @@ async function startArtifactUpdateIfPossible(session) {
 /**
  * On launch, pick up an update intent the previous run left behind: a worker
  * that finished while the shell was gone, a worker that died mid-download,
- * or an in-shell source pipeline that was killed on quit.
+ * or an in-shell artifact install that was killed on quit.
  */
 function resumePendingUpdate() {
   const view = settingsViewFor('local')
@@ -551,21 +551,13 @@ function resumePendingUpdate() {
       return
     }
     if (pending !== null) {
-      const message = pending.intent === 'artifact'
-        ? `上次官方产物更新未完成（v${pending.version}）。继续下载安装？`
-        : `上次源码构建更新未完成（${pending.version || '目标版本未知'}）。继续？`
+      const message = `上次官方产物更新未完成（v${pending.version}）。继续下载安装？`
       dialog.showMessageBox({ type: 'warning', title: '上次更新未完成', message, buttons: ['继续', '放弃'], defaultId: 0 }).then(result => {
         if (result.response !== 0) {
           runtimeStore.clearPendingUpdate(view)
           return
         }
-        if (pending.intent === 'artifact') {
-          spawnUpdateWorker(session, view, pending.version)
-        } else {
-          trackSessionTask(session, session.updater.runPipeline({ includePull: true, toleratePullFailure: true })).then(outcome => {
-            if (outcome.ok) reloadSessionWindows(session)
-          })
-        }
+        spawnUpdateWorker(session, view, pending.version)
       })
     }
   }, 1500)
@@ -1891,7 +1883,6 @@ const actions = {
           status: `${String(outcome.error?.message || outcome.error)}\n\n${diagnosis}`,
           actions: [
             { label: '重试', name: 'run-update', primary: true },
-            { label: '改用官方产物', name: 'run-artifact' },
             { label: '放弃', name: 'dismiss-progress' },
           ],
         })
@@ -2271,27 +2262,6 @@ function registerIpc() {
         break
       case 'run-update':
         void actions.updateAndRestart(workspace)
-        break
-      case 'run-artifact':
-        void (async () => {
-          if (workspace.session === null) return
-          const view = settingsViewFor(workspace.deviceKey)
-          if (workspace.session.key !== 'local') {
-            routeSessionLine(workspace.session, '官方产物仅支持本地模式（SSH 走远端源码构建）。')
-            return
-          }
-          const query = await workspace.session.updater.queryArtifact(view)
-          if (!query.ok) {
-            routeSessionLine(workspace.session, query.reason)
-            return
-          }
-          if (workspace.session.workerPollTimer !== null) {
-            routeSessionLine(workspace.session, '官方产物更新已在进行中。')
-            return
-          }
-          spawnUpdateWorker(workspace.session, view, query.version)
-          setProgress(workspace, { title: '安装官方产物', status: `后台下载官方预构建版 v${query.version}…` })
-        })()
         break
       case 'dismiss-progress':
         setProgress(workspace, null)
