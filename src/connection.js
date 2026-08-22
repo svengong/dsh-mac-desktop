@@ -34,6 +34,12 @@ const READY_TIMEOUT_MS = 90 * 1000
 const SERVICE_RETRIES = 3
 const TUNNEL_RETRIES = 5
 const LOG_RING_LINES = 300
+// Seamless-reconnect watchdog: probe the service URL this often while the
+// connection is `ready`, and treat this many consecutive failed probes as
+// "the service restarted out from under us" (plugin install, in-process
+// reload, an externally-owned or remote service restarting on a new port).
+const HEALTH_INTERVAL_MS = 4000
+const HEALTH_FAILURE_THRESHOLD = 2
 
 // Sentinel markers for remoteRun: some ssh gateways (e.g. Tencent devcloud)
 // print a banner line such as `authz success` onto stdout from the remote
@@ -196,6 +202,10 @@ class ConnectionManager extends EventEmitter {
     // retry timers from a previous connect generation must never spawn a
     // second service or clobber the current child reference.
     this.connectEpoch = 0
+    // Health-monitor state (see startHealthMonitor / healthTick).
+    this.healthTimer = null
+    this.healthFailures = 0
+    this.healthInFlight = false
   }
 
   /** Owner used by runner.js so one terminal's update task can be cancelled. */
@@ -243,8 +253,79 @@ class ConnectionManager extends EventEmitter {
   }
 
   setStatus(patch) {
+    const previous = this.status.state
     this.status = { ...this.status, ...patch }
+    // The watchdog runs only while the connection is `ready`; starting it on
+    // the ready transition keeps it alive across a service restart that emits
+    // a fresh ready, and stopping it elsewhere keeps a stale interval from
+    // probing a dead URL during connecting/restarting/error.
+    if (this.status.state === 'ready' && previous !== 'ready') this.startHealthMonitor()
+    if (this.status.state !== 'ready') this.healthFailures = 0
     this.emit('status', this.status)
+  }
+
+  /**
+   * Seamless-reconnect watchdog. While the connection is `ready`, probe the
+   * service URL periodically; when it stops answering (or stops being a dsh
+   * service), reconnect automatically. This covers restarts the shell cannot
+   * observe through a child-process `close` event: a plugin install that
+   * reloads the harness in-process, an externally-owned service restarting on
+   * a new OS-chosen port, or a remote service crashing behind a still-alive
+   * tunnel. Without it those cases left the shell pointing at a dead port and
+   * forced a manual "重新连接" click.
+   */
+  startHealthMonitor() {
+    if (this.healthTimer !== null) return
+    this.healthFailures = 0
+    this.healthTimer = setInterval(() => { void this.healthTick() }, HEALTH_INTERVAL_MS)
+  }
+
+  stopHealthMonitor() {
+    if (this.healthTimer !== null) {
+      clearInterval(this.healthTimer)
+      this.healthTimer = null
+    }
+    this.healthFailures = 0
+  }
+
+  async healthTick() {
+    // Only watch a settled, healthy connection. Connecting/restarting/error
+    // states are driven by their own flows (connect retries, close watchers,
+    // the restart pipeline); the watchdog must never race them.
+    if (this.healthTimer === null) return
+    if (this.status.state !== 'ready') {
+      this.healthFailures = 0
+      return
+    }
+    if (this.healthInFlight) return
+    const url = this.url()
+    if (url === '' || urlPort(url) === 0) return
+    let probe
+    try {
+      probe = await probeOnce(url)
+    } catch {
+      probe = { up: false, isDsh: false }
+    }
+    if (probe.up && probe.isDsh) {
+      this.healthFailures = 0
+      return
+    }
+    // Require consecutive failures so a transient blip (a brief restart
+    // window or a slow response) never triggers a full reconnect loop.
+    this.healthFailures += 1
+    if (this.healthFailures < HEALTH_FAILURE_THRESHOLD) return
+    this.healthFailures = 0
+    this.log(`健康检查发现服务不可用（${url}），自动重连…`)
+    this.healthInFlight = true
+    try {
+      await this.connect()
+    } catch (error) {
+      // connect() normally surfaces failures via the status event rather than
+      // rejecting; guard against any surprise so the monitor keeps running.
+      this.log(`自动重连异常：${String(error.message || error)}`)
+    } finally {
+      this.healthInFlight = false
+    }
   }
 
   log(line) {
@@ -445,6 +526,7 @@ class ConnectionManager extends EventEmitter {
   stop() {
     this.stopped = true
     this.connectEpoch += 1
+    this.stopHealthMonitor()
     this.stopOwnedChildren()
     this.releaseReservedPorts()
     if (this.status.state !== 'error') this.setStatus({ state: 'idle', detail: '已断开', serviceOwner: 'none' })
@@ -462,6 +544,7 @@ class ConnectionManager extends EventEmitter {
     const settings = this.getSettings()
     this.stopped = true
     this.connectEpoch += 1
+    this.stopHealthMonitor()
     this.stopOwnedChildren()
     this.releaseReservedPorts()
     this.tunnelChildren.clear()
@@ -579,7 +662,7 @@ class ConnectionManager extends EventEmitter {
       const probe = await probeOnce(url)
       if (probe.up) {
         // An externally-owned service (the shell adopted an already-listening
-        // port) still needs a restart for plugin/preset updates to take effect:
+        // port) still needs a restart for Harness updates to take effect:
         // the host process must reload its profile. Resolve the real listener —
         // the state file's pid first, then `lsof` on the ACTUAL url port (not
         // the configured default) when that pid has gone stale — and start a
@@ -774,19 +857,41 @@ class ConnectionManager extends EventEmitter {
       if (this.localRetries < SERVICE_RETRIES) {
         this.localRetries += 1
         const delay = 1000 * this.localRetries
-        this.setStatus({ detail: `服务退出，${delay / 1000} 秒后重启（第 ${this.localRetries}/${SERVICE_RETRIES} 次）…` })
+        // Transition to `restarting` (not just a detail patch on `ready`) so
+        // the shell frame swaps in the loading panel while the service comes
+        // back, and the health watchdog defers to this restart instead of
+        // racing a second reconnect.
+        this.setStatus({
+          state: 'restarting',
+          url: this.url(),
+          detail: `服务退出，${delay / 1000} 秒后重启（第 ${this.localRetries}/${SERVICE_RETRIES} 次）…`,
+        })
         setTimeout(() => {
           if (epoch !== this.connectEpoch) return
           if (this.stopped) return
-          if (this.status.state !== 'connecting' && this.status.state !== 'ready') return
+          if (this.status.state !== 'restarting' && this.status.state !== 'ready') return
           // Re-resolve the version BEFORE respawning: a peer shell instance
           // may have upgraded the runtime while this service was down, and
           // restarting the OLD captured version would silently roll the
           // device back. Restart with a fresh OS-chosen port as well; a
           // stale bound port can never force a crash-loop.
-          Promise.resolve(this.serviceVersion(settings)).then(version => {
+          Promise.resolve(this.serviceVersion(settings)).then(async version => {
             if (this.stopped) return
-            return this.spawnLocalService(settings, 0, version || serveVersion)
+            await this.spawnLocalService(settings, 0, version || serveVersion)
+            // A stale timer (superseded by a newer connect) must not emit a
+            // ready for a service it no longer owns.
+            if (epoch !== this.connectEpoch || this.stopped) return
+            this.localRetries = 0
+            // The OS may have chosen a new port; publish it so every window
+            // follows the live URL instead of a dead one. Without this emit
+            // the restart left windows pointed at the stale port and forced a
+            // manual "重新连接".
+            this.setStatus({
+              state: 'ready',
+              url: this.url(),
+              detail: `已自动重连（端口 ${this.localPort}）`,
+              serviceOwner: 'self',
+            })
           }).catch(error => {
             if (this.stopped) return
             this.log(`本地服务重启失败：${String(error.message || error)}`)
