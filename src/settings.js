@@ -60,6 +60,31 @@ const DEFAULTS = Object.freeze({
   toolPaths: Object.freeze({ node: '', git: '', pnpm: '', shell: '/bin/zsh' }),
 })
 
+/**
+ * Selectable shell themes. The shell's own chrome (workspace frame, settings
+ * panel, loading screen) is styled by these; the harness web app keeps its own
+ * appearance. `default` follows the system light/dark appearance (resolving to
+ * liquid-glass ↔ liquid-glass-dark); the others pin a fixed look. The ids are
+ * mirrored by `:root[data-theme="…"]` blocks in `ui/shell.css` and by the
+ * Appearance picker in `ui/settings.html`.
+ */
+const THEMES = Object.freeze(['default', 'ios-flat', 'ios-flat-dark', 'liquid-glass', 'liquid-glass-dark'])
+const DEFAULT_THEME = 'default'
+
+/** Appearance each theme pins on the native chrome (traffic lights, scrollbars). */
+const THEME_APPEARANCE = Object.freeze({
+  default: 'system',
+  'ios-flat': 'light',
+  'ios-flat-dark': 'dark',
+  'liquid-glass': 'light',
+  'liquid-glass-dark': 'dark',
+})
+
+/** Narrow any wire/persisted value to a valid theme id. */
+function normalizeTheme(raw) {
+  return THEMES.includes(raw) ? raw : DEFAULT_THEME
+}
+
 function text(value, fallback = '') {
   return typeof value === 'string' ? value : fallback
 }
@@ -209,6 +234,7 @@ function normalizeSettings(raw) {
     local: active.local,
     ssh: active.ssh,
     update: active.update,
+    theme: normalizeTheme(source.theme),
     activeDeviceId,
     devices,
     toolPaths,
@@ -238,6 +264,7 @@ class SettingsStore {
       activeDeviceId: normalized.activeDeviceId,
       devices: normalized.devices,
       toolPaths: normalized.toolPaths,
+      theme: normalized.theme,
     }
     fs.mkdirSync(path.dirname(this.filePath), { recursive: true })
     const tmpPath = `${this.filePath}.tmp`
@@ -252,6 +279,10 @@ module.exports = {
   DEFAULT_LOCAL_REPO_URL,
   OFFICIAL_REPO_URL,
   DEFAULTS,
+  THEMES,
+  DEFAULT_THEME,
+  THEME_APPEARANCE,
+  normalizeTheme,
   defaultDevice,
   deviceKeyOf,
   normalizeDevice,

@@ -3,6 +3,14 @@
 <head>
 <meta charset="utf-8">
 <title>DSH — 设置</title>
+<script>
+  // Boot the panel's theme before first paint (no flash). The main process
+  // injects `theme` as a query param; runtime changes arrive via onTheme.
+  (function () {
+    var t = new URLSearchParams(location.search).get('theme')
+    if (t) document.documentElement.dataset.theme = t
+  })()
+</script>
 <link rel="stylesheet" href="./shell.css">
 <style>
   body { width: 100%; height: 100vh; }
@@ -110,6 +118,11 @@
           </label>
         </div>
 
+        <div class="appearance-block">
+          <div class="appearance-heading">外观主题</div>
+          <div class="theme-grid" id="theme-grid" role="radiogroup" aria-label="外观主题"></div>
+        </div>
+
         <div class="component-list" id="update-components" style="margin-bottom:12px" aria-live="polite"></div>
 
         <div class="log-wrap updates-log" id="update-log-wrap">
@@ -147,6 +160,7 @@ let activeSection = ['connection', 'updates'].includes(params.get('section')) ? 
 let updateState = { busy: false, autoCheckOnLaunch: true, lastCheckAt: '', components: [], available: [] }
 let deviceTerminal = '本地'
 let savedSettings = null
+let activeTheme = 'default'
 
 function status(text, ok) {
   const el = $('footer-note')
@@ -361,6 +375,84 @@ function renderLive(live) {
 }
 api.onLive && api.onLive(renderLive)
 
+// ── appearance (theme picker) ──────────────────────────────────────────────
+
+const THEMES = [
+  { id: 'default', name: '默认', desc: '跟随系统，在液态玻璃浅 / 深之间自动切换', preview: { bg: 'linear-gradient(135deg,#6e6ae6 0%,#7a5cf0 45%,#ff5c5c 100%)', sidebar: 'rgba(255,255,255,0.42)', surface: 'rgba(255,255,255,0.6)', accent: '#0a84ff' } },
+  { id: 'ios-flat', name: 'iOS 扁平', desc: '简洁扁平、高饱和系统色（浅）', preview: { bg: '#f2f2f7', sidebar: '#f7f7fa', surface: '#ffffff', accent: '#007aff' } },
+  { id: 'ios-flat-dark', name: 'iOS 扁平深色', desc: 'iOS 深色模式、纯黑不透明表面', preview: { bg: '#000000', sidebar: '#1c1c1e', surface: '#1c1c1e', accent: '#0a84ff' } },
+  { id: 'liquid-glass', name: '液态玻璃', desc: '半透明玻璃质感与折射光影（浅）', preview: { bg: 'linear-gradient(135deg,#6e6ae6 0%,#7a5cf0 45%,#ff5c5c 100%)', sidebar: 'rgba(255,255,255,0.42)', surface: 'rgba(255,255,255,0.6)', accent: '#0a84ff' } },
+  { id: 'liquid-glass-dark', name: '液态玻璃深色', desc: '深色磨砂玻璃、低亮度折射背景', preview: { bg: 'linear-gradient(135deg,#23234a 0%,#3a2b5f 50%,#4a1f3a 100%)', sidebar: 'rgba(22,22,34,0.55)', surface: 'rgba(30,30,46,0.55)', accent: '#0a84ff' } },
+]
+
+function swatch(bg, cssText) {
+  const el = document.createElement('span')
+  el.style.cssText = `position:absolute;${cssText};background:${bg};box-shadow:inset 0 1px 0 rgba(255,255,255,0.2)`
+  return el
+}
+
+function syncThemeCards() {
+  for (const card of document.querySelectorAll('#theme-grid .theme-card')) {
+    const on = card.dataset.theme === activeTheme
+    card.setAttribute('aria-checked', on ? 'true' : 'false')
+    card.setAttribute('aria-pressed', on ? 'true' : 'false')
+  }
+}
+
+function renderThemes() {
+  const grid = $('theme-grid')
+  grid.textContent = ''
+  for (const t of THEMES) {
+    const card = document.createElement('button')
+    card.type = 'button'
+    card.className = 'theme-card'
+    card.dataset.theme = t.id
+    card.setAttribute('role', 'radio')
+    card.setAttribute('aria-checked', t.id === activeTheme ? 'true' : 'false')
+    card.setAttribute('aria-pressed', t.id === activeTheme ? 'true' : 'false')
+
+    const preview = document.createElement('div')
+    preview.className = 'theme-preview'
+    preview.style.background = t.preview.bg
+    preview.appendChild(swatch(t.preview.sidebar, 'left:8px;top:8px;bottom:8px;width:26%;border-radius:6px'))
+    preview.appendChild(swatch(t.preview.surface, 'left:calc(26% + 14px);top:8px;right:8px;height:42%;border-radius:6px'))
+    preview.appendChild(swatch(t.preview.accent, 'left:calc(26% + 14px);top:calc(8px + 42% + 6px);width:38%;height:18%;border-radius:999px'))
+
+    const check = document.createElement('span')
+    check.className = 'theme-check'
+    check.textContent = '✓'
+    preview.appendChild(check)
+
+    const name = document.createElement('div')
+    name.className = 'theme-card-name'
+    name.textContent = t.name
+    const desc = document.createElement('div')
+    desc.className = 'theme-card-desc'
+    desc.textContent = t.desc
+
+    card.appendChild(preview)
+    card.appendChild(name)
+    card.appendChild(desc)
+
+    card.addEventListener('click', () => {
+      if (activeTheme === t.id) return
+      activeTheme = t.id
+      document.documentElement.dataset.theme = t.id
+      syncThemeCards()
+      api.setTheme(t.id)
+    })
+    grid.appendChild(card)
+  }
+}
+
+// Re-sync the selection when the theme changes from another window/panel.
+api.onTheme && api.onTheme(theme => {
+  if (!THEMES.some(t => t.id === theme)) return
+  activeTheme = theme
+  document.documentElement.dataset.theme = theme
+  syncThemeCards()
+})
+
 // ── save connection settings ────────────────────────────────────────────────
 
 async function saveSettings() {
@@ -387,6 +479,7 @@ async function saveSettings() {
 api.getState().then(state => {
   const s = state.settings
   savedSettings = s
+  activeTheme = state.theme || 'default'
   activeMode = s.mode === 'ssh' ? 'ssh' : 'local'
   deviceTerminal = state.terminal || (activeMode === 'ssh' ? 'SSH' : '本地')
   $('titlebar-terminal').textContent = `DSH-[${deviceTerminal}]`
@@ -408,6 +501,7 @@ api.getState().then(state => {
   updateState.autoCheckOnLaunch = update.autoCheckOnLaunch !== false
   setSwitch('auto-check', updateState.autoCheckOnLaunch)
   renderLive(state.live)
+  renderThemes()
   refreshMode(); refreshSshHost(); refreshSections()
   if (activeSection === 'updates') void refreshUpdatesLog()
 })

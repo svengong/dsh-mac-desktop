@@ -21,4 +21,5 @@ contextBridge.exposeInMainWorld('desktopShell', {
   action: name => ipcRenderer.invoke('shell:action', name),
   onState: callback => subscribe('shell:state', callback),
   onLog: callback => subscribe('shell:log', callback),
+  onTheme: callback => subscribe('shell:theme', callback),
 })

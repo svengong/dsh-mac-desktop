@@ -23,11 +23,11 @@ const path = require('node:path')
 const fs = require('node:fs')
 const os = require('node:os')
 const {
-  app, BrowserWindow, Menu, shell, dialog, clipboard, Notification, WebContentsView, ipcMain,
+  app, BrowserWindow, Menu, shell, dialog, clipboard, Notification, WebContentsView, ipcMain, nativeTheme,
 } = require('electron')
 
 const {
-  SettingsStore, normalizeSettings, deviceKeyOf, DEV_DEFAULT_DSH_HOME,
+  SettingsStore, normalizeSettings, deviceKeyOf, DEV_DEFAULT_DSH_HOME, DEFAULT_THEME, normalizeTheme, THEME_APPEARANCE,
 } = require('./settings')
 const { mergeUpdates } = require('./device-merge')
 const { terminalLabel } = require('./labels')
@@ -156,14 +156,70 @@ function cleanDocument(normalized) {
     activeDeviceId: normalized.activeDeviceId,
     devices: normalized.devices,
     toolPaths: normalized.toolPaths,
+    theme: normalizeTheme(normalized.theme),
   }
 }
 
 /** Persist a clean document and update the in-memory copy. */
 function persistDocument(document) {
-  const saved = settingsStore.save(document)
+  // Merge onto the current in-memory document so a partial caller (e.g. a
+  // theme-only change) can never drop `devices`/`toolPaths` and reset the
+  // connection + update state. `theme` is global and carried forward unless
+  // an explicit one is supplied.
+  const base = settingsDocument ?? {}
+  const withTheme = {
+    activeDeviceId: document.activeDeviceId ?? base.activeDeviceId,
+    devices: document.devices ?? base.devices,
+    toolPaths: document.toolPaths ?? base.toolPaths,
+    theme: normalizeTheme(document.theme ?? base.theme),
+  }
+  const saved = settingsStore.save(withTheme)
   settingsDocument = cleanDocument(saved)
   return settingsDocument
+}
+
+/** The currently selected shell theme id (never null after startup). */
+function currentTheme() {
+  return settingsDocument === null ? DEFAULT_THEME : settingsDocument.theme
+}
+
+/**
+ * Pin the native chrome appearance (traffic lights, scrollbars, form controls)
+ * to match the selected theme so a light theme never leaves white traffic
+ * lights stranded on a light frame (or vice versa). `default` stays system.
+ */
+function applyNativeTheme(theme) {
+  nativeTheme.themeSource = THEME_APPEARANCE[theme] ?? 'system'
+}
+
+/**
+ * Broadcast the active theme to every live surface so a selection made in one
+ * window re-skins the shell frame and every settings panel without a reload.
+ */
+function broadcastTheme(theme) {
+  for (const workspace of workspaces.values()) {
+    if (workspace.window !== null && !workspace.window.isDestroyed()) {
+      workspace.window.webContents.send('shell:theme', theme)
+    }
+    workspace.setupDialog.send('dialog:theme', theme)
+  }
+}
+
+/**
+ * Select + persist a shell theme and re-skin every live surface immediately.
+ * Used by the Appearance section; the harness web view is left alone.
+ */
+function setTheme(theme) {
+  const next = normalizeTheme(theme)
+  persistDocument({
+    activeDeviceId: settingsDocument.activeDeviceId,
+    devices: settingsDocument.devices,
+    toolPaths: settingsDocument.toolPaths,
+    theme: next,
+  })
+  applyNativeTheme(next)
+  broadcastTheme(next)
+  return { ok: true, theme: next }
 }
 
 /**
@@ -693,6 +749,7 @@ function sendWorkspaceState(workspace) {
     harnessReady: workspace.harnessReady,
     loadError: workspace.loadError,
     progress: workspace.progress,
+    theme: currentTheme(),
   })
 }
 
@@ -815,7 +872,7 @@ function createBrowserWindow(bounds = null) {
   })
   // The shell owns the title: it shows `DSH-[终端]-地址`, not the page title.
   win.on('page-title-updated', event => event.preventDefault())
-  win.loadFile(SHELL_HTML)
+  win.loadFile(SHELL_HTML, { query: { theme: currentTheme() } })
   return win
 }
 
@@ -1183,7 +1240,7 @@ function createWorkspace(deviceKey = null, options = {}) {
     session,
     window: win,
     harnessView,
-    setupDialog: new SetupDialog(win),
+    setupDialog: new SetupDialog(win, { getTheme: () => currentTheme() }),
     pendingOpen: session !== null,
     activeView: options.initialView !== undefined ? options.initialView : 'harness',
     loadedUrl: '',
@@ -1973,6 +2030,7 @@ function registerIpc() {
         settings: view,
         terminal: detached ? '待连接' : terminalLabel(view),
         sshHosts: listSshHosts(),
+        theme: currentTheme(),
         live: {
           state: live.state,
           url: live.url,
@@ -2242,6 +2300,9 @@ function registerIpc() {
     }
     return { ok: true }
   })
+
+  // Appearance: select + persist a shell theme, re-skinning every live surface.
+  ipcMain.handle('theme:set', (_event, theme) => setTheme(theme))
 }
 
 // ── smoke mode ──────────────────────────────────────────────────────────────
@@ -2401,6 +2462,10 @@ if (!gotLock) {
 
     settingsStore = new SettingsStore(path.join(app.getPath('userData'), 'settings.json'))
     settingsDocument = cleanDocument(settingsStore.load())
+    // Pin the native chrome (traffic lights / scrollbars) to the selected
+    // theme before the first window paints, so a light theme never flashes
+    // white traffic lights on a light frame.
+    applyNativeTheme(currentTheme())
     windowManager = new WindowManager(path.join(app.getPath('userData'), 'window-state.json'))
 
     // Migrate the pre-scoping shared tunnel state once per launch. Tunnels

@@ -14,19 +14,25 @@ const { WebContentsView, dialog } = require('electron')
 const PRELOAD = path.join(__dirname, 'dialog-preload.js')
 const SETTINGS_HTML = path.join(__dirname, 'ui', 'settings.html')
 
+/** Sections the settings panel can open; mirrored by `ui/settings.html`. */
+const SECTIONS = ['connection', 'updates']
+
 /**
  * The embedded settings panel for one workspace. The owner is the workspace
  * BrowserWindow; the view is hidden when the harness is front-most and kept
  * alive while the settings panel is open so section switches keep their state.
  */
 class SetupDialog {
-  constructor(ownerWindow) {
+  constructor(ownerWindow, options = {}) {
     this.ownerWindow = ownerWindow
     this.view = null
     this.attached = false
     this.activeSection = 'connection'
     this.deviceKey = null
     this.bounds = null
+    // Supplies the current shell theme id so the panel boots already-skinned
+    // (no light→theme flash) and reloads keep the right query param.
+    this.getTheme = typeof options.getTheme === 'function' ? options.getTheme : () => 'default'
   }
 
   get webContents() {
@@ -39,7 +45,7 @@ class SetupDialog {
    * the previous terminal.
    */
   setDeviceKey(deviceKey, section = 'connection') {
-    this.activeSection = ['connection', 'updates'].includes(section) ? section : 'connection'
+    this.activeSection = SECTIONS.includes(section) ? section : 'connection'
     if (this.deviceKey === deviceKey) return
     this.deviceKey = deviceKey
     this.reload()
@@ -51,10 +57,10 @@ class SetupDialog {
    * otherwise keep displaying (and later save) the stale form.
    */
   reload(section = this.activeSection) {
-    this.activeSection = ['connection', 'updates'].includes(section) ? section : 'connection'
+    this.activeSection = SECTIONS.includes(section) ? section : 'connection'
     if (this.view !== null && !this.view.webContents.isDestroyed()) {
       this.view.webContents.loadFile(SETTINGS_HTML, {
-        query: { section: this.activeSection, embedded: '1' },
+        query: { section: this.activeSection, embedded: '1', theme: this.getTheme() },
       })
     }
   }
@@ -80,12 +86,14 @@ class SetupDialog {
     // webContents stay alive for re-attach.
     if (this.bounds !== null) this.view.setBounds(this.bounds)
     this.view.setVisible(false)
-    this.view.webContents.loadFile(SETTINGS_HTML, { query: { section, embedded: '1' } })
+    this.view.webContents.loadFile(SETTINGS_HTML, {
+      query: { section, embedded: '1', theme: this.getTheme() },
+    })
     return this.view
   }
 
   open(section = 'connection') {
-    this.activeSection = ['connection', 'updates'].includes(section) ? section : 'connection'
+    this.activeSection = SECTIONS.includes(section) ? section : 'connection'
     const view = this.ensureView(this.activeSection)
     if (view === null) return
     // Re-attach after a close() removed it; addChildView also brings the panel
@@ -124,7 +132,7 @@ class SetupDialog {
   }
 
   showSection(section) {
-    if (!['connection', 'updates'].includes(section)) return
+    if (!SECTIONS.includes(section)) return
     this.activeSection = section
     if (this.view !== null && !this.view.webContents.isDestroyed()) {
       this.view.webContents.send('dialog:section', section)

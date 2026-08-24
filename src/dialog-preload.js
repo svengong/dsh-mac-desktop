@@ -22,6 +22,9 @@ contextBridge.exposeInMainWorld('desktopDialog', {
   closePanel: () => ipcRenderer.invoke('dialog:close-panel'),
   onSection: callback => subscribe('dialog:section', callback),
   onLive: callback => subscribe('dialog:live', callback),
+  // Appearance: switch the shell theme and react to changes made elsewhere.
+  setTheme: theme => ipcRenderer.invoke('theme:set', theme),
+  onTheme: callback => subscribe('dialog:theme', callback),
 
   updates: {
     getState: () => ipcRenderer.invoke('updates:get-state'),

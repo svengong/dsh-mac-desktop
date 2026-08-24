@@ -3,6 +3,14 @@
 <head>
 <meta charset="utf-8">
 <title>DSH</title>
+<script>
+  // Boot the shell theme before first paint (no flash). The main process
+  // injects `theme` as a query param; runtime changes arrive via onTheme.
+  (function () {
+    var t = new URLSearchParams(location.search).get('theme')
+    if (t) document.documentElement.dataset.theme = t
+  })()
+</script>
 <link rel="stylesheet" href="./shell.css">
 </head>
 <body class="shell-workspace">
@@ -58,6 +66,11 @@ for (const button of buttons) {
 
 $('new-window').addEventListener('click', () => {
   api.newWindow()
+})
+
+// Re-skin the frame live when the theme changes from any settings panel.
+api.onTheme(theme => {
+  document.documentElement.dataset.theme = theme
 })
 
 const loadingLog = $('loading-log')
