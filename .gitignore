@@ -9,3 +9,9 @@ deepseek-harness/
 .agents/
 pnpm-lock.yaml
 pnpm-workspace.yaml
+
+# 本地测试工具（MITM 代理，含 CA/叶证书私钥，绝不入库）
+tools/
+
+# WorkBuddy 工作区记忆
+.workbuddy/
