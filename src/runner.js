@@ -107,13 +107,36 @@ function runCommand({ cmd, args = [], cwd, env, timeoutMs = DEFAULT_TIMEOUT_MS, 
  * @returns {{ child: import('node:child_process').ChildProcess, stop: () => void }}
  * `stop()` sends SIGTERM to the whole group; call it at most once.
  */
-function spawnService({ cmd, args, cwd, env, onLine }) {
-  const child = spawn(cmd, args, {
-    cwd,
-    env: env === undefined ? process.env : env,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    detached: true,
-  })
+function spawnService({ cmd, args, cwd, env, onLine, watchParent = false }) {
+  let child
+  if (watchParent) {
+    // 父进程监护（防孤儿实例）：detached 子进程在壳（父进程）死亡后不会
+    // 自动退出，会变成孤儿实例。macOS 无 PDEATHSIG，故用 shell wrapper
+    // 记住父 pid 并循环探测——父进程消失则 kill 服务进程；服务进程自行
+    // 退出则 shell 透传其退出码退出，保证 close 事件照常触发。
+    const guard = [
+      'ppid=$PPID',
+      '"$@" & child=$!',
+      'while kill -0 "$child" 2>/dev/null; do',
+      '  if ! kill -0 "$ppid" 2>/dev/null; then kill "$child" 2>/dev/null; break; fi',
+      '  sleep 1',
+      'done',
+      'wait "$child" 2>/dev/null',
+    ].join('\n')
+    child = spawn('sh', ['-c', guard, 'sh', cmd, ...args], {
+      cwd,
+      env: env === undefined ? process.env : env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      detached: true,
+    })
+  } else {
+    child = spawn(cmd, args, {
+      cwd,
+      env: env === undefined ? process.env : env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      detached: true,
+    })
+  }
   // Also register services so app quit kills them even when a session
   // reference was lost before its stop() was called.
   trackChild(child)

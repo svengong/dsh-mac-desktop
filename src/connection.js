@@ -829,6 +829,8 @@ class ConnectionManager extends EventEmitter {
       args: [binPath, 'web', '--port', String(port)],
       cwd: runtimeDir,
       env: { ...tools.env, DSH_HOME: expandHome(settings.local.dshHome) },
+      // 父进程监护：壳被强杀/崩溃时让 dsh web 随父退出，避免孤儿实例。
+      watchParent: true,
       onLine: line => {
         this.log(`[web] ${line}`)
         const parsed = runtimeStore.parseDshWebUrl(line)
