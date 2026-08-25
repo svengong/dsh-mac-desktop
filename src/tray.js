@@ -11,7 +11,7 @@ const path = require('node:path')
 const { Tray, Menu, nativeImage } = require('electron')
 const { terminalLabel } = require('./labels')
 
-function createTray({ actions, getStatus, getSettings, getUpdateSummary, isBusy }) {
+function createTray({ actions, getStatus, getSettings, getUpdateSummary, isBusy, isUpdating }) {
   const iconPath = path.join(__dirname, '..', 'build', 'trayTemplate.png')
   const image = nativeImage.createFromPath(iconPath)
   image.setTemplateImage(true)
@@ -21,6 +21,7 @@ function createTray({ actions, getStatus, getSettings, getUpdateSummary, isBusy 
     const terminal = settings !== null && settings.detached === true ? '待连接' : terminalLabel(settings)
     const summary = getUpdateSummary ? getUpdateSummary() : { availableCount: 0 }
     const busy = isBusy ? isBusy() : false
+    const updating = isUpdating ? isUpdating() : false
     const suffix = summary.availableCount > 0 ? ` · ${summary.availableCount} 个更新` : ''
     tray.setToolTip(`DSH-[${terminal}] — ${status.detail}${suffix}`)
     tray.setContextMenu(Menu.buildFromTemplate([
@@ -34,7 +35,9 @@ function createTray({ actions, getStatus, getSettings, getUpdateSummary, isBusy 
       { label: '新建窗口', click: () => actions.newWindow() },
       { label: '设置…', click: () => actions.openUpdates() },
       { label: '检查更新…', enabled: !busy, click: () => actions.checkUpdates() },
-      { label: '更新 Harness…', enabled: !busy, click: () => actions.updateAndRestart() },
+      updating
+        ? { label: '取消更新', click: () => actions.cancelUpdate() }
+        : { label: '更新 Harness…', enabled: !busy, click: () => actions.updateAndRestart() },
       { label: '回滚 Harness…', enabled: !busy, click: () => actions.rollbackHarness() },
       { type: 'separator' },
       { label: '重置后端服务…', enabled: !busy, click: () => actions.resetBackend() },

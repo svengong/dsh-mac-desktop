@@ -19,7 +19,7 @@
 const { Menu } = require('electron')
 const { terminalLabel } = require('./labels')
 
-function buildMenu({ actions, getStatus, getSettings, isBusy, getUpdateSummary }) {
+function buildMenu({ actions, getStatus, getSettings, isBusy, getUpdateSummary, isUpdating }) {
   const settings = getSettings() || { mode: 'local' }
   const status = getStatus()
   const summary = getUpdateSummary ? getUpdateSummary() : { availableCount: 0 }
@@ -73,7 +73,9 @@ function buildMenu({ actions, getStatus, getSettings, isBusy, getUpdateSummary }
         { type: 'separator' },
         { label: '设置…', accelerator: 'CmdOrCtrl+U', click: () => actions.openUpdates() },
         { label: '检查更新…', enabled: !isBusy(), click: () => actions.checkUpdates() },
-        { label: '更新 Harness…', enabled: !isBusy(), click: () => actions.updateAndRestart() },
+        typeof isUpdating === 'function' && isUpdating()
+          ? { label: '取消更新', click: () => actions.cancelUpdate() }
+          : { label: '更新 Harness…', enabled: !isBusy(), click: () => actions.updateAndRestart() },
         { label: '回滚 Harness…', enabled: !isBusy(), click: () => actions.rollbackHarness() },
         { type: 'separator' },
         { label: '打开服务日志…', click: () => actions.openLogs() },

@@ -475,6 +475,18 @@ function lockName(name) {
   return String(name).replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 96) || 'task'
 }
 
+/**
+ * The single canonical name of the build/install lock for a device. The
+ * shell pipeline, the detached worker and the cancel flow ALL use this exact
+ * string — it must never be hand-rolled at a call site or one of them will
+ * lock a different directory than the others.
+ */
+function buildLockName(settings) {
+  return settings.mode === 'ssh'
+    ? `build-${settings.ssh.host}-${settings.ssh.remoteRepoDir}`
+    : `build-${path.basename(settings.local.repoDir)}`
+}
+
 function localLockDir(settings, name) {
   return path.join(expandHome(settings.local.dshHome), 'locks', lockName(name))
 }
@@ -500,12 +512,51 @@ function localLockIsStale(lockDir) {
   }
 }
 
-/** Run `task()` while holding an atomic directory lock on the local machine. */
-async function withLocalLock(settings, name, task, { timeoutMs = LOCK_TIMEOUT_MS } = {}) {
+/**
+ * Whether the calling process owns this lock directory. Ownership follows
+ * owner.json's pid; a lock without owner.json is never self-owned, so a
+ * cancelling shell can never delete a foreign (or hand-written) lock.
+ */
+function localLockOwnedBy(lockDir, pid = process.pid) {
+  const owner = readJson(path.join(lockDir, 'owner.json'))
+  return owner !== null && Number.isInteger(owner.pid) && owner.pid === pid
+}
+
+/**
+ * Best-effort release of the caller's OWN local lock while a task is being
+ * cancelled. The lock guard's finally also releases on the task's next
+ * settle, but for a slow abort sequence the cancel flow wants the lock gone
+ * immediately so a retry never queues behind a dead task.
+ */
+function releaseLocalLockIfOwned(settings, name, pid = process.pid) {
+  const lockDir = localLockDir(settings, name)
+  if (fs.existsSync(lockDir) && localLockOwnedBy(lockDir, pid)) {
+    try {
+      fs.rmSync(lockDir, { recursive: true, force: true })
+      return true
+    } catch {
+      // Best-effort cleanup; a stale lock will be reaped by the next owner.
+    }
+  }
+  return false
+}
+
+/**
+ * Run `task()` while holding an atomic directory lock on the local machine.
+ * `shouldAbort` is polled at lock-wait granularity; when it flips true the
+ * function aborts BEFORE acquiring the lock, so a cancelled update never
+ * starts a new install pass and never re-writes the lock owner.
+ */
+async function withLocalLock(settings, name, task, { timeoutMs = LOCK_TIMEOUT_MS, shouldAbort } = {}) {
   const lockDir = localLockDir(settings, name)
   fs.mkdirSync(path.dirname(lockDir), { recursive: true })
   const deadline = Date.now() + timeoutMs
   while (true) {
+    if (typeof shouldAbort === 'function' && shouldAbort()) {
+      const error = new Error('更新已取消')
+      error.code = 'CANCELLED'
+      throw error
+    }
     try {
       fs.mkdirSync(lockDir)
       fs.writeFileSync(path.join(lockDir, 'owner.json'), JSON.stringify({
@@ -520,11 +571,19 @@ async function withLocalLock(settings, name, task, { timeoutMs = LOCK_TIMEOUT_MS
         throw new Error(`等待本地锁超时：${lockDir}（可能有其他构建/安装任务持有）`)
       }
       if (localLockIsStale(lockDir)) {
+        // Reclaim with an atomic rename, never `rm -rf` directly: two
+        // waiters can both observe the stale lock, and a plain rm would let
+        // the slower one delete the faster one's freshly re-created lock
+        // (TOCTOU). rename claims the stale dir under a private tombstone;
+        // whoever loses the rename simply retries.
+        const tombstone = `${lockDir}.stale-${process.pid}`
         try {
-          fs.rmSync(lockDir, { recursive: true, force: true })
+          fs.rmSync(tombstone, { recursive: true, force: true })
+          fs.renameSync(lockDir, tombstone)
+          fs.rmSync(tombstone, { recursive: true, force: true })
           continue
         } catch {
-          // Another process won the race; fall through and retry.
+          // Lost the reclaim race; fall through and retry normally.
         }
       }
       await new Promise(resolve => setTimeout(resolve, LOCK_RETRY_MS))
@@ -534,7 +593,13 @@ async function withLocalLock(settings, name, task, { timeoutMs = LOCK_TIMEOUT_MS
     return await task()
   } finally {
     try {
-      fs.rmSync(lockDir, { recursive: true, force: true })
+      // Release only while we still own the lock. The cancel flow may have
+      // released it eagerly (releaseLocalLockIfOwned); by then another
+      // waiter can have acquired it, and an unconditional rm -rf here would
+      // delete THEIR lock.
+      if (localLockOwnedBy(lockDir, process.pid)) {
+        fs.rmSync(lockDir, { recursive: true, force: true })
+      }
     } catch {
       // Best-effort cleanup; a stale lock will be reaped by the next owner.
     }
@@ -550,8 +615,39 @@ function remoteLockIsStale(owner) {
   return !Number.isFinite(createdAt) || Date.now() - createdAt > REMOTE_LOCK_STALE_MS
 }
 
+/**
+ * Best-effort release of the caller's OWN remote lock (owner.json pid must
+ * match) while a task is being cancelled. The withRemoteLock guard also
+ * releases on settle; this is the immediate escape hatch during abort.
+ */
+async function releaseRemoteLockIfOwned(settings, remoteRun, name, pid = process.pid) {
+  const lockDir = remoteLockDir(name)
+  const ownerFile = `${lockDir}/owner.json`
+  try {
+    const result = await remoteRun(
+      settings.ssh.host,
+      `if [ -f ${ownerFile} ]; then cat ${ownerFile}; else echo __none__; fi`,
+      { timeoutMs: 15_000 },
+    )
+    if (result.code !== 0) return false
+    const text = result.lines.join('\n')
+    let owner = null
+    try {
+      const firstBrace = text.indexOf('{')
+      if (firstBrace !== -1) owner = JSON.parse(text.slice(firstBrace))
+    } catch {
+      owner = null
+    }
+    if (owner === null || owner.pid !== pid) return false
+    await remoteRun(settings.ssh.host, `rm -rf ${lockDir} 2>/dev/null || true`, { timeoutMs: 15_000 })
+    return true
+  } catch {
+    return false
+  }
+}
+
 /** Run `task()` while holding a remote `mkdir` lock, stale after REMOTE_LOCK_STALE_MS (2h). */
-async function withRemoteLock(settings, remoteRun, name, task, { timeoutMs = LOCK_TIMEOUT_MS } = {}) {
+async function withRemoteLock(settings, remoteRun, name, task, { timeoutMs = LOCK_TIMEOUT_MS, shouldAbort } = {}) {
   const lockDir = remoteLockDir(name)
   const ownerFile = `${lockDir}/owner.json`
   const deadline = Date.now() + timeoutMs
@@ -561,6 +657,11 @@ async function withRemoteLock(settings, remoteRun, name, task, { timeoutMs = LOC
     createdAt: new Date().toISOString(),
   })
   while (true) {
+    if (typeof shouldAbort === 'function' && shouldAbort()) {
+      const error = new Error('更新已取消')
+      error.code = 'CANCELLED'
+      throw error
+    }
     const attempt = await remoteRun(
       settings.ssh.host,
       `if mkdir -p "$HOME"/.dsh/locks/desktop-shell && mkdir ${lockDir} 2>/dev/null; then printf '%s' ${shellQuote(ownerPayload)} > ${ownerFile}; echo acquired; else if [ -f ${ownerFile} ]; then cat ${ownerFile}; fi; echo busy; fi`,
@@ -574,7 +675,30 @@ async function withRemoteLock(settings, remoteRun, name, task, { timeoutMs = LOC
       try {
         return await task()
       } finally {
-        await remoteRun(settings.ssh.host, `rm -rf ${lockDir} 2>/dev/null || true`, { timeoutMs: 15_000 })
+        // Release only while we still own the lock: the cancel flow may have
+        // released it eagerly (releaseRemoteLockIfOwned) and a new owner can
+        // have taken it since; an unconditional rm would delete their lock.
+        // A stale lock is reaped by its next waiter.
+        try {
+          const probe = await remoteRun(
+            settings.ssh.host,
+            `if [ -f ${ownerFile} ]; then cat ${ownerFile}; else echo __none__; fi`,
+            { timeoutMs: 15_000 },
+          )
+          const text = probe.lines.join('\n')
+          let owner = null
+          try {
+            const firstBrace = text.indexOf('{')
+            if (firstBrace !== -1) owner = JSON.parse(text.slice(firstBrace))
+          } catch {
+            owner = null
+          }
+          if (owner !== null && owner.pid === process.pid) {
+            await remoteRun(settings.ssh.host, `rm -rf ${lockDir} 2>/dev/null || true`, { timeoutMs: 15_000 })
+          }
+        } catch {
+          // The owner probe failed: leave the lock; the stale reaper handles it.
+        }
       }
     }
     if (Date.now() >= deadline) {
@@ -589,7 +713,16 @@ async function withRemoteLock(settings, remoteRun, name, task, { timeoutMs = LOC
       owner = null
     }
     if (remoteLockIsStale(owner)) {
-      await remoteRun(settings.ssh.host, `rm -rf ${lockDir} 2>/dev/null || true`, { timeoutMs: 15_000 })
+      // Atomic reclaim with `mv` before `rm`: two waiters that both see the
+      // stale lock would otherwise race plain `rm -rf` against each other's
+      // freshly acquired lock (TOCTOU). mv to a private tombstone first,
+      // then clean the tombstone.
+      const tombstone = `${lockDir}.stale-${process.pid}`
+      await remoteRun(
+        settings.ssh.host,
+        `mv ${lockDir} ${tombstone} 2>/dev/null && rm -rf ${tombstone} 2>/dev/null || true`,
+        { timeoutMs: 15_000 },
+      )
       continue
     }
     await new Promise(resolve => setTimeout(resolve, LOCK_RETRY_MS))
@@ -604,6 +737,47 @@ async function withRemoteLock(settings, remoteRun, name, task, { timeoutMs = LOC
 // offers to resume instead of silently forgetting the request.
 // `runtime/update-status.json` is the detached update worker's live state:
 // the shell polls it while the worker runs and reads it after a crash/quit.
+// `update-cancel.json` is the cancellation token: the shell writes it to ask
+// a worker/pipeline to stop. A worker observes it once per log line and on
+// SIGTERM; the shell deletes it before starting a new update so a stale token
+// can never cancel an unrelated later run.
+
+function cancelTokenPath(settings) {
+  return path.join(expandHome(settings.local.dshHome), 'update-cancel.json')
+}
+
+function writeCancelToken(settings, token = {}) {
+  try {
+    const file = cancelTokenPath(settings)
+    fs.mkdirSync(path.dirname(file), { recursive: true })
+    fs.writeFileSync(file, JSON.stringify({
+      id: typeof token.id === 'string' && token.id !== '' ? token.id : String(Date.now()),
+      createdAt: new Date().toISOString(),
+      reason: token.reason ?? 'user',
+    }, null, 2))
+    return true
+  } catch {
+    return false
+  }
+}
+
+function readCancelToken(settings) {
+  try {
+    const token = JSON.parse(fs.readFileSync(cancelTokenPath(settings), 'utf8'))
+    if (token === null || typeof token !== 'object') return null
+    return token
+  } catch {
+    return null
+  }
+}
+
+function clearCancelToken(settings) {
+  try {
+    fs.rmSync(cancelTokenPath(settings), { force: true })
+  } catch {
+    // Best-effort.
+  }
+}
 
 function pendingUpdatePath(settings) {
   return path.join(expandHome(settings.local.dshHome), 'update-pending.json')
@@ -702,12 +876,19 @@ module.exports = {
   RUNTIME_ROOT_MANIFEST,
   activateLocalRuntime,
   activateRemoteRuntime,
+  buildLockName,
+  cancelTokenPath,
+  clearCancelToken,
   clearPendingUpdate,
   clearUpdateStatus,
   pendingUpdatePath,
+  readCancelToken,
   readPendingUpdate,
   readUpdateStatus,
+  releaseLocalLockIfOwned,
+  releaseRemoteLockIfOwned,
   updateStatusPath,
+  writeCancelToken,
   writePendingUpdate,
   writeUpdateStatus,
   expandHome,

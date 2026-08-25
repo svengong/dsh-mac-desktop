@@ -411,7 +411,7 @@ class ConnectionManager extends EventEmitter {
   }
 
   /** Run one remote command through the remote login shell. */
-  async remoteRun(target, inner, { timeoutMs, onLine } = {}) {
+  async remoteRun(target, inner, { timeoutMs, onLine, shouldAbort } = {}) {
     const tools = this.resolvedTools()
     const shellPath = await this.remoteLoginShell(target)
     // Wrap the command in unique markers so any login-shell/gateway banner
@@ -441,6 +441,7 @@ class ConnectionManager extends EventEmitter {
       timeoutMs,
       onLine: filteredOnLine,
       owner: this.owner(),
+      shouldAbort,
     })
     // Substring-aware marker extraction: a command whose final line has no
     

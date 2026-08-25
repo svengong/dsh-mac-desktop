@@ -158,8 +158,13 @@ class UpdateManager {
   snapshot() {
     const components = [...this.rows.values()]
     const available = components.filter(row => row.enabled && row.updateAvailable)
+    // `updating` is the single UI source of truth for the cancel button: it
+    // stays true from the moment the update pipeline is launched until it
+    // settles (success, failure, rollback, or cancellation).
+    const updating = this.busy && components.some(row => row.status === 'updating')
     return {
       busy: this.busy,
+      updating,
       autoCheckOnLaunch: this.settings.update?.autoCheckOnLaunch !== false,
       lastCheckAt: this.settings.update?.lastCheckAt ?? '',
       components,
@@ -191,9 +196,15 @@ class UpdateManager {
       })
       return
     }
+    // Only a device with NO runnable runtime (artifact or source checkout)
+    // reads as 未安装; a legacy source-built harness displays as 旧版本 and
+    // the regular 更新并重启 button migrates it onto the official artifact.
+    const currentLabel = facts.currentNpm !== ''
+      ? `v${facts.currentNpm}`
+      : facts.hasRuntime ? '旧版本' : '未安装'
     this.patchRow('harness', {
       status: 'ready',
-      current: facts.currentNpm !== '' ? `v${facts.currentNpm}` : '未安装',
+      current: currentLabel,
       latest: `v${facts.artifact.version}`,
       updateAvailable: facts.updateAvailable,
       summary: facts.summary,
@@ -256,6 +267,18 @@ class UpdateManager {
       error: '',
     })
     const outcome = await this.harnessUpdater.runPipeline({ includePull: true })
+    if (outcome.cancelled === true) {
+      // A cancelled update is NOT a failure: the old version keeps running
+      // and the row returns to its previous ready/available state.
+      const row = this.rows.get('harness')
+      const wasAvailable = (row ?? {}).updateAvailable === true
+      this.patchRow('harness', {
+        status: wasAvailable ? 'available' : 'ready',
+        summary: `已取消更新，旧版本继续运行${wasAvailable ? '（仍可更新）' : ''}`,
+        error: '',
+      })
+      return { ok: false, cancelled: true }
+    }
     if (!outcome.ok) {
       const summary = outcome.rolledBack === true
         ? `新版本启动失败，已回滚到 ${outcome.rollbackVersion}`
@@ -282,7 +305,10 @@ class UpdateManager {
     this.setBusy(true)
     try {
       if (def.kind !== 'harness') throw new Error(`未知组件类型：${def.kind}`)
-      await this.updateHarness()
+      const result = await this.updateHarness()
+      if (result !== null && typeof result === 'object' && result.cancelled === true) {
+        return { ok: false, cancelled: true, restarted: false }
+      }
       return { ok: true, restarted: true }
     } finally {
       this.setBusy(false)
@@ -301,7 +327,10 @@ class UpdateManager {
     }
     this.setBusy(true)
     try {
-      await this.updateHarness()
+      const result = await this.updateHarness()
+      if (result !== null && typeof result === 'object' && result.cancelled === true) {
+        return { ok: false, cancelled: true, changed: [], restarted: false }
+      }
       this.log('\n更新完成。')
       return { ok: true, changed: ['harness'], restarted: true }
     } finally {

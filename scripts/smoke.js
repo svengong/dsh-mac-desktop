@@ -27,6 +27,7 @@ const { WindowManager } = require('../src/window-manager')
 const { mergeUpdates } = require('../src/device-merge')
 const { resolveTools, engineOk } = require('../src/tools')
 const { presentWindow } = require('../src/windows')
+const { isExternalUrl } = require('../src/external-open')
 
 async function main() {
   // settings: flat active-device view plus the per-device map. A legacy
@@ -217,6 +218,23 @@ async function main() {
   assert.strictEqual(presentWindow(hidden), hidden)
   assert.deepStrictEqual(calls, ['show', 'focus'])
 
+  // harness navigation classification: the shell renders only the loopback
+  // harness service; public web pages (search citations, web-search results,
+  // window.open targets) are external and belong in the OS default browser.
+  assert.strictEqual(isExternalUrl('https://example.com/page'), true)
+  assert.strictEqual(isExternalUrl('http://example.com'), true)
+  assert.strictEqual(isExternalUrl('mailto:a@example.com'), true)
+  assert.strictEqual(isExternalUrl('file:///tmp/x.html'), true)
+  assert.strictEqual(isExternalUrl('http://192.168.1.10:3080'), true)
+  assert.strictEqual(isExternalUrl('http://127.0.0.1:3080'), false)
+  assert.strictEqual(isExternalUrl('http://localhost:3080'), false)
+  assert.strictEqual(isExternalUrl('http://127.0.0.1:3080/'), false)
+  assert.strictEqual(isExternalUrl('http://127.0.0.1:3080/?tab=1'), false)
+  assert.strictEqual(isExternalUrl('about:blank'), false)
+  assert.strictEqual(isExternalUrl('javascript:alert(1)'), false)
+  assert.strictEqual(isExternalUrl(''), false)
+  assert.strictEqual(isExternalUrl('not a url'), false)
+
   // tools: engine filter + a pnpm that actually runs under the clean env
   assert.strictEqual(engineOk('v23.11.0'), false)
   assert.strictEqual(engineOk('v22.19.0'), true)
@@ -403,7 +421,85 @@ async function main() {
   assert.strictEqual(runtimeStore.readUpdateStatus(homeSettings), null)
   runtimeStore.clearPendingUpdate(homeSettings)
   assert.strictEqual(runtimeStore.readPendingUpdate(homeSettings), null)
+  // cancellation token round-trip
+  assert.strictEqual(runtimeStore.readCancelToken(homeSettings), null)
+  assert.strictEqual(runtimeStore.writeCancelToken(homeSettings, { reason: '用户取消了更新' }), true)
+  assert.ok(runtimeStore.readCancelToken(homeSettings) !== null)
+  runtimeStore.clearCancelToken(homeSettings)
+  assert.strictEqual(runtimeStore.readCancelToken(homeSettings), null)
+  // `shouldAbort` cancels a lock wait BEFORE the lock is acquired.
+  let abortLockRuns = 0
+  await assert.rejects(
+    runtimeStore.withLocalLock(homeSettings, 'smoke-abort-lock', async () => { abortLockRuns += 1 }, { shouldAbort: () => true }),
+    error => error.code === 'CANCELLED',
+  )
+  assert.strictEqual(abortLockRuns, 0)
+  // TOCTOU regression: after the cancel helper eagerly releases the lock and
+  // a NEW owner (another process — the exact race locks exist to prevent)
+  // has acquired it, the old owner's guard finally must NOT delete the new
+  // owner's lock. Recreate the interleaving: acquire → release eagerly →
+  // a foreign-pid owner takes the lock → first holder's task returns and its
+  // finally runs → the foreign lock survives.
+  let releaseDuringTask = false
+  await runtimeStore.withLocalLock(homeSettings, 'smoke-toctou', async () => {
+    releaseDuringTask = true
+    runtimeStore.releaseLocalLockIfOwned(homeSettings, 'smoke-toctou', process.pid)
+    // Simulate the next owner from another shell/worker process taking the
+    // lock while this task is still unwinding.
+    const lockDir = path.join(runtimeStore.expandHome(homeSettings.local.dshHome), 'locks', 'smoke-toctou')
+    fs.mkdirSync(lockDir)
+    fs.writeFileSync(path.join(lockDir, 'owner.json'), JSON.stringify({ pid: 424242, createdAt: new Date().toISOString() }))
+  })
+  assert.strictEqual(releaseDuringTask, true)
+  {
+    const lockDir = path.join(runtimeStore.expandHome(homeSettings.local.dshHome), 'locks', 'smoke-toctou')
+    assert.ok(fs.existsSync(lockDir), 'the foreign owner lock must survive the old owner finally')
+    fs.rmSync(lockDir, { recursive: true, force: true })
+  }
   fs.rmSync(layoutDir, { recursive: true, force: true })
+
+  // cooperative cancellation: `runCommand`'s shouldAbort kills the group and
+  // resolves with `aborted: true` instead of hanging for the full timeout.
+  let abortAt = 0
+  const abortable = await runCommand({
+    cmd: '/bin/sleep',
+    args: ['30'],
+    shouldAbort: () => (abortAt += 1) > 2,
+  })
+  assert.strictEqual(abortable.aborted, true)
+  assert.ok(abortable.signal !== null || abortable.code !== null, 'aborted child must have exited')
+
+  // Updater cancel contract: requestCancel flips the intent immediately and
+  // awaitCancelled settles once the pipeline is done; a cancelled pipeline
+  // reports { ok:false, cancelled:true } and never touches the runtime.
+  const cancelHome = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-cancel-'))
+  const cancelCalls = []
+  const cancelUpdater = new Updater({
+    getSettings: () => ({ mode: 'local', local: { repoDir: '', repoUrl: '', dshHome: cancelHome }, ssh: {} }),
+    connection: {
+      owner: () => 'smoke-cancel-owner',
+      resolvedTools: () => resolveTools({ local: { repoDir: '', repoUrl: '' }, toolPaths: { node: '', git: '', pnpm: '', shell: '/bin/zsh' } }),
+      remoteRun: async () => ({ code: 0, lines: [] }),
+      restartService: async () => { cancelCalls.push('restart') },
+    },
+    onLine: () => {},
+    onBusyChange: () => {},
+  })
+  // The artifact pipeline's first step is the registry query; short-circuit
+  // it so the smoke never touches the network.
+  cancelUpdater.queryArtifact = async () => ({ ok: false, version: '', reason: 'offline smoke' })
+  const cancelPipeline = cancelUpdater.runPipeline()
+  assert.strictEqual(cancelUpdater.busy, true)
+  cancelUpdater.requestCancel('用户取消了更新')
+  assert.strictEqual(cancelUpdater.isCancelling(), true)
+  const cancelOutcome = await cancelPipeline
+  assert.strictEqual(cancelOutcome.ok, false)
+  assert.strictEqual(cancelOutcome.cancelled, true)
+  assert.strictEqual(cancelUpdater.busy, false)
+  assert.strictEqual(cancelUpdater.isCancelling(), false)
+  assert.deepStrictEqual(cancelCalls, [], 'a cancelled pipeline must never restart the service')
+  fs.rmSync(cancelHome, { recursive: true, force: true })
+
   // artifact preference: SSH-remote with the official repo URL prefers the
   // prebuilt npm artifact too (no remote compilation); forks stay source.
   const { Updater } = require('../src/update')

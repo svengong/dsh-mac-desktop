@@ -110,6 +110,7 @@
         <div class="top-actions">
           <button id="check-all" class="button" type="button">检查更新</button>
           <button id="update-all" class="button primary" type="button">更新 Harness 并重启</button>
+          <button id="cancel-update" class="button danger" type="button" hidden>取消更新</button>
           <button id="restart-service" class="button" type="button">重启服务</button>
           <span style="flex:1"></span>
           <label class="switch-row">
@@ -157,7 +158,7 @@ if (embedded) document.body.classList.add('embedded')
 let sshHostEntries = []
 let activeMode = 'local'
 let activeSection = ['connection', 'updates'].includes(params.get('section')) ? params.get('section') : 'connection'
-let updateState = { busy: false, autoCheckOnLaunch: true, lastCheckAt: '', components: [], available: [] }
+let updateState = { busy: false, updating: false, autoCheckOnLaunch: true, lastCheckAt: '', components: [], available: [] }
 let deviceTerminal = '本地'
 let savedSettings = null
 let activeTheme = 'default'
@@ -290,6 +291,7 @@ function renderUpdates() {
     setSwitch('auto-check', updateState.autoCheckOnLaunch === false ? false : true)
     $('check-all').disabled = true
     $('update-all').disabled = true
+    $('cancel-update').hidden = true
     renderFooter()
     return
   }
@@ -308,7 +310,13 @@ function renderUpdates() {
     const actions = document.createElement('div'); actions.className = 'component-actions'
     if (row.enabled) {
       const busy = updateState.busy || row.status === 'checking' || row.status === 'updating'
-      if (row.updateAvailable) {
+      // The whole panel's cancel button owns the single cancel entry point;
+      // during an update this row's primary action yields to it.
+      if (updateState.updating) {
+        const button = document.createElement('button'); button.className = 'button danger'; button.type = 'button'
+        button.textContent = '取消更新'; button.disabled = false
+        button.addEventListener('click', () => api.updates.action('cancel-update', {})); actions.appendChild(button)
+      } else if (row.updateAvailable) {
         const button = document.createElement('button'); button.className = 'button primary'; button.type = 'button'
         button.textContent = '更新并重启'; button.disabled = busy
         button.addEventListener('click', () => api.updates.action('update-one', { id: row.id })); actions.appendChild(button)
@@ -323,12 +331,22 @@ function renderUpdates() {
   const count = updateState.available.filter(row => row.enabled).length
   const badgeEl = $('nav-update-count'); badgeEl.hidden = count === 0; badgeEl.textContent = String(count)
   setSwitch('auto-check', updateState.autoCheckOnLaunch !== false)
+  const updating = updateState.updating === true
+  // The shared top bar flips between 「更新并重启」 and 「取消更新」 — the
+  // button is never disabled mid-update so cancel always stays clickable.
   $('check-all').disabled = updateState.busy
-  $('update-all').disabled = updateState.busy || count === 0
+  $('update-all').disabled = !updating && (updateState.busy || count === 0)
+  $('update-all').hidden = updating
+  $('cancel-update').hidden = !updating
   renderFooter()
 }
 $('check-all').addEventListener('click', () => api.updates.action('check-all', {}))
 $('update-all').addEventListener('click', () => api.updates.action('update-all', {}))
+$('cancel-update').addEventListener('click', () => {
+  const button = $('cancel-update'); if (button.disabled) return
+  button.disabled = true; button.textContent = '正在取消…'
+  api.updates.action('cancel-update', {})
+})
 $('restart-service').addEventListener('click', async () => {
   const button = $('restart-service'); if (button.disabled) return
   button.disabled = true; button.textContent = '重启中…'

@@ -1051,6 +1051,16 @@ body.embedded .settings-titlebar .titlebar-actions {
 
 .button.quiet:hover { background: var(--ds-accent-soft); }
 
+.button.danger {
+  color: var(--ds-danger);
+  border-color: color-mix(in srgb, var(--ds-danger) 45%, transparent);
+}
+
+.button.danger:hover {
+  background: color-mix(in srgb, var(--ds-danger) 12%, transparent);
+  border-color: var(--ds-danger);
+}
+
 .button.small { min-height: var(--ds-control-height-sm); padding: 0 8px; font-size: var(--ds-font-size-sm); line-height: 16px; }
 
 /* ── segmented mode switch ───────────────────────────────────────────────── */

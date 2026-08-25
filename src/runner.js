@@ -38,17 +38,23 @@ function linePump(onLine) {
 
 /**
  * Run one command to completion.
- * @param {object} options - cmd, args, cwd, env, timeoutMs, onLine.
- * @returns {object} {code, signal, timedOut, lines} - resolves for any exit;
- * rejects only when the binary cannot be spawned.
+ * @param {object} options - cmd, args, cwd, env, timeoutMs, onLine, owner, shouldAbort.
+ * @returns {object} {code, signal, timedOut, aborted, lines} - resolves for any
+ * exit; rejects only when the binary cannot be spawned.
  *
  * The child runs in its own process group (`detached: true`) so the timeout
  * can SIGKILL the whole tree (pnpm/npm installs spawn grandchildren) instead
- * of leaving orphans behind. Every spawned child is also registered in the
- * process registry so the app-quit teardown (`killActiveChildren`) can
- * terminate in-flight builds and services that no session reference covers.
+ * of leaving orphans behind. `shouldAbort` is a cooperative cancellation
+ * poll (default 200ms): when it flips true the whole group is SIGTERM'd and
+ * the result resolves with `aborted: true` — callers that care about
+ * cancellation (the update pipeline, the detached worker) can then clean up
+ * their staging state instead of waiting out the full timeout. Every spawned
+ * child is also registered in the process registry so the app-quit teardown
+ * (`killActiveChildren`) can terminate in-flight builds and services that no
+ * session reference covers.
  */
-function runCommand({ cmd, args = [], cwd, env, timeoutMs = DEFAULT_TIMEOUT_MS, onLine, owner = null }) {
+function runCommand({ cmd, args = [], cwd, env, timeoutMs = DEFAULT_TIMEOUT_MS, onLine, owner = null, shouldAbort = null }) {
+  const ABORT_POLL_MS = 200
   return new Promise((resolve, reject) => {
     let child
     try {
@@ -65,6 +71,7 @@ function runCommand({ cmd, args = [], cwd, env, timeoutMs = DEFAULT_TIMEOUT_MS, 
     trackChild(child, owner)
     const lines = []
     let timedOut = false
+    let aborted = false
     let settled = false
     const pump = linePump(line => {
       lines.push(line)
@@ -72,32 +79,55 @@ function runCommand({ cmd, args = [], cwd, env, timeoutMs = DEFAULT_TIMEOUT_MS, 
     })
     child.stdout.on('data', pump)
     child.stderr.on('data', pump)
-    const timer = setTimeout(() => {
-      timedOut = true
-      // Group-kill: a SIGKILL to the leader alone leaves pnpm/git
-      // grandchildren running in the same group.
+    const killGroup = signal => {
       try {
-        process.kill(-child.pid, 'SIGKILL')
+        process.kill(-child.pid, signal)
       } catch {
         try {
-          child.kill('SIGKILL')
+          child.kill(signal)
         } catch {
           // Already gone.
         }
       }
+    }
+    const timer = setTimeout(() => {
+      timedOut = true
+      // Group-kill: a SIGKILL to the leader alone leaves pnpm/git
+      // grandchildren running in the same group.
+      killGroup('SIGKILL')
     }, timeoutMs)
+    const abortTimer = typeof shouldAbort === 'function' ? setInterval(() => {
+      if (aborted || settled) return
+      let stop = false
+      try {
+        stop = Boolean(shouldAbort())
+      } catch {
+        stop = false
+      }
+      if (!stop) return
+      aborted = true
+      killGroup('SIGTERM')
+      // Escalate to SIGKILL when the group ignores the graceful signal, so a
+      // cancelled update can never hang the pipeline for the full timeout.
+      setTimeout(() => {
+        if (settled) return
+        killGroup('SIGKILL')
+      }, 5000)
+    }, ABORT_POLL_MS) : null
     child.on('error', error => {
       if (settled) return
       settled = true
       clearTimeout(timer)
+      if (abortTimer !== null) clearInterval(abortTimer)
       reject(new Error(`无法启动 ${cmd}: ${error.message}`))
     })
     child.on('close', (code, signal) => {
       if (settled) return
       settled = true
       clearTimeout(timer)
+      if (abortTimer !== null) clearInterval(abortTimer)
       pump.flush()
-      resolve({ code, signal, timedOut, lines })
+      resolve({ code, signal, timedOut, aborted, lines })
     })
   })
 }

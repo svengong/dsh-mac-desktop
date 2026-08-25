@@ -51,9 +51,9 @@ async function queryNpmArtifact({ registryUrl = '', timeoutMs = 20_000 } = {}) {
  * Install the pinned official CLI into `runtimeDir` with `npm install --prefix`.
  * The runtime dir must already exist (created by the caller); node_modules is
  * created inside it. Returns the resolved bin path on success.
- * @param {object} options - nodeBin, npmBin, runtimeDir, spec, env, onLine, timeoutMs.
+ * @param {object} options - nodeBin, npmBin, runtimeDir, spec, env, onLine, timeoutMs, owner, shouldAbort.
  */
-async function installNpmArtifact({ nodeBin, npmBin, runtimeDir, spec, env, onLine, timeoutMs = 20 * 60_000, owner = null }) {
+async function installNpmArtifact({ nodeBin, npmBin, runtimeDir, spec, env, onLine, timeoutMs = 20 * 60_000, owner = null, shouldAbort = null }) {
   const npm = npmBin !== '' && npmBin !== null && npmBin !== undefined
     ? npmBin
     : path.join(path.dirname(nodeBin), 'npm')
@@ -66,7 +66,14 @@ async function installNpmArtifact({ nodeBin, npmBin, runtimeDir, spec, env, onLi
     timeoutMs,
     onLine: onLine === undefined ? undefined : line => onLine(`[npm] ${line}`),
     owner,
+    shouldAbort,
   })
+  if (result.aborted === true) {
+    const error = new Error('官方产物安装已取消')
+    error.code = 'CANCELLED'
+    error.name = 'UpdateCancelledError'
+    throw error
+  }
   if (result.code !== 0) {
     const tail = result.lines.slice(-8).join('\n')
     throw new Error(`官方产物安装失败（退出码 ${result.code}）：${tail || '无输出'}`)

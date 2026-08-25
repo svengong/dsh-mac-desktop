@@ -44,6 +44,7 @@ const { buildMenu } = require('./menu')
 const { createTray } = require('./tray')
 const { presentWindow } = require('./windows')
 const { WindowManager } = require('./window-manager')
+const { isExternalUrl } = require('./external-open')
 
 const BUILD_DIR = path.join(__dirname, '..', 'build')
 // Single source of truth: the shell version always follows package.json (and
@@ -253,6 +254,9 @@ function sessionTask(session) {
   if (session.connection.status.state === 'restarting') {
     return { state: 'restarting', label: '服务重启中…' }
   }
+  if (session.cancelRequested === true) {
+    return { state: 'cancelling', label: '正在取消更新…' }
+  }
   if (session.workerPollTimer !== null) {
     return { state: 'updating', label: '官方产物更新中…' }
   }
@@ -293,6 +297,13 @@ function sessionFor(deviceKey) {
     autoReconnectAttempts: 0,
     connecting: false,
     workerPollTimer: null,
+    // True while a user-initiated cancel is in flight; drives the frame's
+    // 「正在取消更新…」label and guards against duplicate cancel actions.
+    cancelRequested: false,
+    // The detached update worker's pid while the shell owns/observes it.
+    // Killing on cancel targets exactly this process; a worker from a
+    // previous shell run is never ours to kill.
+    workerPid: null,
     // Task banner shared by every window attached to this terminal. Keeping it
     // on the session (not the initiating workspace) means a window opened or
     // attached mid-update immediately sees the same blocking state instead of
@@ -367,21 +378,52 @@ function trackSessionTask(session, promise) {
 }
 
 /**
- * Cancel one terminal's in-flight init/build/check/update. The official
- * artifact worker is intentionally NOT killed here: it is detached by design
- * and a later local window picks its status back up.
+ * Cancel one terminal's in-flight init/build/check/update.
+ *
+ * Best-practice split:
+ * 1. The updater's cooperative cancel flag flips FIRST — the pipeline checks
+ *    it at stage boundaries and the child commands poll it every 200ms, so
+ *    most tasks settle quickly and the pipeline itself releases the locks.
+ * 2. `cancelOwnedChildren` SIGTERMs the whole child group as the escalation.
+ * 3. A final, narrower wait (pipeline settle or the worker's own cancel)
+ *    avoids the old blanket 15s sleep.
  */
 async function cancelSessionTask(session) {
   if (session === null || session === undefined) return
   const pending = [session.taskPromise, session.connectionTaskPromise].filter(promise => promise !== null && promise !== undefined)
-  if (pending.length === 0) return
+  if (pending.length === 0 && session.workerPollTimer === null && !(session.updater !== null && session.updater.busy)) return
   const hadProgress = session.progress === null ? false : true
   routeSessionLine(session, '正在取消当前终端的更新/构建任务…')
-  cancelOwnedChildren(session.owner(), 'SIGTERM')
+
+  if (session.updater !== null && session.updater.busy) {
+    session.updater.requestCancel('用户取消了更新')
+  }
+  if (session.workerPollTimer !== null) {
+    cancelSessionWorker(session)
+  }
+  if (pending.length > 0) {
+    cancelOwnedChildren(session.owner(), 'SIGTERM')
+  }
+
+  // Cooperative cancellation is authoritative; only when it cannot settle in
+  // time do we fall back to the old timeout behaviour.
   await Promise.race([
     Promise.allSettled(pending),
+    session.updater !== null ? session.updater.awaitCancelled() : Promise.resolve(),
     new Promise(resolve => setTimeout(resolve, TASK_CANCEL_TIMEOUT_MS)),
   ])
+
+  // Local-mode update intents are now settled: any leftover pending file
+  // would be resumable garbage. This is deliberately idempotent — the
+  // pipeline's finally also clears it, and worker/cleanup paths clear it too.
+  try {
+    const view = settingsViewFor(session.key)
+    if (view.mode === 'local') runtimeStore.clearPendingUpdate(view)
+    runtimeStore.clearCancelToken(view)
+  } catch {
+    // Best-effort.
+  }
+
   const stillPending = [session.taskPromise, session.connectionTaskPromise].some(promise => promise !== null && promise !== undefined)
   if (hadProgress) {
     setSessionProgress(session, {
@@ -398,6 +440,8 @@ async function cancelSessionTask(session) {
   } else {
     routeSessionLine(session, '已取消，旧版本继续运行。')
   }
+  broadcastSession(session)
+  refreshTrayAndMenu()
 }
 
 /**
@@ -436,6 +480,8 @@ function spawnUpdateWorker(session, view, version) {
   const taskPath = path.join(root, 'update-task.json')
   try {
     fs.mkdirSync(root, { recursive: true })
+    // A stale cancellation token must never cancel a fresh update.
+    runtimeStore.clearCancelToken(view)
     fs.writeFileSync(taskPath, JSON.stringify({
       dshHome: view.local.dshHome,
       repoDir: view.local.repoDir,
@@ -450,10 +496,16 @@ function spawnUpdateWorker(session, view, version) {
     return
   }
   routeSessionLine(session, `启动后台更新任务：官方预构建版 v${version}（壳可正常关闭，任务会继续完成）`)
-  spawnDetached({
+  const child = spawnDetached({
     cmd: process.execPath,
     args: [path.join(__dirname, 'update-worker.js'), taskPath],
   })
+  // The worker writes its own pid into update-status.json immediately, but
+  // the poll interval lags; seed with the spawn handle so a cancel that
+  // lands in that window can still target the right process.
+  if (child !== null && child !== undefined && Number.isInteger(child.pid)) {
+    session.workerPid = child.pid
+  }
   session.workerPollTimer = setInterval(() => observeUpdateWorker(session), 800)
   session.workerPollTimer.unref()
 }
@@ -473,6 +525,7 @@ function observeUpdateWorker(session) {
   const status = runtimeStore.readUpdateStatus(view)
   if (status === null) return
   const live = Number.isInteger(status.pid) && pidAliveLocal(status.pid)
+  if (Number.isInteger(status.pid)) session.workerPid = status.pid
   const logTail = Array.isArray(status.logTail) ? status.logTail : []
   const lastCount = session.workerLogCount ?? 0
   if (logTail.length > lastCount) {
@@ -480,11 +533,18 @@ function observeUpdateWorker(session) {
     session.workerLogCount = logTail.length
   }
   const phase = String(status.phase || '')
-  if (phase === 'done' || phase === 'error' || (phase !== '' && !live)) {
+  if (phase === 'done' || phase === 'error' || phase === 'cancelled' || (phase !== '' && !live)) {
     stopObservingWorker(session)
-    if (phase === 'done') {
+    if (phase === 'cancelled') {
+      routeSessionLine(session, '官方产物更新已取消，旧版本继续运行。')
+      runtimeStore.clearUpdateStatus(view)
+      runtimeStore.clearPendingUpdate(view)
+      runtimeStore.clearCancelToken(view)
+      setSessionProgress(session, null)
+    } else if (phase === 'done') {
       routeSessionLine(session, `官方产物 v${status.version} 已就绪，正在重启服务…`)
       runtimeStore.clearUpdateStatus(view)
+      runtimeStore.clearCancelToken(view)
       setSessionProgress(session, { title: '更新完成', status: '正在重启服务…' })
       session.connection.restartService().then(() => {
         setSessionProgress(session, null)
@@ -497,6 +557,7 @@ function observeUpdateWorker(session) {
     } else if (phase === 'error') {
       routeSessionLine(session, `✗ 官方产物更新失败：${status.error || '未知错误'}`)
       runtimeStore.clearUpdateStatus(view)
+      runtimeStore.clearCancelToken(view)
       setSessionProgress(session, {
         title: '更新失败（官方产物）',
         status: status.error || '未知错误',
@@ -508,11 +569,38 @@ function observeUpdateWorker(session) {
     } else {
       routeSessionLine(session, '更新任务进程已退出且未完成，可稍后重试。')
       runtimeStore.clearUpdateStatus(view)
+      runtimeStore.clearCancelToken(view)
     }
     return
   }
+  if (session.cancelRequested === true && phase !== 'switching') {
+    // The user asked to stop and the worker is still in a cancellable phase:
+    // it has <= 800ms to notice the token itself; send the escalation now.
+    killWorkerPid(session)
+    return
+  }
   const phaseText = phase === 'starting' ? '启动中…' : phase === 'downloading' ? `下载官方预构建版 v${status.version}…` : phase === 'installing' ? '安装中…' : phase === 'switching' ? '原子切换运行时…' : '进行中…'
-  setSessionProgress(session, { title: '更新（官方产物）', status: phaseText })
+  setSessionProgress(session, { title: session.cancelRequested === true ? '正在取消更新…' : '更新（官方产物）', status: phaseText })
+}
+
+/**
+ * Terminate the worker process the SHELL owns. The worker's SIGTERM handler
+ * writes `phase: 'cancelled'` and exits 0 — the escalation it received from
+ * us. In the switching critical section the handler ignores the signal and
+ * the switch completes, which is the designed non-cancellable point.
+ */
+function killWorkerPid(session) {
+  const pid = session.workerPid
+  if (pid === null || !Number.isInteger(pid) || pid <= 0) return
+  if (!pidAliveLocal(pid)) {
+    session.workerPid = null
+    return
+  }
+  try {
+    process.kill(pid, 'SIGTERM')
+  } catch {
+    // Already gone; the status poll settles it.
+  }
 }
 
 function stopObservingWorker(session) {
@@ -521,6 +609,30 @@ function stopObservingWorker(session) {
     session.workerPollTimer = null
   }
   session.workerLogCount = 0
+  session.workerPid = null
+  session.cancelRequested = false
+}
+
+/**
+ * Cancel the detached artifact worker the shell currently observes.
+ *
+ * Cooperative first: write the persistent cancel token — the worker checks
+ * it per npm output line and per 200ms abort poll, cleans its half-written
+ * version dir, clears the pending intent and writes `phase: 'cancelled'`.
+ * The poll callback escalates with SIGTERM on the next tick if the worker
+ * stays in a cancellable phase. A worker in the switching critical section
+ * is NOT killed: the atomic switch must finish.
+ */
+function cancelSessionWorker(session) {
+  if (session.workerPollTimer === null) return
+  const view = settingsViewFor(session.key)
+  runtimeStore.writeCancelToken(view, { reason: '用户取消了更新' })
+  routeSessionLine(session, '已通知后台更新任务取消，正在清理…')
+  if (session.cancelRequested === false) {
+    session.cancelRequested = true
+    broadcastSession(session)
+    refreshTrayAndMenu()
+  }
 }
 
 /**
@@ -582,10 +694,18 @@ function resumePendingUpdate() {
   setTimeout(() => {
     if (pending !== null && liveWorker) {
       session.workerLogCount = 0
+      session.workerPid = status.pid
       session.workerPollTimer = setInterval(() => observeUpdateWorker(session), 800)
       session.workerPollTimer.unref()
       routeSessionLine(session, `检测到后台更新仍在进行（v${pending.version}），已接管观察。`)
       dialog.showMessageBox({ type: 'info', title: '更新进行中', message: `官方产物 v${pending.version} 仍在后台更新，完成后会自动重启服务。` })
+      return
+    }
+    if (status !== null && phase === 'cancelled') {
+      runtimeStore.clearPendingUpdate(view)
+      runtimeStore.clearUpdateStatus(view)
+      runtimeStore.clearCancelToken(view)
+      dialog.showMessageBox({ type: 'info', title: '更新已取消', message: '上次更新已取消，旧版本继续运行。可从「设置 → 更新」重新发起。' })
       return
     }
     if (status !== null && phase === 'done') {
@@ -787,6 +907,63 @@ function setProgress(workspace, progress) {
     other.progress = progress
     updateHarnessVisibility(other)
   }
+}
+
+/**
+ * Resolve one popup request (`window.open()`, `target="_blank"`, shift-click)
+ * without ever creating a child window inside the shell: external pages go to
+ * the system default browser, and anything else is denied in place. The
+ * handler receives the resolved URL (relative URLs are already resolved
+ * against the opener), so the browser gets the same final URL the popup
+ * would have navigated to.
+ */
+function openHarnessPopupUrl(workspace, url) {
+  if (workspace.session !== null) {
+    workspace.session.connection.log('[window] 外部链接' + (isExternalUrl(url) ? ' → 系统浏览器 ' : ' → 已拦截 ') + url)
+  }
+  if (!isExternalUrl(url)) return
+  shell.openExternal(url)
+}
+
+/**
+ * Navigation guard for the harness view: pages the shell renders inside its
+ * window are confined to the harness service (loopback http); every external
+ * page is redirected to the system default browser, and popups are suppressed
+ * entirely (their resolved URL goes to the browser).
+ *
+ * Popup delegation covers `window.open()`, `<a target="_blank">` — which the
+ * harness uses for search-result and web-search citations — and shift-clicks.
+ * Those must reach the default browser instead of becoming child windows of
+ * the shell, so the harness always keeps its own window for itself.
+ */
+function installHarnessNavigationGuard(workspace) {
+  const webContents = workspace.harnessView.webContents
+
+  // Popups: never create a child BrowserWindow inside the shell app. The
+  // handler intercepts them BEFORE a window exists; denying the popup here
+  // also means the opener gets `null` from window.open() — the standard
+  // behavior for a blocked popup — instead of a handle to an in-app window.
+  webContents.setWindowOpenHandler(details => {
+    openHarnessPopupUrl(workspace, details.url)
+    return { action: 'deny' }
+  })
+
+  // Top-level navigations triggered by the page (link navigation of the
+  // harness frame). The shell's own loadURL calls are not renderer-driven and
+  // still pass through.
+  webContents.on('will-navigate', (event, url) => {
+    if (!isExternalUrl(url)) return
+    event.preventDefault()
+    openHarnessPopupUrl(workspace, url)
+  })
+
+  // Navigations spawned by sub-frames, which `will-navigate` does not cover
+  // on its own.
+  webContents.on('will-frame-navigate', (event) => {
+    if (event.isMainFrame || !isExternalUrl(event.url)) return
+    event.preventDefault()
+    openHarnessPopupUrl(workspace, event.url)
+  })
 }
 
 /**
@@ -1300,6 +1477,10 @@ function createWorkspace(deviceKey = null, options = {}) {
     }
   })
   win.on('closed', () => disposeWorkspace(workspace))
+  // Confine the harness view to the loopback service URL: popups and external
+  // navigations go to the system default browser, never into a new in-app
+  // window (see installHarnessNavigationGuard).
+  installHarnessNavigationGuard(workspace)
   win.webContents.on('did-fail-load', (_event, code, description) => {
     if (session !== null) {
       session.connection.log('[window] frame load failed ' + code + ' ' + description)
@@ -1433,8 +1614,11 @@ function activeUpdateSummary() {
   const session = activeSession()
   if (session === null) return { availableCount: 0, lastCheckAt: '' }
   const view = settingsViewFor(session.key)
+  const snapshot = session.updateManager.snapshot()
   return {
-    availableCount: session.updateManager.snapshot().available.length,
+    availableCount: snapshot.available.length,
+    updating: snapshot.updating === true || session.workerPollTimer !== null,
+    cancelling: session.cancelRequested === true,
     lastCheckAt: view.update?.lastCheckAt ?? '',
   }
 }
@@ -1449,6 +1633,7 @@ function refreshMenu() {
     // The menu acts on the ACTIVE terminal, so its busy state is that
     // terminal's alone — a build on another terminal must not grey it out.
     isBusy: () => session !== null && isSessionBusy(session),
+    isUpdating: () => session !== null && isSessionUpdating(session),
     getUpdateSummary: () => activeUpdateSummary(),
   }))
 }
@@ -1598,6 +1783,9 @@ function scheduleAutoCheck(session) {
 /** Shared tail for panel-driven component updates. */
 async function finishManagedUpdate(workspace, session, outcome) {
   if (outcome.ok && outcome.restarted) reloadSessionWindows(session)
+  if (outcome.cancelled === true && session.progress !== null) {
+    setSessionProgress(session, null)
+  }
   broadcastSession(session)
 }
 
@@ -1745,6 +1933,18 @@ function isSessionBusy(session) {
   // The detached artifact worker is also a per-terminal task: another update
   // must not race it, but a same-config save may still attach to its progress.
   if (session.workerPollTimer !== null) return true
+  return false
+}
+
+/**
+ * Whether an update task is actually running for this terminal (as opposed
+ * to a check or a plain restart). The cancel button/menu entry is only
+ * enabled while this is true.
+ */
+function isSessionUpdating(session) {
+  if (session === null || session === undefined) return false
+  if (session.workerPollTimer !== null) return true
+  if (session.updateManager !== null) return session.updateManager.snapshot().updating === true
   return false
 }
 
@@ -1933,6 +2133,12 @@ const actions = {
       if (outcome.ok) {
         reloadSessionWindows(session)
         setProgress(target, null)
+      } else if (outcome.cancelled === true) {
+        // A cancelled pipeline already switched nothing: the old version is
+        // still the running one. Clear the progress banner (the session task
+        // label returns to idle) and leave the window exactly as it was.
+        routeSessionLine(session, '更新已取消，旧版本继续运行。')
+        setProgress(target, null)
       } else {
         const diagnosis = await diagnoseFailure(session)
         setProgress(target, {
@@ -1947,6 +2153,79 @@ const actions = {
       refreshMenu()
     })())
     await task
+    return target
+  },
+
+  /**
+   * Cancel the active update of one terminal. The user-visible contract:
+   * the button flips instantly to 「正在取消…」, the update process tree is
+   * killed, every lock (local directory lock or remote mkdir lock) is
+   * released immediately when we own it, and the pending-update intent is
+   * cleared so a later launch never resumes a cancelled update.
+   */
+  async cancelUpdate(workspace) {
+    const target = withWorkspace(workspace)
+    if (target.session === null) return target
+    const session = target.session
+    if (session.cancelRequested === true) return target
+    if (!isSessionUpdating(session)) return target
+
+    const view = settingsViewFor(session.key)
+    const remoteRun = (host, inner, options) => session.connection.remoteRun(host, inner, options)
+    const lockName = runtimeStore.buildLockName(view)
+
+    session.cancelRequested = true
+    routeSessionLine(session, '正在取消更新…')
+
+    // 1) Cancel the updater pipeline first — it aborts at the next stage
+    //    boundary / 200ms abort poll and its own finally releases the lock.
+    if (session.updater !== null && session.updater.busy) {
+      session.updater.requestCancel('用户取消了更新')
+    }
+    // 2) The detached worker gets the persistent cancel token; the poll
+    //    observer escalates to SIGTERM on its next tick.
+    if (session.workerPollTimer !== null) {
+      cancelSessionWorker(session)
+    }
+    // 3) Escalation: kill the whole child group owned by this terminal.
+    cancelOwnedChildren(session.owner(), 'SIGTERM')
+
+    // 4) Release this shell's OWN locks immediately (best-effort; the
+    //    pipeline guard releases again when it settles). Only the lock we
+    //    wrote with our pid is touched — a foreign lock is never deleted.
+    if (view.mode === 'ssh') {
+      await runtimeStore.releaseRemoteLockIfOwned(view, remoteRun, lockName, process.pid)
+    } else {
+      runtimeStore.releaseLocalLockIfOwned(view, lockName, process.pid)
+    }
+
+    // 5) Clear the persistent update intent so a later launch never offers
+    //    to resume a cancelled update. The cancel token is NOT cleared here
+    //    when a worker is running: the worker still needs it (it is its
+    //    cooperative cancel signal) and clears it itself when it settles.
+    if (view.mode === 'local') runtimeStore.clearPendingUpdate(view)
+    if (session.workerPollTimer === null) runtimeStore.clearCancelToken(view)
+
+    // 6) Wait for the pipeline to settle (bounded by the task timeout), then
+    //    refresh every surface: button, menu, tray and the shell frame. If the
+    //    worker reached its non-cancellable switching phase, the cancellation
+    //    was a no-op: the update completes and the observer restarts the
+    //    service — say so instead of pretending it was cancelled.
+    await Promise.race([
+      session.updater !== null ? session.updater.awaitCancelled() : Promise.resolve(),
+      new Promise(resolve => setTimeout(resolve, TASK_CANCEL_TIMEOUT_MS)),
+    ])
+    const workerStillSwitching = session.workerPollTimer !== null
+      && String(runtimeStore.readUpdateStatus(view)?.phase || '') === 'switching'
+    session.cancelRequested = false
+    setSessionProgress(session, null)
+    if (workerStillSwitching) {
+      routeSessionLine(session, '更新已进入原子切换阶段，无法取消；切换完成后自动重启服务。')
+    } else {
+      routeSessionLine(session, '更新已取消，旧版本继续运行。')
+    }
+    broadcastSession(session)
+    refreshTrayAndMenu()
     return target
   },
 
@@ -2147,13 +2426,19 @@ function registerIpc() {
         return {
           detached: true,
           busy: false,
+          updating: false,
           autoCheckOnLaunch: view.update?.autoCheckOnLaunch === false ? false : true,
           lastCheckAt: view.update?.lastCheckAt ?? '',
           components: [],
           available: [],
         }
       }
-      return workspace.session.updateManager.snapshot()
+      const snapshot = workspace.session.updateManager.snapshot()
+      // The detached artifact worker is an update task that UpdateManager
+      // cannot see: surface it as `updating` so the panel flips to the cancel
+      // button while the worker runs.
+      if (workspace.session.workerPollTimer !== null) snapshot.updating = true
+      return snapshot
     },
 
     updatesGetLog(event) {
@@ -2182,9 +2467,14 @@ function registerIpc() {
           return { ok: false, error: '请先连接终端' }
         }
       }
-      const busyMessage = busyTaskMessage(session)
-      if (taskNames.includes(name) && busyMessage !== '') {
-        return { ok: false, error: busyMessage }
+      // `cancel-update` deliberately bypasses the busy gate: it is the
+      // action that ENDS busyness. Every other task action is gated so two
+      // updates can never race on the same terminal.
+      if (name !== 'cancel-update') {
+        const busyMessage = busyTaskMessage(session)
+        if (taskNames.includes(name) && busyMessage !== '') {
+          return { ok: false, error: busyMessage }
+        }
       }
       try {
         switch (name) {
@@ -2196,6 +2486,13 @@ function registerIpc() {
             break
           case 'toggle-auto':
             saveUpdateForSession(session, { autoCheckOnLaunch: Boolean(payload?.value) })
+            break
+          case 'cancel-update':
+            // Cancellation is never awaited inside the IPC handler for the
+            // full duration: the renderer gets { ok: true } immediately, the
+            // 「正在取消…」state flips via the state broadcast, and the
+            // settle path broadcasts again when the pipeline ends.
+            void actions.cancelUpdate(workspace)
             break
           case 'restart-service':
             await trackSessionTask(session, session.connection.restartService())
@@ -2268,6 +2565,17 @@ function registerIpc() {
 
   ipcMain.handle('shell:new-window', () => {
     actions.newWindow()
+    return { ok: true }
+  })
+
+  // The shell frame renders no external content itself, but the API is kept
+  // narrow and validated anyway: only real external URLs may reach the OS
+  // browser, and in-app targets are delegated back to shell navigation.
+  ipcMain.handle('shell:open-external', (_event, url) => {
+    if (typeof url !== 'string' || url.trim() === '') return { ok: false, error: '无效地址' }
+    const target = String(url)
+    if (!isExternalUrl(target)) return { ok: false, error: '地址不属于外部浏览器' }
+    shell.openExternal(target)
     return { ok: true }
   })
 
@@ -2481,6 +2789,19 @@ if (!gotLock) {
 
     registerIpc()
 
+    // Global safety net: NO web surface of the shell ever opens a child
+    // window in-app. The harness view installs its workspace-aware handler
+    // (with logging) in installHarnessNavigationGuard, which replaces this
+    // one for the view; every other surface (shell frame, settings panel)
+    // keeps this default: external pages go to the system browser, and
+    // anything else is denied in place.
+    app.on('web-contents-created', (_event, webContents) => {
+      webContents.setWindowOpenHandler(details => {
+        if (isExternalUrl(details.url)) shell.openExternal(details.url)
+        return { action: 'deny' }
+      })
+    })
+
     trayController = createTray({
       actions,
       getStatus: () => activeStatus(),
@@ -2488,6 +2809,7 @@ if (!gotLock) {
       getUpdateSummary: () => activeUpdateSummary(),
       // The tray mirrors the active terminal's busy state, like the menu.
       isBusy: () => isSessionBusy(activeSession()),
+      isUpdating: () => isSessionUpdating(activeSession()),
     })
 
     refreshTrayAndMenu()

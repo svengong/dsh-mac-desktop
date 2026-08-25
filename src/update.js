@@ -46,6 +46,21 @@ class Updater {
     this.onLine = onLine || (() => {})
     this.onBusyChange = onBusyChange || (() => {})
     this.busy = false
+    // The cancel intent is the single source of truth for the whole update
+    // flow: the main process (UI) sets it, this pipeline polls it, and
+    // cancelSessionTask's SIGTERM is only the escalation when a remote ssh
+    // command ignores polling for its whole timeout window.
+    this.cancelled = false
+    this.cancelling = false
+    this.cancelReason = '用户取消'
+    // The pipeline phase. Checked after each stage: the atomic switch +
+    // restart section is a non-cancellable critical section, while the
+    // download/install section can be aborted at any step boundary.
+    this.phase = 'idle'
+    // Local update intent bookkeeping: writePendingUpdate is only cleared
+    // when the cancel flow settles the pipeline, so an abandoned intent file
+    // (shell killed) can never be mistaken for a completed update.
+    this.pendingWritten = false
   }
 
   setBusy(value) {
@@ -54,11 +69,88 @@ class Updater {
     this.onBusyChange(value)
   }
 
+  setPhase(phase) {
+    if (this.phase === phase) return
+    this.phase = phase
+    if (typeof this.onPhaseChange === 'function') this.onPhaseChange(phase)
+  }
+
+  /**
+   * The cancel flow splits into two steps so the UI never freezes on one
+   * long await: `requestCancel()` flips the intent synchronously (the button
+   * flips instantly), and `awaitCancelled()` waits for the pipeline to
+   * settle. A non-busy updater is already settled.
+   */
+  requestCancel(reason = '用户取消') {
+    if (!this.busy && !this.cancelling) return
+    this.cancelled = true
+    this.cancelling = true
+    this.cancelReason = reason
+    this.setPhase('cancelling')
+  }
+
+  /** Whether a cancel was requested but the pipeline has not settled yet. */
+  isCancelling() {
+    return this.cancelling
+  }
+
+  /** Current in-flight cancel promise so concurrent cancel clicks share one settle. */
+  get cancelPromise() {
+    return this._cancelPromise ?? null
+  }
+
+  async awaitCancelled() {
+    if (!this.cancelling) return this.cancelled
+    if (this._cancelPromise !== null) return this._cancelPromise
+    this._cancelPromise = this._waitCancelled()
+    try {
+      return await this._cancelPromise
+    } finally {
+      this._cancelPromise = null
+    }
+  }
+
+  /**
+   * Wait for the tracked pipeline promise to settle WITHOUT re-entering the
+   * busy flag; when a task is cancelled, the promise held by the main
+   * process settles at most TASK_CANCEL_TIMEOUT_MS later. A pipeline that
+   * never resolves (spawn errors) is dropped here — the lock-cleanup best
+   * effort below still ran, and a stale lock is reaped by its next owner.
+   */
+  async _waitCancelled() {
+    const tracked = this._pipelinePromise
+    if (tracked !== null && tracked !== undefined) {
+      const outcome = await Promise.race([
+        tracked.catch(() => null),
+        new Promise(resolve => setTimeout(resolve, 15_000)),
+      ])
+      // The cancel request may have landed after the pipeline's non-cancellable
+      // critical section (atomic switch + restart) already finished: that is
+      // a completed update, not a cancellation.
+      if (outcome !== null && outcome !== undefined && outcome.ok === true) {
+        this.cancelled = false
+        this.cancelReason = ''
+      }
+    }
+    if (this.cancelled) {
+      this.onLine(`\n✗ 更新已取消：${this.cancelReason}。旧版本继续运行。`)
+    }
+    return this.cancelled
+  }
+
   async runStep(label, run) {
     this.onLine(`\n==> ${label}`)
     const result = await run()
     if (result.code !== 0) throw new Error(`${label} 失败（退出码 ${result.code}）。详见上方日志。`)
     return result
+  }
+
+  /** Throw the canonical cancelled error at a cancellable step boundary. */
+  throwCancelled() {
+    const error = new Error(`更新已取消：${this.cancelReason}`)
+    error.code = 'CANCELLED'
+    error.name = 'UpdateCancelledError'
+    throw error
   }
 
   /**
@@ -97,6 +189,35 @@ class Updater {
     return ''
   }
 
+  /**
+   * Whether ANY runnable runtime exists for this device (npm artifact OR a
+   * source-built checkout). The connection path still falls back to the
+   * source checkout when no artifact is installed, so a device that displays
+   * a working harness must never be reported as 「未安装」.
+   */
+  async hasAnyRuntime(settings) {
+    if (settings.mode === 'local') {
+      if (runtimeStore.localActiveRuntimeDir(settings) !== null) return true
+      try {
+        const { runtimeLayout } = require('./runtime-layout')
+        if (runtimeLayout(settings.local.repoDir) !== null) return true
+      } catch {
+        // Fall through.
+      }
+      return false
+    }
+    const remoteRun = (host, inner, options) => this.connection.remoteRun(host, inner, options)
+    // The same probe the connection's isBuilt() uses for remote mode:
+    // active runtime dir first, source checkout as the legacy fallback.
+    const result = await remoteRun(
+      settings.ssh.host,
+      `if test -f "$HOME"/.dsh/runtime/current/apps/cli/lib/bin.js || test -f "$HOME"/.dsh/runtime/current/node_modules/@deepseek-ai/dsh/lib/bin.js || test -f ${remotePath(settings.ssh.remoteRepoDir)}/apps/cli/lib/bin.js || test -f ${remotePath(settings.ssh.remoteRepoDir)}/node_modules/@deepseek-ai/dsh/lib/bin.js; then echo yes; else echo no; fi`,
+      { timeoutMs: 20_000 },
+    )
+    if (result.code !== 0) return false
+    return result.lines.includes('yes')
+  }
+
   async check() {
     const settings = this.getSettings()
     // The shell installs the official npm artifact exclusively; an
@@ -108,11 +229,23 @@ class Updater {
     }
     const current = await this.npmCurrentVersion(settings)
     const currentVersion = current.startsWith('npm:') ? current.slice(4) : ''
+    // 「未安装」must mean NO runnable runtime at all. A legacy source-built
+    // deployment (pre-release devices) is NOT an npm artifact, but it IS a
+    // running harness — it just needs the user to click 更新并重启 once to
+    // migrate onto the official artifact. There is deliberately no separate
+    // migration framework: the existing update button IS the migration.
+    const hasRuntime = currentVersion !== '' || await this.hasAnyRuntime(settings)
+    const legacy = hasRuntime && currentVersion === ''
     const updateAvailable = currentVersion === '' || isNewerVersion(artifact.version, currentVersion)
-    this.onLine(`官方产物：${NPM_PACKAGE}@${artifact.version}${currentVersion !== '' ? `（当前 ${currentVersion}）` : '（未安装）'}${updateAvailable ? '，可更新。' : '，已最新。'}`)
+    const installedText = currentVersion !== '' ? `（当前 ${currentVersion}）` : legacy ? '（检测到旧版本，更新将迁移到官方产物）' : '（未安装）'
+    this.onLine(`官方产物：${NPM_PACKAGE}@${artifact.version}${installedText}${updateAvailable ? '，可更新。' : '，已最新。'}`)
     return {
       artifact, currentNpm: currentVersion, updateAvailable,
-      summary: updateAvailable ? `官方预构建版 v${artifact.version} 可用` : `官方预构建版 v${artifact.version}（已最新）`,
+      hasRuntime,
+      legacy,
+      summary: updateAvailable
+        ? `官方预构建版 v${artifact.version} 可用${legacy ? '（当前为旧版本）' : ''}`
+        : `官方预构建版 v${artifact.version}（已最新）`,
     }
   }
 
@@ -120,11 +253,45 @@ class Updater {
    * Run the update pipeline: install the official npm artifact into a
    * versioned runtime dir → verify → atomic `current` switch → restart.
    * A failed new artifact automatically rolls back to the previous version.
+   *
+   * Cancellation contract: the request path (registry query, toolchain
+   * bootstrap, download/install) is cancellable at step boundaries — a
+   * cancelled pipeline stops WITHOUT switching `current`, so the old version
+   * keeps running untouched. Once the atomic switch starts (`phase:
+   * 'activating'`), the pipeline is a non-cancellable critical section: the
+   * switch + service restart always completes (or rolls back) so the device
+   * is never left with a half-switched runtime or a stale `current`.
    * @param {object} _options - retained for call-site compatibility.
    * @returns {Promise<{ok: boolean}>}
    */
   async runPipeline(_options = {}) {
+    if (this.busy) return { ok: false, error: new Error('已有更新任务执行中') }
     this.setBusy(true)
+    this.pendingWritten = false
+    // A leftover cancellation token from an earlier aborted worker must never
+    // cancel this fresh pipeline; spawnUpdateWorker clears it for the worker
+    // path and this clears it for the in-shell path.
+    try {
+      const settings = this.getSettings()
+      if (settings.mode === 'local') runtimeStore.clearCancelToken(settings)
+    } catch {
+      // Best-effort.
+    }
+    this._pipelinePromise = this.runPipelineInner(_options)
+    const tracked = this._pipelinePromise
+    tracked.finally(() => {
+      if (this._pipelinePromise === tracked) this._pipelinePromise = null
+    }).catch(() => {})
+    return this._pipelinePromise
+  }
+
+  async runPipelineInner(_options = {}) {
+    const cancelError = () => {
+      const error = new Error(`更新已取消：${this.cancelReason}`)
+      error.code = 'CANCELLED'
+      error.name = 'UpdateCancelledError'
+      return error
+    }
     try {
       const settings = this.getSettings()
       const remoteRun = (host, inner, options) => this.connection.remoteRun(host, inner, options)
@@ -135,30 +302,40 @@ class Updater {
         }
         return { ok: true, artifact: true, version: artifactOutcome.version }
       }
-      const lockName = settings.mode === 'ssh'
-        ? `build-${settings.ssh.host}-${settings.ssh.remoteRepoDir}`
-        : `build-${path.basename(settings.local.repoDir)}`
+      const lockName = runtimeStore.buildLockName(settings)
+      const shouldAbort = () => this.cancelled
       if (settings.mode === 'ssh') {
         return await runtimeStore.withRemoteLock(settings, remoteRun, lockName, executePipeline, {
           timeoutMs: LONG_TIMEOUT_MS + 5 * 60_000,
+          shouldAbort,
         })
       }
       return await runtimeStore.withLocalLock(settings, lockName, executePipeline, {
         timeoutMs: LONG_TIMEOUT_MS + 5 * 60_000,
+        shouldAbort,
       })
     } catch (error) {
+      if (this.cancelled || error.code === 'CANCELLED') return { ok: false, cancelled: true, reason: this.cancelReason, error: cancelError() }
       this.onLine(`\n✗ ${String(error.message || error)}`)
       return { ok: false, error }
     } finally {
       // A settled pipeline (ok or error) has no unfinished intent left;
       // a killed process never reaches this point and leaves the pending
-      // file behind for next-launch resume.
+      // file behind for next-launch resume. The local install-dir cleanup is
+      // deliberately NOT tied to this flag: a cancelled local install still
+      // has to wait for its npm child to exit before it can be reaped.
       try {
         const current = this.getSettings()
-        if (current.mode === 'local') runtimeStore.clearPendingUpdate(current)
+        if (current.mode === 'local') {
+          runtimeStore.clearPendingUpdate(current)
+          runtimeStore.clearCancelToken(current)
+        }
       } catch {
         // Best-effort.
       }
+      this.pendingWritten = false
+      this.cancelling = false
+      this.setPhase('idle')
       this.setBusy(false)
     }
   }
@@ -170,11 +347,15 @@ class Updater {
    * a broken publish chain throws (no source-build fallback).
    */
   async artifactPipeline(settings) {
+    this.setPhase('querying')
     const query = await this.queryArtifact(settings)
+    if (this.cancelled) this.throwCancelled()
     if (!query.ok) {
       throw new Error(query.reason)
     }
+    this.setPhase('preparing')
     await this.ensureToolchain(settings)
+    if (this.cancelled) this.throwCancelled()
     const version = query.version
     if (settings.mode === 'ssh') {
       return this.remoteArtifactPipeline(settings, version)
@@ -184,6 +365,7 @@ class Updater {
       throw new Error('未找到兼容的 node（需 22.19+ 或 24+）。请安装 Node.js，或在「设置 → 高级」中手动指定 node 路径。')
     }
     runtimeStore.writePendingUpdate(settings, { intent: 'artifact', version })
+    this.pendingWritten = true
     const active = runtimeStore.localActiveRuntimeDir(settings)
     const currentNpm = this.npmCurrentVersion(settings)
     if (currentNpm === `npm:${version}` && active !== null) {
@@ -194,6 +376,7 @@ class Updater {
     fs.rmSync(buildDir, { recursive: true, force: true })
     fs.mkdirSync(buildDir, { recursive: true })
     this.onLine(`下载官方预构建版 ${NPM_PACKAGE}@${version} → ${buildDir} …`)
+    this.setPhase('downloading')
     let installed
     try {
       installed = await installNpmArtifact({
@@ -203,11 +386,20 @@ class Updater {
         env: tools.env,
         onLine: line => this.onLine(line),
         owner: this.owner(),
+        shouldAbort: () => this.cancelled,
       })
     } catch (error) {
+      // A cancelled local install reaps its half-written version dir right
+      // away (the child is dead by then, or the abort raced the cleanup and
+      // the next attempt re-rm's it anyway). Real failures get the same
+      // reaping: a broken version dir must never linger as a rollback target.
       fs.rmSync(buildDir, { recursive: true, force: true })
       throw error
     }
+    // Critical section starts here. Between the atomic switch and a settled
+    // service restart, cancel is ignored: the device must never be left with
+    // `current` pointing at an unverified runtime or a dead service.
+    this.setPhase('activating')
     this.onLine(`已安装 ${installed}，原子切换 current …`)
     const previous = runtimeStore.readLocalRootManifest(settings).current ?? null
     const activated = runtimeStore.activateLocalRuntime(settings, `npm:${version}`)
@@ -247,21 +439,39 @@ class Updater {
     const token = runtimeStore.versionToken(`npm:${version}`)
     const versionDir = runtimeStore.remoteVersionDir(`npm:${version}`)
     runtimeStore.writePendingUpdate(settings, { intent: 'artifact', version })
+    this.pendingWritten = true
     // Skip when the active remote runtime is already this artifact version.
     const manifest = await runtimeStore.readRemoteRootManifest(settings, remoteRun)
     const active = await runtimeStore.remoteActiveRuntimeDir(settings, remoteRun)
+    if (this.cancelled) this.throwCancelled()
     if (manifest.current === token && active !== null) {
       this.onLine(`远端官方产物 v${version} 已安装，跳过下载。`)
       return { choseArtifact: true, fresh: false, version }
     }
     this.onLine(`远端下载官方预构建版 ${NPM_PACKAGE}@${version} → ${versionDir} …`)
+    this.setPhase('downloading')
     const install = await remoteRun(
       settings.ssh.host,
       `rm -rf ${versionDir} && mkdir -p ${versionDir} && ${remoteToolchainPrefix()} cd ${versionDir} && npm install --prefix ${versionDir} --no-audit --no-fund ${NPM_PACKAGE}@${version}`,
-      { timeoutMs: 20 * 60_000, onLine: line => this.onLine(line) },
+      { timeoutMs: 20 * 60_000, onLine: line => this.onLine(line), shouldAbort: () => this.cancelled },
     )
+    if (install.aborted === true) {
+      // The ssh child group was terminated mid-install; the half-written
+      // version dir is reaped so a later rollback can never target it.
+      await remoteRun(settings.ssh.host, `rm -rf ${versionDir} 2>/dev/null || true`, { timeoutMs: 15_000 })
+      this.throwCancelled()
+    }
     if (install.code !== 0) {
       throw new Error(`远端官方产物安装失败（退出码 ${install.code}）：${install.lines.slice(-8).join('\n')}`)
+    }
+    // Cancelling the remote install only aborts at step boundaries (the ssh
+    // child group is killed by cancelSessionTask; the remote command group
+    // dies with the ssh connection and the half-written version dir is
+    // re-rm'd by the next attempt). Between `activating` and a settled
+    // restart the pipeline is a non-cancellable critical section.
+    if (this.cancelled) {
+      await remoteRun(settings.ssh.host, `rm -rf ${versionDir} 2>/dev/null || true`, { timeoutMs: 15_000 })
+      this.throwCancelled()
     }
     const verify = await remoteRun(
       settings.ssh.host,
@@ -269,6 +479,7 @@ class Updater {
       { timeoutMs: 20_000 },
     )
     if (!verify.lines.includes('ok')) throw new Error(`远端官方产物校验失败：${versionDir}`)
+    this.setPhase('activating')
     this.onLine('已安装，原子切换远端 current …')
     const previous = manifest.current ?? null
     const activated = await runtimeStore.activateRemoteRuntime(settings, remoteRun, `npm:${version}`)
