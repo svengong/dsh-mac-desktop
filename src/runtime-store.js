@@ -212,16 +212,27 @@ async function readRemoteState(settings, remoteRun) {
 }
 
 async function writeRemoteState(settings, remoteRun, state) {
-  if (!isValidState(state)) return
+  if (!isValidState(state)) return false
   const safeVersion = String(state.version).replace(/[^a-zA-Z0-9._-]/g, '').slice(0, 64) || 'unknown'
   // Trailing \n is load-bearing: remoteRun wraps commands in payload
   // markers and matches them per line; a newline-less file would fuse the
   // state JSON with the END marker on one line and break payload parsing.
-  await remoteRun(
+  const result = await remoteRun(
     settings.ssh.host,
-    `printf '{\"pid\":%s,\"port\":%s,\"version\":\"%s\"}\n' "${state.pid}" "${state.port}" "${safeVersion}" > ${REMOTE_STATE_FILE}`,
+    `printf '{\"pid\":%s,\"port\":%s,\"version\":\"%s\"}\n' "${state.pid}" "${state.port}" "${safeVersion}" > ${REMOTE_STATE_FILE} && cat ${REMOTE_STATE_FILE}`,
     { timeoutMs: 15_000 },
   )
+  if (result.code !== 0) return false
+  // Verify the round trip: the file must contain exactly what we wrote.
+  // A write that silently fails leaves a stale state whose port no longer
+  // matches the running service — the exact "port in state never updates"
+  // symptom.
+  try {
+    const written = JSON.parse(result.lines.join('\n'))
+    return isValidState(written) && written.pid === state.pid && written.port === state.port
+  } catch {
+    return false
+  }
 }
 
 async function removeRemoteState(settings, remoteRun) {

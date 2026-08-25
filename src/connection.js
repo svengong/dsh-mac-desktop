@@ -1282,18 +1282,29 @@ class ConnectionManager extends EventEmitter {
     // handoff on its own. Older remote harnesses (and older official
     // artifacts) don't recognize `--no-open`, so passing it would abort the
     // boot with "unknown option".
-    const runNode = `cd ${dir} && BIN=apps/cli/lib/bin.js; [ -f "$BIN" ] || BIN=node_modules/@deepseek-ai/dsh/lib/bin.js; exec node "$BIN" web --port ${remotePort} > ${portFile} 2>> ${logFile} < /dev/null`
-    const startCommand = `if command -v setsid >/dev/null 2>&1; then setsid sh -c ${shellQuote(runNode)} </dev/null >/dev/null 2>&1 & else nohup sh -c ${shellQuote(runNode)} >/dev/null 2>&1 </dev/null & fi; echo $! > ${pidFile}`
+    // The service writes its OWN pid before exec-ing node: `$$` is the
+    // launching sh, and `exec` replaces it with node IN THE SAME PROCESS, so
+    // pidfile always records the real node pid. Writing `$!` instead used to
+    // record the setsid wrapper's pid — on most Linux setups that wrapper
+    // exits immediately, making the wait loop below misjudge the service as
+    // dead and leaving the written state pointing at a dead pid.
+    const runNode = `cd ${dir} && BIN=apps/cli/lib/bin.js; [ -f "$BIN" ] || BIN=node_modules/@deepseek-ai/dsh/lib/bin.js; echo $$ > ${pidFile}; exec node "$BIN" web --port ${remotePort} > ${portFile} 2>> ${logFile} < /dev/null`
+    const startCommand = `if command -v setsid >/dev/null 2>&1; then setsid sh -c ${shellQuote(runNode)} </dev/null >/dev/null 2>&1 & else nohup sh -c ${shellQuote(runNode)} >/dev/null 2>&1 </dev/null & fi`
     const start = await this.remoteRun(
       settings.ssh.host,
-      `${remoteToolchainPrefix()} mkdir -p "$HOME"/.dsh; rm -f ${portFile}; ${startCommand}`,
+      `${remoteToolchainPrefix()} mkdir -p "$HOME"/.dsh; rm -f ${portFile} ${pidFile}; ${startCommand}`,
       { timeoutMs: 20_000 },
     )
     if (start.code !== 0) throw new Error(`远程服务启动失败：${start.lines.join('\n')}`)
 
+    // Wait for the service's port announcement. The crash detector only
+    // fires when the pidfile EXISTS (the service already exec'd node) AND
+    // that pid is dead — a service still starting (no pidfile yet) just
+    // keeps waiting. A wrapper-pid that exits early can therefore never be
+    // mistaken for a crashed service.
     const wait = await this.remoteRun(
       settings.ssh.host,
-      `pid=$(cat ${pidFile} 2>/dev/null || true); for i in $(seq 1 150); do line=$(tr -d '\\r' < ${portFile} 2>/dev/null | head -1); case "$line" in "dsh web: "*) echo "$line"; exit 0 ;; esac; if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then echo service-exited; tail -n 20 ${logFile} 2>/dev/null; exit 1; fi; sleep 0.2; done; echo port-timeout; exit 1`,
+      `for i in $(seq 1 150); do line=$(tr -d '\\r' < ${portFile} 2>/dev/null | head -1); case "$line" in "dsh web: "*) echo "$line"; exit 0 ;; esac; pid=$(cat ${pidFile} 2>/dev/null || true); if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then echo service-exited; tail -n 20 ${logFile} 2>/dev/null; exit 1; fi; sleep 0.2; done; echo port-timeout; exit 1`,
       { timeoutMs: 60_000 },
     )
     const announced = wait.lines.map(line => runtimeStore.parseDshWebUrl(line)).find(Boolean)
@@ -1308,7 +1319,11 @@ class ConnectionManager extends EventEmitter {
     const pid = Number((pidResult.lines[0] ?? '0').trim())
     if (!Number.isInteger(pid) || pid <= 0) throw new Error('远程服务 pid 读取失败。')
     this.remotePort = announced.port
-    await this.writeRemoteState(settings, { pid, port: announced.port, version })
+    // writeRemoteState now surfaces a failed remote write instead of
+    // silently leaving the stale state file behind (the cause of "port in
+    // state never updates" reports).
+    const written = await this.writeRemoteState(settings, { pid, port: announced.port, version })
+    if (written !== true) throw new Error('远程服务状态写入失败：远端 state 文件不可写。')
     this.log(`远程 dsh web 已监听端口 ${announced.port}。`)
     return announced.port
   }

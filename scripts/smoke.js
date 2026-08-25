@@ -324,6 +324,27 @@ async function main() {
   assert.strictEqual(remoteManifest.previous, 'v1')
   assert.strictEqual(await runtimeStore.rollbackRemoteRuntime(remoteSettings, remoteRun), 'v1')
   assert.strictEqual(remoteManifest.current, 'v1')
+  // writeRemoteState contract: a successful remote write round-trips the
+  // exact state back and returns true; a failed remote command returns
+  // false instead of silently leaving a stale state file behind.
+  const stateEchoRun = async (_host, command) => {
+    if (command.includes('desktop-web.state.json') && command.includes('cat')) {
+      return { code: 0, lines: ['{"pid":12345,"port":23456,"version":"npm0.1.1-rc.2"}'] }
+    }
+    if (command.includes('desktop-web.state.json')) {
+      return { code: 0, lines: [] }
+    }
+    return { code: 0, lines: [] }
+  }
+  assert.strictEqual(
+    await runtimeStore.writeRemoteState(remoteSettings, stateEchoRun, { pid: 12345, port: 23456, version: 'npm0.1.1-rc.2' }),
+    true,
+  )
+  const stateFailRun = async () => ({ code: 1, lines: ['disk full'] })
+  assert.strictEqual(
+    await runtimeStore.writeRemoteState(remoteSettings, stateFailRun, { pid: 1, port: 2, version: 'v' }),
+    false,
+  )
   runtimeStore.removeLocalState(runtimeSettings)
 
   // window manager: last-active device and bounds survive a reload.
