@@ -30,6 +30,11 @@ class SetupDialog {
     this.activeSection = 'connection'
     this.deviceKey = null
     this.bounds = null
+    // Set by open() while the panel's loadFile() is still in flight: the
+    // view stays hidden until did-finish-load, so the user never sees a
+    // blank in-flight page flash against the dark theme.
+    this.pendingShow = false
+    this.pendingSection = null
     // Supplies the current shell theme id so the panel boots already-skinned
     // (no light→theme flash) and reloads keep the right query param.
     this.getTheme = typeof options.getTheme === 'function' ? options.getTheme : () => 'default'
@@ -59,6 +64,14 @@ class SetupDialog {
   reload(section = this.activeSection) {
     this.activeSection = SECTIONS.includes(section) ? section : 'connection'
     if (this.view !== null && !this.view.webContents.isDestroyed()) {
+      // An on-stage panel blanks during reload — hide it and re-show once
+      // the fresh page has painted, so device switches don't flash.
+      // (`attached` is the reliable on-stage signal: open() mounts, close()
+      // unmounts. WebContentsView has no isVisible() in Electron 35.)
+      if (this.attached) {
+        this.pendingShow = true
+        this.view.setVisible(false)
+      }
       this.view.webContents.loadFile(SETTINGS_HTML, {
         query: { section: this.activeSection, embedded: '1', theme: this.getTheme() },
       })
@@ -89,7 +102,34 @@ class SetupDialog {
     this.view.webContents.loadFile(SETTINGS_HTML, {
       query: { section, embedded: '1', theme: this.getTheme() },
     })
+    this.hookLoadOnce()
     return this.view
+  }
+
+  /**
+   * Wire the did-finish-load handler that reveals the panel only after the
+   * page has painted: the in-flight loadFile() otherwise shows a blank
+   * frame that reads as a flash, especially against the dark themes.
+   * Re-registered on every ensureView (the handler survives reloads since
+   * the webContents object is kept alive).
+   */
+  hookLoadOnce() {
+    if (this.view === null) return
+    const view = this.view
+    view.webContents.on('did-finish-load', () => {
+      if (this.view !== view || view.webContents.isDestroyed()) return
+      if (this.pendingShow) {
+        this.pendingShow = false
+        if (this.attached) {
+          view.setVisible(true)
+          view.webContents.focus()
+        }
+      }
+      if (this.pendingSection !== null) {
+        this.showSection(this.pendingSection)
+        this.pendingSection = null
+      }
+    })
   }
 
   open(section = 'connection') {
@@ -103,12 +143,24 @@ class SetupDialog {
       this.attached = true
     }
     if (this.bounds !== null) view.setBounds(this.bounds)
-    view.setVisible(true)
-    this.showSection(this.activeSection)
-    view.webContents.focus()
+    if (view.webContents.isLoading()) {
+      // Page still loading: show it only after it paints. The section
+      // anchor is also deferred — the renderer's onSection listener may
+      // not be registered yet.
+      this.pendingShow = true
+      this.pendingSection = this.activeSection
+    } else {
+      view.setVisible(true)
+      this.showSection(this.activeSection)
+      view.webContents.focus()
+    }
   }
 
   close() {
+    // Cancel any deferred show: closing while the page is still loading
+    // must not resurrect the panel when did-finish-load eventually fires.
+    this.pendingShow = false
+    this.pendingSection = null
     // When the owner window has been destroyed (e.g. the window's `closed`
     // event fired during quit), the contentView is gone and the view is torn
     // down with it — nothing to detach. Bail before touching either.
