@@ -518,6 +518,13 @@ class ConnectionManager extends EventEmitter {
       else await this.connectLocal(settings)
     } catch (error) {
       this.releaseReservedPorts()
+      if (this.stopped) {
+        // Cancelled by the user (stop()) mid-connect: stay idle — no error
+        // card and no auto-reconnect; the harness tab returns to its
+        // launcher instead of resurrecting the cancelled attempt.
+        this.setStatus({ state: 'idle', detail: '已取消', serviceOwner: 'none' })
+        return
+      }
       this.setStatus({ state: 'error', detail: String(error.message || error) })
       this.emit('connect-failed', error)
     }
