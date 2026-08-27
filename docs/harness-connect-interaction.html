@@ -1,0 +1,857 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="liquid-glass-dark" data-page-node-id="cwM2pJl1LkKvIfgG6dHhNq">
+<head data-page-node-id="RoEppXuO6mzMuR3PLKtZQY">
+<meta charset="utf-8" data-page-node-id="k40FAzI19d1DXttCLH9UvA">
+<meta name="viewport" content="width=device-width, initial-scale=1" data-page-node-id="0qASoEhexqS8HSmA2FFhDy">
+<title>DSH · Harness 连接交互稿 v1</title>
+<style>
+/* ═══ tokens（取自 src/ui/shell.css，深 / 浅两套） ═══ */
+:root, :root[data-theme="liquid-glass-dark"] {
+  color-scheme: dark;
+  --ds-font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Hiragino Sans GB", sans-serif;
+  --ds-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace;
+  --ds-space-2: 8px; --ds-space-3: 12px; --ds-space-4: 16px; --ds-space-5: 20px; --ds-space-6: 24px;
+  --ds-font-size-xs: 10px; --ds-font-size-sm: 11px; --ds-font-size-base: 12px;
+  --ds-font-size-md: 13px; --ds-font-size-lg: 15px; --ds-font-size-xl: 17px;
+  --ds-control-height: 22px; --ds-control-height-sm: 18px; --ds-nav-height: 28px; --ds-sidebar-width: 224px;
+  --ds-bg: #0e0e16;
+  --ds-sidebar-bg: rgba(22, 22, 34, 0.55);
+  --ds-surface: rgba(30, 30, 46, 0.55);
+  --ds-surface-raised: rgba(42, 42, 62, 0.68);
+  --ds-surface-hover: rgba(52, 52, 76, 0.80);
+  --ds-input-bg: rgba(18, 18, 30, 0.55);
+  --ds-button-bg: rgba(52, 52, 76, 0.60);
+  --ds-button-bg-hover: rgba(68, 68, 96, 0.82);
+  --ds-border: rgba(255, 255, 255, 0.16);
+  --ds-border-strong: rgba(255, 255, 255, 0.28);
+  --ds-text: #f5f5f7; --ds-text-secondary: #d2d2d7; --ds-text-muted: #98989d;
+  --ds-accent: #0a84ff; --ds-accent-hover: #409cff; --ds-accent-soft: rgba(10, 132, 255, 0.18);
+  --ds-success: #30d158; --ds-warning: #ff9f0a; --ds-danger: #ff453a;
+  --ds-body-bg:
+    radial-gradient(1100px 600px at 85% -10%, rgba(94, 92, 230, 0.30), transparent 60%),
+    radial-gradient(900px 560px at -8% 112%, rgba(255, 45, 85, 0.16), transparent 55%),
+    radial-gradient(760px 460px at 52% 122%, rgba(48, 209, 88, 0.12), transparent 60%),
+    var(--ds-bg);
+  --ds-radius-xs: 8px; --ds-radius-sm: 12px; --ds-radius-md: 14px; --ds-radius: 20px;
+  --ds-shadow-md: 0 12px 40px rgba(0, 0, 0, 0.40);
+  --ds-blur: 22px; --ds-saturate: 185%;
+  --ds-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.22), inset 0 -1px 0 rgba(255, 255, 255, 0.08);
+  --ds-ease: cubic-bezier(0.22, 0.61, 0.36, 1);
+  --ds-duration-fast: 90ms; --ds-duration: 160ms;
+}
+:root[data-theme="liquid-glass"] {
+  color-scheme: light;
+  --ds-bg: #e8ecf5;
+  --ds-sidebar-bg: rgba(255, 255, 255, 0.42);
+  --ds-surface: rgba(255, 255, 255, 0.55);
+  --ds-surface-raised: rgba(255, 255, 255, 0.68);
+  --ds-surface-hover: rgba(255, 255, 255, 0.80);
+  --ds-input-bg: rgba(255, 255, 255, 0.50);
+  --ds-button-bg: rgba(255, 255, 255, 0.60);
+  --ds-button-bg-hover: rgba(255, 255, 255, 0.82);
+  --ds-border: rgba(255, 255, 255, 0.70);
+  --ds-border-strong: rgba(255, 255, 255, 0.92);
+  --ds-text: #1c1c1e; --ds-text-secondary: #3a3a3c; --ds-text-muted: #6e6e73;
+  --ds-accent: #0a84ff; --ds-accent-hover: #3a96ff; --ds-accent-soft: rgba(10, 132, 255, 0.14);
+  --ds-success: #28a745; --ds-warning: #d97706; --ds-danger: #e5484d;
+  --ds-body-bg:
+    radial-gradient(1100px 600px at 85% -10%, rgba(94, 92, 230, 0.38), transparent 60%),
+    radial-gradient(900px 560px at -8% 112%, rgba(255, 45, 85, 0.22), transparent 55%),
+    radial-gradient(760px 460px at 52% 122%, rgba(48, 209, 88, 0.16), transparent 60%),
+    var(--ds-bg);
+  --ds-shadow-md: 0 12px 40px rgba(30, 40, 90, 0.14);
+  --ds-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.65), inset 0 -1px 0 rgba(255, 255, 255, 0.14);
+}
+
+/* ═══ base ═══ */
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0;
+  font-family: var(--ds-font);
+  background: var(--ds-body-bg);
+  background-attachment: fixed;
+  color: var(--ds-text);
+  font-size: var(--ds-font-size-md);
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+}
+button, input, select { font-family: var(--ds-font); }
+button { cursor: pointer; }
+button:focus-visible, input:focus-visible, select:focus-visible {
+  outline: none; box-shadow: 0 0 0 2px var(--ds-accent-soft); border-color: var(--ds-accent);
+}
+
+/* ═══ prototype page chrome（非产品 UI） ═══ */
+.proto-page {
+  max-width: 1280px; margin: 0 auto; padding: 26px 28px 48px;
+  display: grid; grid-template-columns: 1fr 252px; gap: 20px; align-items: start;
+}
+.proto-head { grid-column: 1 / -1; }
+.proto-head h1 { margin: 0; font-size: 19px; font-weight: 700; }
+.proto-head p { margin: 5px 0 0; color: var(--ds-text-muted); font-size: var(--ds-font-size-base); max-width: 900px; }
+.proto-head .kbd { font-family: var(--ds-mono); font-size: 10px; padding: 1px 5px; border: 1px solid var(--ds-border); border-radius: 4px; color: var(--ds-text-secondary); }
+
+.proto-window {
+  border: 1px solid var(--ds-border-strong);
+  border-radius: var(--ds-radius-md);
+  background: var(--ds-bg);
+  box-shadow: var(--ds-highlight), var(--ds-shadow-md);
+  overflow: hidden;
+  height: 700px;
+  display: flex; flex-direction: column;
+  position: relative;
+}
+.proto-controls {
+  border: 1px solid var(--ds-border);
+  border-radius: var(--ds-radius-sm);
+  background: var(--ds-surface);
+  backdrop-filter: blur(var(--ds-blur)) saturate(var(--ds-saturate));
+  padding: 14px;
+  display: flex; flex-direction: column; gap: 10px;
+  position: sticky; top: 20px;
+}
+.proto-controls h2 { margin: 0; font-size: var(--ds-font-size-base); font-weight: 600; color: var(--ds-text-secondary); letter-spacing: 0.04em; }
+.proto-controls .grp { display: flex; flex-wrap: wrap; gap: 6px; }
+.proto-controls .row { display: flex; align-items: center; gap: 7px; font-size: var(--ds-font-size-base); color: var(--ds-text-secondary); }
+.proto-controls .state-now {
+  font-family: var(--ds-mono); font-size: var(--ds-font-size-sm); color: var(--ds-text-muted);
+  border-top: 1px solid var(--ds-border); padding-top: 9px; margin-top: 2px;
+}
+.proto-controls .note { font-size: 10.5px; color: var(--ds-text-muted); line-height: 1.6; }
+.ctl-btn {
+  min-height: 24px; padding: 2px 10px; border: 1px solid var(--ds-border); border-radius: 8px;
+  background: var(--ds-button-bg); color: var(--ds-text); font-size: var(--ds-font-size-base);
+  transition: background var(--ds-duration-fast) var(--ds-ease);
+}
+.ctl-btn:hover { background: var(--ds-button-bg-hover); }
+.ctl-btn.on { background: var(--ds-accent); border-color: var(--ds-accent); color: #fff; }
+
+/* ═══ app shell frame（46px，与真实 SHELL_FRAME_HEIGHT 一致） ═══ */
+.shell-frame {
+  flex: none; height: 46px;
+  display: flex; align-items: center; gap: 14px;
+  padding: 0 12px 0 84px;
+  background: color-mix(in srgb, var(--ds-sidebar-bg) 86%, var(--ds-bg));
+  border-bottom: 1px solid var(--ds-border);
+  box-shadow: var(--ds-highlight);
+  backdrop-filter: blur(var(--ds-blur)) saturate(var(--ds-saturate));
+  position: relative; z-index: 10;
+}
+.lights { position: absolute; left: 16px; top: 50%; transform: translateY(-50%); display: flex; gap: 8px; }
+.lights i { width: 12px; height: 12px; border-radius: 50%; display: block; }
+.lights i:nth-child(1) { background: #ff5f57; } .lights i:nth-child(2) { background: #febc2e; } .lights i:nth-child(3) { background: #28c840; }
+.shell-frame-brand { flex: none; display: flex; align-items: center; gap: 7px; font-size: var(--ds-font-size-base); font-weight: 700; letter-spacing: 0.02em; }
+.shell-frame-mark {
+  width: 18px; height: 18px; border-radius: var(--ds-radius-xs);
+  background: linear-gradient(135deg, var(--ds-accent), var(--ds-accent-hover));
+  color: #fff; display: inline-flex; align-items: center; justify-content: center;
+  font-size: var(--ds-font-size-xs); font-weight: 700; box-shadow: 0 1px 2px rgba(0,0,0,.18);
+}
+.shell-frame-nav { flex: 1; min-width: 0; display: flex; align-items: center; gap: 2px; height: 100%; }
+.shell-frame-nav button {
+  height: var(--ds-nav-height); padding: 0 11px; border: none; border-radius: var(--ds-radius-sm);
+  background: transparent; color: var(--ds-text-secondary); font-size: var(--ds-font-size-md); line-height: 20px;
+  transition: background var(--ds-duration-fast) var(--ds-ease), color var(--ds-duration-fast) var(--ds-ease);
+}
+.shell-frame-nav button:hover { background: var(--ds-surface-hover); color: var(--ds-text); }
+.shell-frame-nav button.active { background: var(--ds-accent); color: #fff; font-weight: 600; }
+.shell-frame-nav .new-win { min-width: 28px; padding: 0 8px; font-size: var(--ds-font-size-lg); }
+.shell-frame-context { flex: none; max-width: 42%; display: flex; align-items: center; gap: 10px; min-width: 0; }
+.shell-frame-terminal {
+  flex: none; padding: 2px 8px; border-radius: var(--ds-radius-xs); background: var(--ds-accent-soft);
+  color: var(--ds-text-secondary); font-size: var(--ds-font-size-sm); font-weight: 600; font-variant-numeric: tabular-nums;
+  border: 1px solid transparent; cursor: pointer; font-family: var(--ds-font);
+  transition: border-color var(--ds-duration-fast) var(--ds-ease), color var(--ds-duration-fast) var(--ds-ease);
+}
+.shell-frame-terminal:hover { border-color: var(--ds-accent); color: var(--ds-text); }
+.shell-frame-status { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ds-text-muted); font-size: var(--ds-font-size-sm); }
+.shell-frame-status.ok { color: var(--ds-success); }
+.shell-frame-status.busy { color: var(--ds-accent); }
+.shell-frame-status.err { color: var(--ds-danger); }
+
+/* ═══ viewport / stages ═══ */
+.shell-viewport { flex: 1; min-height: 0; position: relative; background: var(--ds-body-bg); }
+.stage { position: absolute; inset: 0; display: none; }
+.stage.show { display: block; animation: stage-in var(--ds-duration) var(--ds-ease); }
+@keyframes stage-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+
+/* ═══ ① 未连接：内嵌连接表单 ═══ */
+.welcome { height: 100%; display: flex; align-items: center; justify-content: center; padding: 30px; overflow: auto; }
+.welcome-card {
+  width: 400px; padding: 24px 26px;
+  border: 1px solid var(--ds-border); border-radius: var(--ds-radius);
+  background: var(--ds-surface);
+  backdrop-filter: blur(var(--ds-blur)) saturate(var(--ds-saturate));
+  box-shadow: var(--ds-highlight), var(--ds-shadow-md);
+}
+.welcome-title { display: flex; align-items: center; gap: 10px; font-size: var(--ds-font-size-xl); font-weight: 700; }
+.welcome-title .shell-frame-mark { width: 24px; height: 24px; font-size: var(--ds-font-size-sm); }
+.welcome-sub { margin: 4px 0 16px; color: var(--ds-text-muted); font-size: var(--ds-font-size-base); }
+.field { margin-bottom: var(--ds-space-3); }
+.field:last-child { margin-bottom: 0; }
+.field-label { display: block; margin-bottom: 4px; color: var(--ds-text-secondary); font-size: var(--ds-font-size-base); font-weight: 600; }
+.field-label small { color: var(--ds-text-muted); font-weight: 400; }
+.field-hint { margin: 4px 0 0; color: var(--ds-text-muted); font-size: var(--ds-font-size-sm); }
+.input, .select {
+  width: 100%; min-height: var(--ds-control-height); padding: 1px 9px;
+  border: 1px solid var(--ds-border-strong); border-radius: var(--ds-radius-xs);
+  background: var(--ds-input-bg); color: var(--ds-text); font-size: var(--ds-font-size-base);
+}
+.picker { display: flex; gap: 6px; }
+.picker .input, .picker .select { flex: 1; min-width: 0; }
+.segmented { display: inline-flex; padding: 1px; border: 1px solid var(--ds-border-strong); border-radius: var(--ds-radius-sm); background: var(--ds-input-bg); }
+.segmented button {
+  padding: 1px 12px; min-height: 20px; border: none; border-radius: var(--ds-radius-xs);
+  background: transparent; color: var(--ds-text); font-size: var(--ds-font-size-base); line-height: 18px;
+  transition: background var(--ds-duration-fast) var(--ds-ease);
+}
+.segmented button.active { background: var(--ds-accent); color: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.16); }
+.recent { display: flex; align-items: center; gap: 6px; margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--ds-border); }
+.recent > span { color: var(--ds-text-muted); font-size: var(--ds-font-size-sm); }
+.chip {
+  padding: 2px 10px; border: 1px solid var(--ds-border); border-radius: var(--ds-radius-full);
+  background: var(--ds-button-bg); color: var(--ds-text-secondary); font-size: var(--ds-font-size-base);
+  transition: all var(--ds-duration-fast) var(--ds-ease);
+}
+.chip:hover { background: var(--ds-accent-soft); border-color: var(--ds-accent); color: var(--ds-text); }
+
+/* ═══ buttons ═══ */
+.button {
+  display: inline-flex; align-items: center; justify-content: center; gap: 5px;
+  min-height: var(--ds-control-height); padding: 1px 11px;
+  border: 1px solid var(--ds-border-strong); border-radius: var(--ds-radius-sm);
+  background: var(--ds-button-bg); color: var(--ds-text); font-size: var(--ds-font-size-md); line-height: 18px;
+  white-space: nowrap; box-shadow: var(--ds-highlight);
+  transition: background var(--ds-duration-fast) var(--ds-ease);
+}
+.button:hover { background: var(--ds-button-bg-hover); }
+.button:disabled { opacity: 0.4; cursor: default; }
+.button.primary { background: var(--ds-accent); border-color: var(--ds-accent); color: #fff; }
+.button.primary:hover { background: var(--ds-accent-hover); border-color: var(--ds-accent-hover); }
+.button.danger { color: var(--ds-danger); border-color: color-mix(in srgb, var(--ds-danger) 45%, transparent); }
+.button.danger:hover { background: color-mix(in srgb, var(--ds-danger) 12%, transparent); border-color: var(--ds-danger); }
+.button.small { min-height: var(--ds-control-height-sm); padding: 0 8px; font-size: var(--ds-font-size-sm); line-height: 16px; }
+.welcome-card .button.primary { width: 100%; min-height: 26px; margin-top: 4px; }
+
+/* ═══ ② / ⑤ loading / error 面板 ═══ */
+.loading-panel { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 22px; padding: 28px; }
+.loading-stage { display: flex; align-items: center; gap: var(--ds-space-4); }
+.loading-spinner { width: 32px; height: 32px; flex: none; border-radius: 50%; border: 3px solid var(--ds-border-strong); border-top-color: var(--ds-accent); }
+.loading-panel[data-tone="busy"] .loading-spinner { animation: spin 0.9s linear infinite; }
+.loading-panel[data-tone="error"] .loading-spinner { border-color: var(--ds-danger); border-top-color: var(--ds-danger); }
+@keyframes spin { to { transform: rotate(360deg); } }
+.loading-copy { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.loading-title { font-size: var(--ds-font-size-lg); font-weight: 600; }
+.loading-panel[data-tone="error"] .loading-title { color: var(--ds-danger); }
+.loading-status { font-size: var(--ds-font-size-base); color: var(--ds-text-muted); max-width: 560px; line-height: 1.5; }
+.loading-actions { display: flex; align-items: center; gap: var(--ds-space-2); margin-top: var(--ds-space-3); }
+.loading-log { width: min(720px, 100%); height: 220px; }
+
+.log-wrap { display: flex; flex-direction: column; min-height: 0; border: 1px solid var(--ds-border); border-radius: var(--ds-radius-md); background: var(--ds-input-bg); overflow: hidden; }
+.log-tools {
+  flex: none; display: flex; align-items: center; justify-content: space-between; gap: var(--ds-space-2);
+  padding: 4px 6px 4px 10px; border-bottom: 1px solid var(--ds-border); background: var(--ds-surface-raised);
+}
+.log-tools .log-label { color: var(--ds-text-muted); font-size: var(--ds-font-size-xs); font-family: var(--ds-mono); }
+.log-tools .log-hint { color: var(--ds-text-muted); font-size: var(--ds-font-size-xs); }
+.log {
+  flex: 1; min-height: 0; margin: 0; padding: var(--ds-space-2) 10px; overflow: auto;
+  color: var(--ds-text-secondary); font-family: var(--ds-mono); font-size: var(--ds-font-size-sm);
+  line-height: 1.55; white-space: pre-wrap; word-break: break-all; user-select: text; -webkit-user-select: text;
+}
+.log .ok { color: var(--ds-success); }
+.log .err { color: var(--ds-danger); }
+.log .dim { color: var(--ds-text-muted); }
+
+/* ═══ ③ 就绪：web 界面骨架 ═══ */
+.webapp { position: absolute; inset: 0; display: flex; }
+.webapp-side {
+  flex: none; width: 224px; padding: 14px 10px;
+  background: var(--ds-sidebar-bg); border-right: 1px solid var(--ds-border);
+  backdrop-filter: blur(var(--ds-blur)) saturate(var(--ds-saturate));
+  display: flex; flex-direction: column; gap: 6px;
+}
+.webapp-side .side-label { color: var(--ds-text-muted); font-size: var(--ds-font-size-xs); padding: 0 8px 4px; font-family: var(--ds-mono); }
+.sess {
+  display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: var(--ds-radius-xs);
+  font-size: var(--ds-font-size-base); color: var(--ds-text-secondary);
+}
+.sess.on { background: var(--ds-accent-soft); color: var(--ds-text); }
+.sess i { width: 7px; height: 7px; border-radius: 50%; background: var(--ds-text-muted); flex: none; }
+.sess.on i { background: var(--ds-accent); }
+.webapp-main { flex: 1; min-width: 0; display: flex; flex-direction: column; padding: 18px 20px; }
+.bubble { max-width: 66%; padding: 9px 13px; border-radius: 14px; font-size: var(--ds-font-size-md); color: var(--ds-text-secondary); }
+.bubble.ai { align-self: flex-start; background: var(--ds-surface-raised); border-bottom-left-radius: 4px; }
+.bubble.me { align-self: flex-end; background: var(--ds-accent-soft); color: var(--ds-text); border-bottom-right-radius: 4px; }
+.webapp-input {
+  margin-top: auto; display: flex; align-items: center; gap: 8px;
+  border: 1px solid var(--ds-border-strong); border-radius: var(--ds-radius-sm);
+  background: var(--ds-input-bg); padding: 8px 12px; color: var(--ds-text-muted); font-size: var(--ds-font-size-md);
+}
+.webapp-input .send { margin-left: auto; color: var(--ds-accent); font-size: var(--ds-font-size-lg); }
+.reconnect-bar {
+  position: absolute; top: 0; left: 0; right: 0; z-index: 5;
+  display: none; align-items: center; justify-content: center; gap: 9px;
+  padding: 7px 14px; font-size: var(--ds-font-size-base); color: var(--ds-warning);
+  background: color-mix(in srgb, var(--ds-warning) 12%, var(--ds-bg));
+  border-bottom: 1px solid color-mix(in srgb, var(--ds-warning) 35%, transparent);
+  backdrop-filter: blur(var(--ds-blur));
+}
+.reconnect-bar.show { display: flex; }
+.reconnect-bar .dot-flash { width: 9px; height: 9px; border-radius: 50%; background: var(--ds-warning); animation: blink 1s ease infinite; }
+@keyframes blink { 50% { opacity: 0.25; } }
+
+/* ═══ 设置 tab（连接 + 更新分区，内部分段） ═══ */
+.panel-view { height: 100%; overflow: auto; padding: 20px 26px; }
+.panel-view .page-title { font-size: var(--ds-font-size-xl); font-weight: 700; margin: 0 0 3px; }
+.panel-view .page-sub { color: var(--ds-text-muted); font-size: var(--ds-font-size-base); margin: 0; }
+.settings-head {
+  display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px;
+  padding-bottom: 14px; border-bottom: 1px solid var(--ds-border);
+}
+.settings-head .spacer { flex: 1; }
+.settings-head .close-btn { flex: none; margin-top: 2px; }
+.panel-card {
+  width: min(560px, 100%); padding: 16px 18px;
+  border: 1px solid var(--ds-border); border-radius: var(--ds-radius);
+  background: var(--ds-surface); backdrop-filter: blur(var(--ds-blur)) saturate(var(--ds-saturate));
+  box-shadow: var(--ds-highlight);
+}
+.panel-note {
+  margin-top: 12px; padding: 8px 12px; border-radius: var(--ds-radius-xs);
+  background: var(--ds-accent-soft); color: var(--ds-text-secondary); font-size: var(--ds-font-size-base); line-height: 1.5;
+}
+.panel-actions { display: flex; gap: 8px; margin-top: 14px; }
+.comp-row { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--ds-border); }
+.comp-row:last-child { border-bottom: none; }
+.comp-row .name { font-weight: 600; }
+.comp-row .meta { color: var(--ds-text-muted); font-size: var(--ds-font-size-base); }
+.comp-row .grow { flex: 1; }
+.badge { display: inline-flex; padding: 1px 8px; border-radius: var(--ds-radius-full); border: 1px solid var(--ds-border); font-size: var(--ds-font-size-sm); color: var(--ds-text-secondary); }
+.badge.ok { color: var(--ds-success); border-color: color-mix(in srgb, var(--ds-success) 40%, transparent); }
+.badge.warn { color: var(--ds-warning); border-color: color-mix(in srgb, var(--ds-warning) 40%, transparent); }
+
+/* ═══ toast ═══ */
+.toast {
+  position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%) translateY(8px);
+  background: var(--ds-surface-raised); border: 1px solid var(--ds-border-strong); border-radius: var(--ds-radius-full);
+  padding: 7px 16px; font-size: var(--ds-font-size-base); color: var(--ds-text);
+  box-shadow: var(--ds-shadow-md); backdrop-filter: blur(var(--ds-blur));
+  opacity: 0; pointer-events: none; transition: all var(--ds-duration) var(--ds-ease); z-index: 99;
+}
+.toast.show { opacity: 1; transform: translateX(-50%); }
+
+@media (max-width: 980px) { .proto-page { grid-template-columns: 1fr; } .proto-controls { position: static; } }
+</style>
+</head>
+<body data-page-node-id="THGlMNnL5YkiErBKDcjiIq">
+<div class="proto-page" data-page-node-id="MdPz3MOclIByuUnN0OQNfQ">
+
+  <header class="proto-head" data-page-node-id="4lNLxWt8HvyFhOBYVDwGSj">
+    <h1 data-page-node-id="ycXOVrUF5ySwCdyK5Uun28">DSH · Harness 连接交互稿 v1</h1>
+    <p data-page-node-id="EXeX8v8udBG3GjpmP5cS73">核心：Harness tab 是唯一舞台——未连接时<b data-page-node-id="YymnZ2QpbkFG65mRPVTEpD">内嵌连接表单</b>，保存后<b data-page-node-id="Cvy8hhdabzyjDt0HIWl7zn">原位进入连接中</b>（跑马灯 + 实时日志，无按钮），加载完成自动进场 Web 界面，失败<b data-page-node-id="2Cp5tVIQERno2W0xT54dJY">就地恢复</b>。主导航只剩 <b>Harness / 设置</b> 两项：原「连接」tab 并入「设置」（内部分段：连接 | 更新），终端徽标（DSH-[…]）可点击直达连接配置。直接点击窗口里的控件体验完整流程；右侧控制台可直达各状态。</p>
+  </header>
+
+  <!-- ═══════════ 模拟的应用窗口 ═══════════ -->
+  <div class="proto-window" id="app" data-page-node-id="p5l79W4RSUKdGhDE9GHFzb">
+    <header class="shell-frame" data-page-node-id="XwKpStJKCOQLZNAdAT0Ptv">
+      <span class="lights" title="模拟 macOS 窗口控制" data-page-node-id="41sZKSfCCAtgKh8m1mzWGS"><i data-page-node-id="BMIGfN3St647GEsv5UPsiF"></i><i data-page-node-id="lWw7ajKRpNVVBApo3x2n0N"></i><i data-page-node-id="Eepjob6KOxjGAGCagxhZww"></i></span>
+      <div class="shell-frame-brand" data-page-node-id="sYYCAHXn5VewMiksmbwcUd"><span class="shell-frame-mark" data-page-node-id="UjRg0QLN7HpWTUGFYiggsx">DS</span><span data-page-node-id="7wLEMiBLfPA1ob52cgeEgK">DSH</span></div>
+      <nav class="shell-frame-nav" id="nav" data-page-node-id="BX07Po9fvECJkYAQb2Uf1s">
+        <button type="button" data-view="harness" class="active" data-page-node-id="Rwzv7UZPG1dJALWgE1QmGs">Harness</button>
+        <button type="button" data-view="settings" data-page-node-id="XGrS7kIJkDJW9zCyP8HbWk">设置</button>
+        <button type="button" class="new-win" id="btn-new-window" title="新建窗口（⌘N）" data-page-node-id="KSCXKnnhshkKFdphH162Qj">＋</button>
+      </nav>
+      <div class="shell-frame-context" data-page-node-id="yzTSHr17Ye9BQYlxVtGZAy">
+        <button type="button" class="shell-frame-terminal" id="terminal-chip" title="当前终端 · 点击管理连接配置" data-page-node-id="5FBjsk4UlN8XIgPkpHHvce">DSH-[本地]</button>
+        <span class="shell-frame-status" id="frame-status" data-page-node-id="7sQ1AD4oE8VoHDRBxHb7Zw">未连接</span>
+      </div>
+    </header>
+
+    <main class="shell-viewport" data-page-node-id="2CYIBfdWIIxz8K9K27WJg3">
+
+      <!-- ① 未连接 -->
+      <section class="stage" id="stage-welcome" data-page-node-id="Uv1saDqKh7vWk5DrAstk8m">
+        <div class="welcome" data-page-node-id="WamoHJAJ6AB13GDHVw7OzD">
+          <div class="welcome-card" data-page-node-id="og1tEBRxKl7HbqVH1sVngH">
+            <div class="welcome-title" data-page-node-id="gNaxIj5U8ykuBWUgr2qV4f"><span class="shell-frame-mark" data-page-node-id="aCZOCUeVQQtOjW3PMJViX4">DS</span>选择终端</div>
+            <div class="welcome-sub" data-page-node-id="o38UXjAAe1l4bgk6wFORdZ">点击已连接过的终端直接进入</div>
+            <div class="recent" style="flex-direction:column;align-items:stretch;gap:6px;margin-top:2px" data-page-node-id="qE5qjNN1bpDTDCykAJKJtE">
+              <button type="button" class="chip" data-quick="local" style="min-height:34px;justify-content:flex-start;padding:6px 12px" data-page-node-id="dxljbNNpEgoOcgaJYwJyau">本地 dev <span style="color:var(--ds-text-muted);font-size:11px;margin-left:8px">本地</span></button>
+              <button type="button" class="chip" data-quick="ssh" style="min-height:34px;justify-content:flex-start;padding:6px 12px" data-page-node-id="GwvEsACD1uSUOa6h8Uth4q">machine:home4 <span style="color:var(--ds-text-muted);font-size:11px;margin-left:8px">SSH 远程</span> <span style="color:var(--ds-success);font-size:11px;margin-left:auto">已打开</span></button>
+            </div>
+            <button type="button" class="button" id="btn-save" style="width:100%;margin-top:14px" data-page-node-id="RSGYRdi0kGsUh3i9CD9NvY">连接其他终端…（进入设置 · 连接）</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- ② 连接中 / 初始化构建 -->
+      <section class="stage" id="stage-loading" data-page-node-id="rA2G5yYfSQueGXP0kd1NjM">
+        <div class="loading-panel" data-tone="busy" data-page-node-id="iwIMeWFZNhDp7lnCk7ZRWz">
+          <div class="loading-stage" data-page-node-id="raEXiaQNOLAhefOifHi8dO">
+            <div class="loading-spinner" aria-hidden="true" data-page-node-id="gdC664xhFBH1PacwnavItB"></div>
+            <div class="loading-copy" data-page-node-id="ZiUYryUoAoJDrvLnlGHVS4">
+              <div class="loading-title" id="loading-title" data-page-node-id="1klCDV3rmQJlhwsv0alHSu">正在连接…</div>
+              <div class="loading-status" id="loading-status" data-page-node-id="DEmlM3bt5rLbfIzHGQxYHD"></div>
+              <div class="loading-actions" id="loading-actions" style="display:none" data-page-node-id="CFuSwSpiVgdKEaM2bc6tQa">
+                <button type="button" class="button danger" id="btn-cancel-build" data-page-node-id="Ig2oUs9nlEZbJFHEANMSSV">取消</button>
+              </div>
+            </div>
+          </div>
+          <div class="loading-log log-wrap" data-page-node-id="WBz7LG11wXgGgGgpKDAH3U">
+            <div class="log-tools" data-page-node-id="f9l7GgtqrMdY82cnMY8prj">
+              <span class="log-label" data-page-node-id="gNXIFgwkdYrVSY36Gj7OXb">实时日志</span>
+              <span class="log-hint" data-page-node-id="4SfLt8ffIVXlNj3S5BIlPB">自动滚动 · 进入时回放历史</span>
+            </div>
+            <pre class="log" id="loading-log" data-page-node-id="uT21w1LNNwC6MEzgwXgJLQ"></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- ⑤ 连接失败 -->
+      <section class="stage" id="stage-error" data-page-node-id="reSEsCJWl2IxHX9WupeGPc">
+        <div class="loading-panel" data-tone="error" data-page-node-id="dAgw38eOSXOUeUSgdhTB7M">
+          <div class="loading-stage" data-page-node-id="FASUtgEs9iFl3zzhaWNBhW">
+            <div class="loading-spinner" aria-hidden="true" data-page-node-id="5Gx5RuHbVJKpNTrwoKAtSm"></div>
+            <div class="loading-copy" data-page-node-id="Gdgbm7x6r4bim6lz6YAmxp">
+              <div class="loading-title" data-page-node-id="XNiM4ea42gRCPS7AiIbJyl">连接失败</div>
+              <div class="loading-status" id="error-status" data-page-node-id="SBED6lNtvVw1TMh7YVCQQR">服务启动超时（60s）：远端端口 3080 未监听</div>
+              <div class="loading-actions" data-page-node-id="MGcrJ2u1km3c8AyAHtZENB">
+                <button type="button" class="button primary" id="btn-retry" data-page-node-id="BjPyyPI04tEioXB9ekedws">重试</button>
+                <button type="button" class="button" id="btn-edit-config" data-page-node-id="THmoeDUWw0623vDa6uFWix">修改配置</button>
+              </div>
+            </div>
+          </div>
+          <div class="loading-log log-wrap" data-page-node-id="wL6LV73Wu5yf6MRTul7VdV">
+            <div class="log-tools" data-page-node-id="5VxK9sMICsdGNumUz7dn5O">
+              <span class="log-label" data-page-node-id="u5PsUq03PfD5qv1ip7drQp">实时日志</span>
+              <span class="log-hint" data-page-node-id="QSJHfuxeXPbLbxaQQVBAyz">保留现场，便于定位</span>
+            </div>
+            <pre class="log" id="error-log" data-page-node-id="YN2Fzk5tVXvLsW7Yb3A9wk"></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- ③ 就绪 -->
+      <section class="stage" id="stage-ready" data-page-node-id="ar45zxOfTyW5xQm9w4JOQE">
+        <div class="webapp" data-page-node-id="HOGY3Z6sWJHVlOlCFM110C">
+          <aside class="webapp-side" data-page-node-id="3lLDdo0ExACZvCrNsI2kdt">
+            <div class="side-label" data-page-node-id="Yig6izgaPLZqqMNJqBOFod">会话</div>
+            <div class="sess on" data-page-node-id="JqLIVYG5ttQ1pIVEgF7WK3"><i data-page-node-id="AsbH8BCOXvln94BfuhUebW"></i>深度调查 · tdir 重构</div>
+            <div class="sess" data-page-node-id="3om1H59Aa1xvikIZ7PWsIS"><i data-page-node-id="chOnsBACMhWkZIPVKssYrG"></i>周报误报分析</div>
+            <div class="sess" data-page-node-id="0tUNtt2CSyGOXiP8YbKEhY"><i data-page-node-id="COISPMUQPVPuHL2v9CSeeO"></i>nezha-am2 逆向</div>
+            <div class="sess" data-page-node-id="ByKjoBWclNAHqhFeYnTtEA"><i data-page-node-id="3OEAZr7479qxALVYwKEi8Y"></i>IOC 扩散狩猎</div>
+          </aside>
+          <div class="webapp-main" data-page-node-id="ncRoCvNevbpj0w0WmKMFgu">
+            <div class="bubble ai" data-page-node-id="5UOUGhDGE5j11X9nVdL641">连接已建立，Harness 就绪。这是 Web 界面示意骨架。</div>
+            <div class="bubble me" data-page-node-id="dGCWbFa4BKzYgEir0oAeEZ">展示用占位</div>
+            <div class="bubble ai" data-page-node-id="qUKdtuRmTWnecZQHGpv1ik">就绪后断线重连只走顶部轻提示条（见控制台「模拟断线」），不再回到全屏加载。</div>
+            <div class="webapp-input" data-page-node-id="I8UYq9oZ1lIxRbAUxEpOAU">输入消息…<span class="send" data-page-node-id="pSRgiH47m9WArVg1wlUm5l">↗</span></div>
+          </div>
+        </div>
+        <div class="reconnect-bar" id="reconnect-bar" data-page-node-id="4DfqkxSUZPvXJnYMgAV9k3">
+          <span class="dot-flash" data-page-node-id="pAtAq1gfVeC40MTclLuxaq"></span>连接中断 · 正在重连（第 1 次）…
+        </div>
+      </section>
+
+      <!-- 设置 tab（原「连接」tab 已并入：连接 / 更新两个分区，内部分段导航） -->
+      <section class="stage" id="stage-settings" data-page-node-id="QeBkJ23lOCP3OGY9njErL2">
+        <div class="panel-view" data-page-node-id="02yJIUYcASzwNAZC4CkjlR">
+          <div class="settings-head">
+            <div>
+              <h2 class="page-title" data-page-node-id="8CjK8GcwekdPp7ymclvzdM">设置</h2>
+              <p class="page-sub">更新 · 连接 · 日志（单页罗列，无切换）</p>
+            </div>
+            <span class="spacer"></span>
+            <button type="button" class="button small close-btn" id="btn-close-settings">关闭</button>
+          </div>
+
+          <div id="sec-updates">
+            <div class="page-block-head" style="font-size:14px;font-weight:600;margin-bottom:6px">更新</div>
+            <div class="panel-card" data-page-node-id="2wLi9iHBXjlyoLjon3Jv3z">
+              <div class="comp-row" data-page-node-id="jIgXm6O7eYjyIUIUBLBqCo">
+                <span class="name" data-page-node-id="4RRmcjPZLFZVXqBEIA9LH1">Harness</span>
+                <span class="meta" data-page-node-id="lzOx8gcIygHYWTzYTbVbpR">当前 npm:0.9.4 · 最新 npm:0.9.6</span>
+                <span class="grow" data-page-node-id="kFkGFtokeJEBq9kH6PatzX"></span>
+                <span class="badge warn" data-page-node-id="DuOtJQytv7dzQ7cO1GNI9g">可更新</span>
+                <button type="button" class="button small" data-page-node-id="hj0DAb4UEEBx3WZG1qpjMC">检查</button>
+                <button type="button" class="button primary small" data-page-node-id="c09R0H0U1vL6CjLYUaHitt">更新并重启</button>
+              </div>
+            </div>
+          </div>
+
+          <div id="sec-connection" style="margin-top:18px">
+            <div class="page-block-head" style="font-size:14px;font-weight:600;margin-bottom:6px">连接</div>
+            <div class="panel-card" data-page-node-id="rBxUvYFfNSvWi6GItlXZMb">
+              <div class="field" data-page-node-id="ItZiVLq5auoCmdQpQFUjJU">
+                <div class="segmented" id="mode-switch-mgmt" data-page-node-id="rCGr1EU2XnotV2P4Csz3Xd">
+                  <button type="button" data-mode="local" class="active" data-page-node-id="M7637UCF0ugnIY1EbkEc7I">本地</button>
+                  <button type="button" data-mode="ssh" data-page-node-id="TDFmx0l3Wk2ElmxRHpJ68k">SSH 远程</button>
+                </div>
+              </div>
+              <div class="field" data-page-node-id="dMqMt6ZlIyc5J52cnwjzo9">
+                <label class="field-label" data-page-node-id="cIUfHTLIENUmVw81TGHGzx">仓库目录</label>
+                <div class="picker" data-page-node-id="JHxliXLtWZtSU19K7lycpC"><input class="input" type="text" value="~/workspace/deepseek-harness" readonly data-page-node-id="S9KKHVaz4tlzSvbk4efWMH"><button type="button" class="button" data-page-node-id="PlO0UrEmzrONV8PEVafTtz">选择…</button></div>
+              </div>
+              <div class="panel-actions" data-page-node-id="c3pNZl2cftlCsGcsFUrhp1">
+                <button type="button" class="button primary" id="btn-save-mgmt" data-page-node-id="QRs8BAB8QWdc1MDxwH8pI6">保存并连接</button>
+              </div>
+            </div>
+            <div class="panel-note" data-page-node-id="qKyZQ1ReKCCiM70g3HP29a">保存后<b data-page-node-id="l57CiryHN6l60dmszgpWHM">自动跳回 Harness 页进入连接流程</b>；终端徽标（DSH-[…]）点击直达此卡。</div>
+          </div>
+
+          <div id="sec-log" style="margin-top:18px">
+            <div class="page-block-head" style="font-size:14px;font-weight:600;margin-bottom:6px">日志</div>
+            <div class="panel-note" data-page-node-id="fzjmnvmimLH1hvXmR6QYdB">连接与更新共用同一份会话日志（单一事实源）；更新过程中的进度走 Harness 页加载面板。</div>
+            <div class="panel-actions" data-page-node-id="4lZXBDCAk9r2daLNEEFvqG">
+              <button type="button" class="button" id="btn-theme" data-page-node-id="WLe9zQlWuAeSFlcSP4cBnF">切换 浅色 / 深色</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <!-- ═══════════ 原型控制台（非产品 UI） ═══════════ -->
+  <aside class="proto-controls" data-page-node-id="6a4iEYwafwyLnz3ZSmIfJZ">
+    <h2 data-page-node-id="EtfA9Mgf9QdCaIF6knYGqX">原型控制台</h2>
+    <div class="grp" data-page-node-id="hqPezeasO7q4CpHDqUlzGx">
+      <button type="button" class="ctl-btn" data-goto="welcome" data-page-node-id="J3Km7oOGfcmfE9clXKN1Mp">① 未连接</button>
+      <button type="button" class="ctl-btn" data-goto="connecting" data-page-node-id="RUA2PrsGYCnhzXWpDA6pl5">② 连接中</button>
+      <button type="button" class="ctl-btn" data-goto="building" data-page-node-id="bbqpbsZTnkE5Mtk6gm9Kou">②' 初始化构建</button>
+      <button type="button" class="ctl-btn" data-goto="ready" data-page-node-id="HyhT9JrjXHppCciY4Ifoa5">③ 就绪</button>
+      <button type="button" class="ctl-btn" data-goto="error" data-page-node-id="wzv2UaBttzWsUu0dJQkRIK">⑤ 失败</button>
+    </div>
+    <label class="row" data-page-node-id="TEDmUDv0aNrrrg8FqpbQ36"><input type="checkbox" id="opt-first-use" data-page-node-id="Z1qGcRfM7PrOdFa7yiSoo7"> 首次使用（先初始化构建）</label>
+    <label class="row" data-page-node-id="IosoYXGFpn7NMbDtKD812B"><input type="checkbox" id="opt-fail" data-page-node-id="pEbIrd2ihS1DiEoL2hNYMG"> 模拟连接失败</label>
+    <div class="grp" data-page-node-id="jbra3KaiTHp1DY60ywlBXt">
+      <button type="button" class="ctl-btn" id="btn-disconnect" data-page-node-id="9kepRQfbDzu9rTosKWD9MV">模拟断线（就绪态）</button>
+      <button type="button" class="ctl-btn" id="btn-reset" data-page-node-id="CA1wKqwkGffN4i59ZtDYpW">重置</button>
+    </div>
+    <div class="state-now" id="state-now" data-page-node-id="9I7IZNyhqbfLwqZC9YWRKs">当前：① 未连接（Harness 页）</div>
+    <p class="note" data-page-node-id="K3Vk2bloYDk7JmZgZg8uB4">提示：窗口内「＋」模拟新建窗口（回到未连接态）；「设置」tab 在连接过程中也可切换，后台流程继续，回来时状态不丢；终端徽标 DSH-[…] 点击直达连接配置。</p>
+  </aside>
+</div>
+
+<div class="toast" id="toast" data-page-node-id="OBcvwpq0UBqRr64HazYRXr"></div>
+
+<script>
+'use strict'
+const $ = id => document.getElementById(id)
+
+const app = {
+  phase: 'welcome',            // welcome | building | connecting | ready | error
+  view: 'harness',            // harness | settings
+  settingsSec: 'connection',  // connection | updates（设置 tab 内部分区）
+  mode: 'local',
+  timers: [],
+  running: false,
+}
+
+/* ── 通用 ─────────────────────────────────────────────── */
+
+function sleep(ms) {
+  return new Promise(resolve => {
+    const t = setTimeout(resolve, ms)
+    app.timers.push(t)
+  })
+}
+function clearTimers() {
+  for (const t of app.timers) clearTimeout(t)
+  app.timers = []
+  app.running = false
+}
+function toast(text) {
+  const el = $('toast')
+  el.textContent = text
+  el.classList.add('show')
+  clearTimeout(toast._t)
+  toast._t = setTimeout(() => el.classList.remove('show'), 2200)
+}
+const PHASE_LABEL = {
+  welcome: '① 未连接（Harness 页内嵌表单）',
+  building: "②' 初始化构建（进度 + 日志 + 取消）",
+  connecting: '② 连接中（跑马灯 + 日志，无按钮）',
+  ready: '③ 就绪（Web 界面）',
+  error: '⑤ 连接失败（就地重试 / 改配置）',
+}
+function setState(phase) {
+  app.phase = phase
+  $('state-now').textContent = '当前：' + PHASE_LABEL[phase]
+  const harnessStage = {
+    welcome: 'stage-welcome',
+    building: 'stage-loading',
+    connecting: 'stage-loading',
+    ready: 'stage-ready',
+    error: 'stage-error',
+  }[phase]
+  for (const id of ['stage-welcome', 'stage-loading', 'stage-ready', 'stage-error', 'stage-settings']) {
+    $(id).classList.remove('show')
+  }
+  const stageId = app.view === 'harness' ? harnessStage : 'stage-settings'
+  $(stageId).classList.add('show')
+
+  const status = $('frame-status')
+  status.className = 'shell-frame-status'
+  if (phase === 'welcome') { status.textContent = '未连接' }
+  else if (phase === 'building') { status.textContent = '初始化构建中'; status.classList.add('busy') }
+  else if (phase === 'connecting') { status.textContent = '正在连接'; status.classList.add('busy') }
+  else if (phase === 'ready') { status.textContent = '已连接 · 127.0.0.1:3187'; status.classList.add('ok') }
+  else if (phase === 'error') { status.textContent = '连接失败'; status.classList.add('err') }
+}
+
+function setView(view) {
+  app.view = view
+  for (const button of document.querySelectorAll('#nav button[data-view]')) {
+    const active = view === 'harness' ? button.dataset.view === 'harness' : button.dataset.view === view
+    button.classList.toggle('active', active)
+  }
+  setState(app.phase)
+}
+
+/* ── 日志 ─────────────────────────────────────────────── */
+
+function log(target, html) {
+  const el = $(target)
+  el.innerHTML += html + '\n'
+  el.scrollTop = el.scrollHeight
+}
+function clearLogs() {
+  $('loading-log').innerHTML = ''
+  $('error-log').innerHTML = ''
+}
+function esc(text) {
+  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;')
+}
+function logLine(target, text) {
+  const cls = text.startsWith('✓') ? 'ok' : text.startsWith('✗') ? 'err' : text.startsWith('·') ? 'dim' : ''
+  log(target, cls ? `<span class="${cls}">${esc(text)}</span>` : esc(text))
+}
+
+/* ── 连接流程（模拟） ─────────────────────────────────── */
+
+const TERMINAL = { local: 'DSH-[本地]', ssh: 'DSH-[machine:home4]' }
+
+async function runBuild() {
+  setState('building')
+  const panel = document.querySelector('#stage-loading .loading-panel')
+  panel.dataset.tone = 'busy'
+  $('loading-title').textContent = '初始化构建 · ' + TERMINAL[app.mode]
+  $('loading-actions').style.display = ''
+  const lines = [
+    ['==> 首次使用：初始化构建（官方预构建版）', 0],
+    ['→ 下载 @deepseek-ai/dsh@latest …', 700],
+    ['✓ 产物下载完成（npm:0.9.4）', 900],
+    ['→ 原子切换 current → v0.9.4', 600],
+    ['✓ 构建完成，准备启动服务', 500],
+  ]
+  for (const [text, delay] of lines) {
+    await sleep(delay)
+    if (!app.running) return false
+    logLine('loading-log', text)
+    $('loading-status').textContent = text.startsWith('✓') ? '构建阶段完成' : text.replace(/^[→✓·]+\s*/, '')
+  }
+  $('loading-actions').style.display = 'none'
+  return true
+}
+
+async function runConnect(opts = {}) {
+  setState('connecting')
+  const panel = document.querySelector('#stage-loading .loading-panel')
+  panel.dataset.tone = 'busy'
+  $('loading-title').textContent = '正在连接 · ' + TERMINAL[app.mode]
+  $('loading-actions').style.display = 'none'
+
+  const ssh = app.mode === 'ssh'
+  const lines = ssh ? [
+    ['→ 建立 SSH 通道（home4 → machine:9f2a）', 200],
+    ['✓ SSH 连接建立', 700],
+    ['→ 端口转发 127.0.0.1:3187 → 远程 3080', 600],
+    ['→ 远程启动 dsh web（--port 0）', 800],
+  ] : [
+    ['→ 启动 dsh web（--port 0）', 200],
+  ]
+  const common = [
+    ['· 等待服务就绪…', 700],
+  ]
+  for (const [text, delay] of [...lines, ...common]) {
+    await sleep(delay)
+    if (!app.running) return
+    logLine('loading-log', text)
+    $('loading-status').textContent = text.startsWith('✓') ? text.slice(2) : text.replace(/^[→·]+\s*/, '')
+  }
+
+  if ($('opt-fail').checked || opts.forceFail) {
+    await sleep(1400)
+    if (!app.running) return
+    logLine('loading-log', '✗ 服务启动超时（60s）：远端端口 3080 未监听')
+    $('error-log').innerHTML = $('loading-log').innerHTML
+    $('error-status').textContent = '服务启动超时（60s）：远端端口 3080 未监听'
+    setState('error')
+    return
+  }
+
+  const tail = ssh ? [
+    ['✓ 服务就绪：127.0.0.1:3187', 900],
+    ['→ 加载界面 http://127.0.0.1:3187/', 500],
+    ['✓ 界面加载完成，进入工作区', 600],
+  ] : [
+    ['✓ 服务就绪：127.0.0.1:3091', 900],
+    ['→ 加载界面 http://127.0.0.1:3091/', 500],
+    ['✓ 界面加载完成，进入工作区', 600],
+  ]
+  for (const [text, delay] of tail) {
+    await sleep(delay)
+    if (!app.running) return
+    logLine('loading-log', text)
+    $('loading-status').textContent = text.startsWith('✓') ? text.slice(2) : text.replace(/^[→·]+\s*/, '')
+  }
+  setState('ready')
+}
+
+async function startFlow(opts = {}) {
+  clearTimers()
+  app.running = true
+  clearLogs()
+  $('terminal-chip').textContent = TERMINAL[app.mode]
+  if ($('opt-first-use').checked && !opts.skipBuild) {
+    const ok = await runBuild()
+    if (!ok || !app.running) return
+  }
+  await runConnect(opts)
+}
+
+/* ── 事件绑定 ─────────────────────────────────────────── */
+
+for (const button of document.querySelectorAll('#nav button[data-view]')) {
+  button.addEventListener('click', () => setView(button.dataset.view))
+}
+$('btn-new-window').addEventListener('click', () => {
+  clearTimers()
+  clearLogs()
+  setState('welcome')
+  toast('已模拟新建窗口：回到未连接态（①）')
+})
+
+// 启动器（① 态）：终端行直连；「连接其他终端…」进设置页连接卡
+$('btn-save').addEventListener('click', () => {
+  setView('settings')
+  toast('连接其他终端 → 设置页滚动到「连接」卡')
+})
+$('btn-save-mgmt').addEventListener('click', () => { setView('harness'); startFlow() })
+$('btn-close-settings').addEventListener('click', () => setView('harness'))
+
+// 设置页：连接方式切换（示意）
+for (const button of document.querySelectorAll('#mode-switch-mgmt button')) {
+  button.addEventListener('click', () => {
+    for (const other of document.querySelectorAll('#mode-switch-mgmt button')) other.classList.toggle('active', other === button)
+  })
+}
+
+// 终端徽标：点击直达设置页连接卡（快捷入口）
+$('terminal-chip').addEventListener('click', () => {
+  setView('settings')
+  toast('终端徽标 → 设置 · 连接卡（二期可升级为终端切换弹层）')
+})
+
+// 最近终端：一键直连
+for (const chip of document.querySelectorAll('.chip[data-quick]')) {
+  chip.addEventListener('click', () => {
+    app.mode = chip.dataset.quick
+    $('terminal-chip').textContent = TERMINAL[app.mode]
+    startFlow()
+  })
+}
+
+// 取消 / 重试 / 修改配置
+$('btn-cancel-build').addEventListener('click', () => {
+  clearTimers()
+  logLine('loading-log', '· 已取消初始化构建，旧版本继续可用，可稍后重试')
+  setState('welcome')
+  toast('已取消构建，回到未连接态')
+})
+$('btn-retry').addEventListener('click', () => {
+  clearLogs()
+  app.running = true
+  runConnect()
+})
+$('btn-edit-config').addEventListener('click', () => { setState('welcome'); setView('harness') })
+
+// 模拟断线（就绪态轻提示条）
+$('btn-disconnect').addEventListener('click', () => {
+  if (app.phase !== 'ready') { toast('请先进入「③ 就绪」状态'); return }
+  const bar = $('reconnect-bar')
+  const status = $('frame-status')
+  bar.classList.add('show')
+  status.textContent = '正在重连'
+  status.className = 'shell-frame-status busy'
+  setTimeout(() => {
+    bar.classList.remove('show')
+    status.textContent = '已连接 · 127.0.0.1:3187'
+    status.className = 'shell-frame-status ok'
+    toast('重连成功（Web 界面不重载，仅轻提示）')
+  }, 2600)
+})
+
+// 控制台：状态直达
+for (const button of document.querySelectorAll('.ctl-btn[data-goto]')) {
+  button.addEventListener('click', () => {
+    const target = button.dataset.goto
+    clearTimers()
+    clearLogs()
+    $('terminal-chip').textContent = TERMINAL[app.mode]
+    $('reconnect-bar').classList.remove('show')
+    setView('harness')
+    if (target === 'welcome') {
+      setState('welcome')
+    } else if (target === 'ready') {
+      setState('ready')
+    } else if (target === 'error') {
+      logLine('error-log', '→ 建立 SSH 通道（home4 → machine:9f2a）')
+      logLine('error-log', '✓ SSH 连接建立')
+      logLine('error-log', '→ 端口转发 127.0.0.1:3187 → 远程 3080')
+      logLine('error-log', '→ 远程启动 dsh web（--port 0）')
+      logLine('error-log', '· 等待服务就绪…')
+      logLine('error-log', '✗ 服务启动超时（60s）：远端端口 3080 未监听')
+      setState('error')
+    } else if (target === 'connecting') {
+      setView('harness')
+      app.running = true
+      runConnect()
+    } else if (target === 'building') {
+      setView('harness')
+      app.running = true
+      ;(async () => {
+        const ok = await runBuild()
+        if (ok && app.running) await runConnect()
+      })()
+    }
+  })
+}
+
+// 重置
+$('btn-reset').addEventListener('click', () => {
+  clearTimers()
+  clearLogs()
+  $('reconnect-bar').classList.remove('show')
+  setView('harness')
+  setState('welcome')
+  toast('已重置')
+})
+
+// 主题切换
+$('btn-theme').addEventListener('click', () => {
+  const root = document.documentElement
+  const dark = root.dataset.theme === 'liquid-glass-dark'
+  root.dataset.theme = dark ? 'liquid-glass' : 'liquid-glass-dark'
+  toast('主题：' + (dark ? '液态玻璃（浅）' : '液态玻璃（深）'))
+})
+
+// boot
+setState('welcome')
+</script>
+</body>
+</html>

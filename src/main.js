@@ -297,6 +297,10 @@ function sessionFor(deviceKey) {
     autoReconnectAttempts: 0,
     connecting: false,
     workerPollTimer: null,
+    // Session-wide log ring: EVERY routed line (connection + build/update)
+    // lands here, so the harness loading panel and the settings log replay
+    // the SAME history — one source of truth across both surfaces.
+    logRing: [],
     // True while a user-initiated cancel is in flight; drives the frame's
     // 「正在取消更新…」label and guards against duplicate cancel actions.
     cancelRequested: false,
@@ -739,9 +743,17 @@ function resumePendingUpdate() {
   }, 1500)
 }
 
+/** Cap of the session-wide log ring (mirrors ConnectionManager's ring). */
+const SESSION_LOG_RING_LINES = 300
+
 /** Send one session line to the file and to every open panel of its windows. */
 function routeSessionLine(session, line) {
   logSink(`[${session.key}] ${line}`)
+  // One ring for every surface: this is the single log history the harness
+  // loading panel (shell:log-dump) AND the settings log (updatesGetLog)
+  // replay, regardless of which subsystem produced the line.
+  session.logRing.push(line)
+  if (session.logRing.length > SESSION_LOG_RING_LINES) session.logRing.shift()
   for (const workspace of session.windows) {
     workspace.setupDialog.log(line)
     // Also stream into the shell frame's loading panel so a slow/remote
@@ -750,6 +762,11 @@ function routeSessionLine(session, line) {
       workspace.window.webContents.send('shell:log', line)
     }
   }
+}
+
+/** The session-wide log history (connection + build/update lines). */
+function sessionLogDump(session) {
+  return session === null ? '' : session.logRing.join('\n')
 }
 
 /** Persist a partial `update` patch for one device session. */
@@ -808,6 +825,73 @@ function openExistingTerminalWindow(existingTarget, targetBusy, targetUnchanged)
   startWithSettings(existingTarget)
 }
 
+/**
+ * Bind `workspace` to the terminal `candidate` describes and start the
+ * connect journey — the single path shared by the settings form's
+ * 保存并连接 and the harness launcher's quick-connect. Handles the
+ * duplicate-window switch, busy-terminal gating, persistence, and the
+ * jump onto the harness tab where the loading panel takes the stage.
+ */
+function saveConnection(workspace, candidate, machineId) {
+  const deviceKey = deviceKeyOf({ ...candidate, machineId })
+
+  const targetSession = sessions.get(deviceKey) ?? null
+  const existingDevice = settingsDocument.devices[deviceKey]
+  const targetUnchanged = existingDevice !== undefined && sameDeviceConfig(existingDevice, candidate)
+  const targetBusy = targetSession !== null && isSessionBusy(targetSession)
+  const previous = workspace.session
+  const switchingAway = previous !== null && deviceKey !== workspace.deviceKey
+
+  // One bound window per terminal. The CURRENT window always stays: when
+  // the target terminal already has another window, the current window
+  // binds in place and the other duplicate windows are closed. The view
+  // and focus of the current window do not change.
+  const duplicate = boundWorkspaceFor(deviceKey, workspace)
+  if (duplicate !== null) {
+    if (targetBusy && targetUnchanged === false) {
+      return { ok: false, error: busyTaskMessage(targetSession) }
+    }
+    persistConnectionCandidate(deviceKey, candidate, machineId)
+    refreshSessionSettings(duplicate.session, deviceKey)
+    openExistingTerminalWindow(duplicate, targetBusy, targetUnchanged)
+    // The current window stays exactly as it was (a detached launcher or
+    // another terminal). Connecting to an already-open terminal is only a
+    // window switch, never a close/rebind.
+    return { ok: true }
+  }
+
+  // Target terminal has no bound window yet.
+  if (targetBusy) {
+    if (targetUnchanged === false) {
+      return { ok: false, error: busyTaskMessage(targetSession) }
+    }
+    const session = attachWorkspace(workspace, deviceKey)
+    refreshSessionSettings(session, deviceKey)
+    destroyClosedTerminalWindows(session, workspace)
+    if (windowManager !== null) windowManager.markActive(workspace)
+    if (previous !== null && switchingAway) void abandonSession(previous)
+    // The connect journey lives on the harness tab: fold the launcher away
+    // so the busy terminal's progress takes the stage immediately.
+    setWorkspaceView(workspace, 'harness')
+    return { ok: true }
+  }
+
+  persistConnectionCandidate(deviceKey, candidate, machineId)
+  const session = attachWorkspace(workspace, deviceKey)
+  refreshSessionSettings(session, deviceKey)
+  destroyClosedTerminalWindows(session, workspace)
+  if (windowManager !== null) windowManager.markActive(workspace)
+  // Never block the switch: cancel/abandon the previous terminal in the
+  // background. Its old service keeps running and the task can be retried
+  // later from that terminal's single window.
+  if (previous !== null && switchingAway) void abandonSession(previous)
+  // pendingOpen is already true from attachWorkspace, so the loading panel
+  // owns the harness tab from here until the connection settles.
+  setWorkspaceView(workspace, 'harness')
+  startWithSettings(workspace)
+  return { ok: true }
+}
+
 /** Reload one session's settings state and every settings panel after a save. */
 function refreshSessionSettings(session, deviceKey) {
   const view = settingsViewFor(deviceKey)
@@ -850,6 +934,31 @@ function workspaceTitle(workspace) {
   return 'DSH-[' + workspaceTerminal(workspace) + ']-' + url
 }
 
+/**
+ * Compact terminal list for the harness tab's launcher (and the settings
+ * form): the current device first, then the rest, capped. `open` marks a
+ * terminal that already has a live bound window.
+ */
+function devicesPayload(deviceKey) {
+  const entries = Object.entries(settingsDocument.devices)
+  const current = entries.find(([key]) => key === deviceKey)
+  return (current === undefined ? entries : [current, ...entries.filter(([key]) => key !== deviceKey)])
+    .map(([key, device]) => ({
+      key,
+      current: key === deviceKey,
+      label: terminalLabel(settingsViewFor(key)),
+      mode: device.mode,
+      open: boundWorkspaceFor(key, null) !== null,
+      // Deletable from the launcher: anything except the system-default
+      // local device and terminals that still have a live bound window.
+      removable: key !== 'local' && boundWorkspaceFor(key, null) === null,
+    }))
+    // Terminals with a live window first (one click to switch), then the
+    // rest in their original order (current device leading).
+    .sort((a, b) => (b.open ? 1 : 0) - (a.open ? 1 : 0))
+    .slice(0, 8)
+}
+
 function sendWorkspaceState(workspace) {
   if (workspace.window === null || workspace.window.isDestroyed()) return
   const session = workspace.session
@@ -862,6 +971,13 @@ function sendWorkspaceState(workspace) {
     view: workspace.activeView,
     terminal: workspaceTerminal(workspace),
     detached: session === null,
+    // True while the harness tab shows its not-connected launcher; the
+    // shell frame renders the terminal list natively and hides the
+    // loading panel for that state.
+    connForm: harnessShowsConnectionForm(workspace),
+    devices: harnessShowsConnectionForm(workspace) ? devicesPayload(
+      session === null ? candidateDeviceKey() : workspace.deviceKey,
+    ) : undefined,
     hasOpenWindow,
     status: status.detail,
     connState: status.state,
@@ -877,7 +993,8 @@ function sendWorkspaceState(workspace) {
  * Keep the harness view visible only when it is front-most, its page has
  * finished loading, AND the connection reports ready. Connecting,
  * restarting and error states hide the web view so the shell frame can
- * never show a white or stale page.
+ * never show a white or stale page. The not-yet-connected harness tab
+ * instead shows the embedded connection form (see setWorkspaceView).
  */
 function updateHarnessVisibility(workspace) {
   if (workspace.window === null || workspace.window.isDestroyed()) return
@@ -886,7 +1003,15 @@ function updateHarnessVisibility(workspace) {
   const show = workspace.activeView === 'harness'
     && ready && workspace.harnessReady && workspace.progress === null
   workspace.harnessView.setVisible(show)
-  if (show) workspace.harnessView.webContents.focus()
+  if (show) {
+    workspace.setupDialog.close()
+    workspace.harnessView.webContents.focus()
+  } else if (workspace.activeView === 'harness') {
+    // Busy / error / loading: the shell loading panel owns the stage; when
+    // nothing is running the shell renders the terminal launcher natively
+    // (connForm). Either way the settings panel must not be on stage.
+    workspace.setupDialog.close()
+  }
   sendWorkspaceState(workspace)
 }
 
@@ -991,30 +1116,49 @@ function loadHarnessUrl(workspace, url) {
 }
 
 /**
- * Show one top-level workspace view: harness or one settings section.
- * This is the single switch used by the shell frame, menus, tray, and
- * save flows. A detached window can show settings before any terminal
- * is selected; its harness tab stays on the waiting prompt.
+ * The harness tab shows its terminal launcher whenever there is nothing to
+ * show yet: a detached window, or a bound terminal sitting idle with no
+ * connect queued. Busy / error / ready states keep the loading panel and
+ * the web view, so the connect journey never leaves the harness stage.
  */
+function harnessShowsConnectionForm(workspace) {
+  if (workspace.activeView !== 'harness' || workspace.progress !== null) return false
+  const session = workspace.session
+  if (session === null) return true
+  // pendingOpen/connecting mean a connect is queued or running: the loading
+  // panel owns the stage from the moment the user hits 保存并连接.
+  if (workspace.pendingOpen === true || session.connecting === true) return false
+  return session.connection.status.state === 'idle'
+}
+
+/** Show one top-level workspace view: harness or the settings panel. */
 function setWorkspaceView(workspace, view) {
-  if (!['harness', 'connection', 'updates'].includes(view)) view = 'harness'
-  workspace.activeView = view
-  if (view === 'harness') {
+  // 'connection' and 'updates' stay valid routes (menus, tray, error
+  // buttons): they open the settings panel and anchor on that section.
+  // 'settings' opens the panel as-is (single scrolling page now).
+  const isSettingsView = view !== 'harness'
+  workspace.activeView = isSettingsView ? 'settings' : 'harness'
+  if (isSettingsView) {
+    workspace.harnessView.setVisible(false)
+    const deviceKey = workspace.session === null ? candidateDeviceKey() : workspace.deviceKey
+    workspace.setupDialog.setDeviceKey(deviceKey, view === 'updates' ? 'updates' : 'connection')
+    workspace.setupDialog.open(view === 'updates' ? 'updates' : 'connection')
+    layoutWorkspaceViews(workspace)
+  } else {
     workspace.setupDialog.close()
     const session = workspace.session
     const url = session === null ? '' : session.connection.url()
-    if (session !== null && session.connection.status.state === 'ready' && url !== ''
+    if (harnessShowsConnectionForm(workspace)) {
+      // Nothing to show yet: the shell frame renders the terminal launcher
+      // natively (state.connForm + state.devices); no embedded view needed.
+      workspace.harnessView.setVisible(false)
+      sendWorkspaceState(workspace)
+    } else if (session !== null && session.connection.status.state === 'ready' && url !== ''
       && (workspace.loadedUrl !== url || !workspace.harnessReady)) {
       loadHarnessUrl(workspace, url)
     } else {
       updateHarnessVisibility(workspace)
     }
-  } else {
-    workspace.harnessView.setVisible(false)
-    const deviceKey = workspace.session === null ? candidateDeviceKey() : workspace.deviceKey
-    workspace.setupDialog.setDeviceKey(deviceKey, view)
-    workspace.setupDialog.open(view)
-    layoutWorkspaceViews(workspace)
   }
   sendWorkspaceState(workspace)
   if (windowManager !== null) windowManager.touch(workspace)
@@ -1045,6 +1189,11 @@ function createBrowserWindow(bounds = null) {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      // Same reason as the harness/settings views: a workspace window that
+      // another window fully covers (or that sits in the background) must
+      // keep its shell-frame timers running — the loading panel's wait
+      // counter and log autoscroll would otherwise freeze to ~1 tick/minute.
+      backgroundThrottling: false,
     },
   })
   // The shell owns the title: it shows `DSH-[终端]-地址`, not the page title.
@@ -1093,26 +1242,18 @@ function withWorkspace(workspace) {
   return workspace ?? activeWorkspace() ?? createInitialWorkspace()
 }
 
-function loadAppUrl(workspace) {
-  if (workspace.session === null) return
-  const session = workspace.session
-  const url = session.connection.url()
-  workspace.activeView = 'harness'
-  workspace.setupDialog.close()
-  loadHarnessUrl(workspace, url)
-  if (windowManager !== null) windowManager.touch(workspace)
-  refreshTrayAndMenu()
-}
-
 /**
  * Make the workspace's harness view follow one session WITHOUT changing the
  * active view and WITHOUT raising/focusing the window. When the user is on
  * connection/settings, the harness URL is prepared in the background so the
  * later click on Harness is instant; when the harness view is already
- * front-most, it loads/updates in place.
+ * front-most, it loads/updates in place. `keepPending` is set by paths that
+ * call connectSession right after: pendingOpen must stay true through this
+ * sync so the harness tab keeps the loading panel instead of flashing the
+ * connection form until the connection status flips.
  */
-function syncWorkspaceHarness(workspace, session) {
-  workspace.pendingOpen = false
+function syncWorkspaceHarness(workspace, session, keepPending = false) {
+  if (!keepPending) workspace.pendingOpen = false
   if (session.connection.status.state !== 'ready') {
     updateHarnessVisibility(workspace)
     return
@@ -1388,7 +1529,12 @@ function createInitialWorkspace() {
   const deviceKey = defaultWorkspaceDeviceKey()
   const workspace = createWorkspace(deviceKey, { autoOpen: false })
   if (deviceSettingsComplete(deviceKey)) startWithSettings(workspace)
-  else setWorkspaceView(workspace, 'connection')
+  else {
+    // Incomplete first-run config: open the harness tab straight onto the
+    // embedded connection form — the whole journey stays on one stage.
+    workspace.pendingOpen = false
+    setWorkspaceView(workspace, 'harness')
+  }
   return workspace
 }
 
@@ -1829,7 +1975,15 @@ function startWithSettings(workspace) {
 async function startWithSettingsInner(workspace) {
   if (workspace.session === null) return
   const session = workspace.session
+  // After every await, both the workspace binding AND the connection's
+  // stopped flag must still hold: a user cancel (cancel-connect) during the
+  // environment check or the build must not resurrect the connect chain.
+  const alive = () => workspace.session === session && session.connection.stopped !== true
   let built = false
+  // The build check can itself take 15-20s on an unreachable SSH host, and
+  // before it there is NO other signal: log the phase so the loading panel's
+  // log (and the wait counter) shows life from the first second.
+  session.connection.log(`→ 连接 DSH-[${terminalLabel(settingsViewFor(session.key))}]：检查运行环境…`)
   try {
     built = await session.connection.isBuilt()
   } catch (error) {
@@ -1837,13 +1991,13 @@ async function startWithSettingsInner(workspace) {
     // cannot even reach the host, connect() surfaces the real failure with a
     // proper dialog instead of a pointless build pipeline.
     session.connection.log(`构建检查失败：${error.message}`)
-    if (workspace.session !== session) return
-    syncWorkspaceHarness(workspace, session)
+    if (!alive()) return
     workspace.pendingOpen = true
+    syncWorkspaceHarness(workspace, session, true)
     connectSession(session)
     return
   }
-  if (workspace.session !== session) return
+  if (!alive()) return
   if (built === false) {
     const busyMessage = busyTaskMessage(session)
     if (busyMessage !== '') {
@@ -1854,7 +2008,11 @@ async function startWithSettingsInner(workspace) {
       })
       return
     }
-    syncWorkspaceHarness(workspace, session)
+    // Keep pendingOpen true through the artifact attempt and the build
+    // pipeline: without it the harness tab flashes the terminal launcher
+    // while the registry query (seconds) is still in flight.
+    workspace.pendingOpen = true
+    syncWorkspaceHarness(workspace, session, true)
     // Phase 2/3: official artifact first — no checkout, no build, and the
     // worker survives shell quit.
     const usedWorker = await startArtifactUpdateIfPossible(session)
@@ -1868,7 +2026,7 @@ async function startWithSettingsInner(workspace) {
       status: '首次使用：确保仓库 → 工具链引导 → pnpm install → pnpm run build → 启动服务',
     })
     const outcome = await session.updater.runPipeline({ includePull: true, toleratePullFailure: true })
-    if (workspace.session !== session) return
+    if (!alive()) return
     if (outcome.ok === false) {
       setProgress(workspace, {
         title: '初始化构建',
@@ -1879,9 +2037,9 @@ async function startWithSettingsInner(workspace) {
     }
     setProgress(workspace, null)
   }
-  if (workspace.session !== session) return
-  syncWorkspaceHarness(workspace, session)
+  if (!alive()) return
   workspace.pendingOpen = true
+  syncWorkspaceHarness(workspace, session, true)
   connectSession(session)
 }
 
@@ -1902,11 +2060,11 @@ async function runInitInner(workspace) {
   }
   setProgress(workspace, { title: '初始化构建', status: '执行中…' })
   const outcome = await session.updater.runPipeline({ includePull: true, toleratePullFailure: true })
-  if (workspace.session !== session) return
+  if (workspace.session !== session || session.connection.stopped === true) return
   if (outcome.ok) {
     setProgress(workspace, null)
-    syncWorkspaceHarness(workspace, session)
     workspace.pendingOpen = true
+    syncWorkspaceHarness(workspace, session, true)
     connectSession(session)
   } else {
     setProgress(workspace, {
@@ -1964,16 +2122,18 @@ function canStartBusyTask(session) {
 const actions = {
   newWindow() {
     // Additional windows are intentionally DETACHED: no session, no
-    // auto-connect. They open on the connection page and bind only after
-    // the user saves a terminal. This keeps a window created mid-update
-    // completely out of the restarting harness view tree.
-    return createWorkspace(null, { initialView: 'connection' })
+    // auto-connect. They open on the harness tab, whose not-connected state
+    // IS the embedded connection form — the whole journey stays on one
+    // stage, and the window binds to a terminal only after the user saves.
+    return createWorkspace(null, { initialView: 'harness' })
   },
 
   openMain(workspace) {
     const target = withWorkspace(workspace)
     if (target.session === null) {
-      setWorkspaceView(target, 'connection')
+      // Detached window: the harness tab's not-connected state IS the
+      // connection form — that's the meaningful "main" surface here.
+      setWorkspaceView(target, 'harness')
       presentWindow(target.window)
       return target
     }
@@ -2360,57 +2520,7 @@ function registerIpc() {
         && currentDevice.ssh.host === candidate.ssh.host
         && currentDevice.machineId !== ''
       const machineId = keepMachineId ? currentDevice.machineId : ''
-      const deviceKey = deviceKeyOf({ ...candidate, machineId })
-
-      const targetSession = sessions.get(deviceKey) ?? null
-      const existingDevice = settingsDocument.devices[deviceKey]
-      const targetUnchanged = existingDevice !== undefined && sameDeviceConfig(existingDevice, candidate)
-      const targetBusy = targetSession !== null && isSessionBusy(targetSession)
-      const previous = workspace.session
-      const switchingAway = previous !== null && deviceKey !== workspace.deviceKey
-
-      // One bound window per terminal. The CURRENT window always stays: when
-      // the target terminal already has another window, the current window
-      // binds in place and the other duplicate windows are closed. The view
-      // and focus of the current window do not change.
-      const duplicate = boundWorkspaceFor(deviceKey, workspace)
-      if (duplicate !== null) {
-        if (targetBusy && targetUnchanged === false) {
-          return { ok: false, error: busyTaskMessage(targetSession) }
-        }
-        persistConnectionCandidate(deviceKey, candidate, machineId)
-        refreshSessionSettings(duplicate.session, deviceKey)
-        openExistingTerminalWindow(duplicate, targetBusy, targetUnchanged)
-        // The current window stays exactly as it was (usually a detached
-        // chooser or another terminal). Connecting to an already-open
-        // terminal is only a window switch, never a close/rebind.
-        return { ok: true }
-      }
-
-      // Target terminal has no bound window yet.
-      if (targetBusy) {
-        if (targetUnchanged === false) {
-          return { ok: false, error: busyTaskMessage(targetSession) }
-        }
-        const session = attachWorkspace(workspace, deviceKey)
-        refreshSessionSettings(session, deviceKey)
-        destroyClosedTerminalWindows(session, workspace)
-        if (windowManager !== null) windowManager.markActive(workspace)
-        if (previous !== null && switchingAway) void abandonSession(previous)
-        return { ok: true }
-      }
-
-      persistConnectionCandidate(deviceKey, candidate, machineId)
-      const session = attachWorkspace(workspace, deviceKey)
-      refreshSessionSettings(session, deviceKey)
-      destroyClosedTerminalWindows(session, workspace)
-      if (windowManager !== null) windowManager.markActive(workspace)
-      // Never block the switch: cancel/abandon the previous terminal in the
-      // background. Its old service keeps running and the task can be retried
-      // later from that terminal's single window.
-      if (previous !== null && switchingAway) void abandonSession(previous)
-      startWithSettings(workspace)
-      return { ok: true }
+      return saveConnection(workspace, candidate, machineId)
     },
 
     closePanel(event) {
@@ -2446,10 +2556,10 @@ function registerIpc() {
       if (workspace.session === null) {
         return '当前窗口尚未连接终端。请先在「连接」中选择并保存终端。'
       }
-      // The panel is created lazily and may have missed every earlier line;
-      // return the connection's bounded ring so the tab can show the latest
-      // log immediately instead of starting with an empty console.
-      return workspace.session.connection.dumpLog()
+      // One ring for both surfaces: this settings log and the harness loading
+      // panel replay the SAME session history (connection + build/update
+      // lines), so the two views can never disagree again.
+      return sessionLogDump(workspace.session)
     },
 
     async updatesAction(event, name, payload = {}) {
@@ -2563,6 +2673,13 @@ function registerIpc() {
     return { ok: true }
   })
 
+  // Replay the session log history into a freshly shown loading panel: the
+  // window may have opened (or switched back to harness) mid-connect.
+  ipcMain.handle('shell:log-dump', event => {
+    const workspace = workspaceForEvent(event) ?? withWorkspace(null)
+    return sessionLogDump(workspace.session)
+  })
+
   ipcMain.handle('shell:new-window', () => {
     actions.newWindow()
     return { ok: true }
@@ -2579,30 +2696,98 @@ function registerIpc() {
     return { ok: true }
   })
 
-  ipcMain.handle('shell:action', (event, name) => {
+  ipcMain.handle('shell:action', (event, name, payload = {}) => {
     const workspace = workspaceForEvent(event) ?? withWorkspace(null)
     switch (name) {
-      case 'focus-terminal-window': {
-        const target = workspace.session === null
-          ? boundWorkspaceFor(candidateDeviceKey(), workspace)
-          : workspace
-        if (target === null) break
-        presentWorkspace(target)
-        setWorkspaceView(target, 'harness')
-        break
-      }
       case 'open-connection':
         setWorkspaceView(workspace, 'connection')
         break
+      case 'quick-connect': {
+        // Launcher quick-connect: bind this window to a stored terminal and
+        // run the shared save path (duplicate windows just get focused).
+        const key = String(payload?.key ?? '')
+        const device = settingsDocument.devices[key]
+        if (device === undefined) break
+        const candidate = normalizeSettings({ mode: device.mode, local: device.local, ssh: device.ssh })
+        if (validateSettings(candidate) !== null) break
+        void saveConnection(workspace, candidate, device.machineId ?? '')
+        break
+      }
+      case 'cancel-connect': {
+        // Abort the in-flight connect attempt and hand the harness tab back
+        // to the terminal launcher: pendingOpen must drop or the loading
+        // panel would sit in a fake "connecting" state with nothing running.
+        const cancelSession = workspace.session
+        workspace.pendingOpen = false
+        if (cancelSession !== null) {
+          clearTimeout(cancelSession.autoReconnectTimer)
+          cancelSession.autoReconnectTimer = null
+          cancelSession.autoReconnectAttempts = 0
+          cancelSession.connection.log('· 已取消本次连接，回到终端选择')
+          cancelSession.connection.stop()
+        }
+        setProgress(workspace, null)
+        updateHarnessVisibility(workspace)
+        break
+      }
+      case 'retry-connect': {
+        // Error-card retry: reconnect the bound terminal in place, keeping
+        // the harness tab so the loading panel resumes the journey.
+        const retrySession = workspace.session
+        if (retrySession !== null && retrySession.connectionTaskPromise === null) {
+          workspace.pendingOpen = true
+          setWorkspaceView(workspace, 'harness')
+          connectSession(retrySession)
+        }
+        break
+      }
       case 'run-init':
         void runInit(workspace)
         break
       case 'run-update':
         void actions.updateAndRestart(workspace)
         break
-      case 'dismiss-progress':
+      case 'remove-device': {
+        // Launcher cleanup: delete a stale terminal entry. The local device
+        // is the system default and not removable; a terminal with a live
+        // bound window must be closed from that window first.
+        const key = String(payload?.key ?? '')
+        if (key === '' || key === 'local') break
+        if (settingsDocument.devices[key] === undefined) break
+        if (boundWorkspaceFor(key, null) !== null) break
+        // Stop an orphaned session (e.g. a disconnected SSH session with no
+        // windows) so its tunnel/service children are reaped too.
+        const orphan = sessions.get(key)
+        if (orphan !== undefined) stopSession(orphan)
+        const nextDevices = { ...settingsDocument.devices }
+        delete nextDevices[key]
+        settingsDocument = persistDocument({
+          // If the removed terminal was the active one, fall back to local.
+          activeDeviceId: settingsDocument.activeDeviceId === key
+            ? 'local'
+            : settingsDocument.activeDeviceId,
+          devices: nextDevices,
+          toolPaths: settingsDocument.toolPaths,
+        })
+        // Refresh every workspace's launcher so the entry disappears.
+        for (const ws of workspaces.values()) {
+          if (ws.window !== null && !ws.window.isDestroyed()) {
+            sendWorkspaceState(ws)
+          }
+        }
+        refreshTrayAndMenu()
+        break
+      }
+      case 'dismiss-progress': {
+        // Dismissing a failed-init banner hands the stage back to the
+        // terminal launcher: pendingOpen would otherwise pin the loading
+        // panel in a fake "connecting" state with nothing running.
+        for (const other of workspace.session === null ? [workspace] : workspace.session.windows) {
+          other.pendingOpen = false
+        }
         setProgress(workspace, null)
         break
+      }
       default:
         return { ok: false, error: `未知动作：${name}` }
     }

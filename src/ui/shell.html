@@ -22,8 +22,7 @@
 
   <nav class="shell-frame-nav" id="shell-nav" aria-label="工作区栏目">
     <button type="button" data-view="harness" class="active">Harness</button>
-    <button type="button" data-view="connection">连接</button>
-    <button type="button" data-view="updates">设置</button>
+    <button type="button" data-view="settings">设置</button>
     <button type="button" id="new-window" class="shell-frame-new" aria-label="新建窗口" title="新建窗口（⌘N）">＋</button>
   </nav>
 
@@ -34,19 +33,25 @@
 </header>
 
 <main class="shell-viewport" id="shell-viewport" aria-live="polite">
+  <div class="launcher hidden" id="launcher">
+    <div class="launcher-card">
+      <div class="launcher-title">选择终端</div>
+      <div class="launcher-sub" id="launcher-sub">点击已连接过的终端直接进入；首次使用请完成连接配置</div>
+      <div class="launcher-list" id="launcher-list"></div>
+      <button type="button" class="button launcher-other" id="launcher-other">连接其他终端…</button>
+    </div>
+  </div>
+
   <div class="loading-panel hidden" id="loading-panel" data-tone="busy">
-    <div class="loading-stage">
-      <div class="loading-spinner" aria-hidden="true"></div>
+    <div class="loading-center">
       <div class="loading-copy">
         <div class="loading-title" id="loading-title">正在连接…</div>
         <div class="loading-status" id="loading-status"></div>
-        <div class="loading-actions hidden" id="loading-actions"></div>
+        <div class="loading-wait" id="loading-wait"></div>
       </div>
+      <div class="loading-actions hidden" id="loading-actions"></div>
     </div>
-    <div class="loading-log log-wrap">
-      <div class="log-tools">
-        <span class="log-label">实时日志</span>
-      </div>
+    <div class="loading-log">
       <pre class="log" id="loading-log"></pre>
     </div>
   </div>
@@ -101,13 +106,107 @@ function renderLoadingActions(actions) {
   }
 }
 
-// 加载面板显示决策表：
-//   view === 'harness' 且（有进度条 或 harness 未就绪 或 连接非 ready）→ 显示；其余 → 隐藏
-function renderLoading(state) {
-  const panel = $('loading-panel')
-  const show = state.view === 'harness' && (state.progress !== null || !state.harnessReady || state.connState !== 'ready')
+// 终端启动器：未连接的 harness 页（connForm）原生渲染，点击直连。
+// 每行右侧悬停出一个 × 用于删除已失效的终端（本地/已打开的不可删）。
+function renderLauncher(state) {
+  const panel = $('launcher')
+  const show = state.view === 'harness' && state.connForm === true
   panel.classList.toggle('hidden', !show)
   if (!show) return
+  const list = $('launcher-list')
+  list.textContent = ''
+  const devices = Array.isArray(state.devices) ? state.devices : []
+  $('launcher-sub').textContent = devices.length > 0
+    ? '点击终端直接进入 · 悬停可删除已失效的条目'
+    : '尚未配置终端，点击下方按钮完成连接配置'
+  for (const device of devices) {
+    const row = document.createElement('div')
+    row.className = 'launcher-row'
+    const item = document.createElement('button')
+    item.type = 'button'
+    item.className = `launcher-item${device.current ? ' current' : ''}`
+    const name = document.createElement('span')
+    name.className = 'launcher-item-name'
+    name.textContent = device.label
+    const mode = document.createElement('span')
+    mode.className = 'launcher-item-mode'
+    mode.textContent = device.mode === 'ssh' ? 'SSH 远程' : '本地'
+    item.appendChild(name)
+    item.appendChild(mode)
+    if (device.open) {
+      const open = document.createElement('span')
+      open.className = 'launcher-item-open'
+      open.textContent = '已打开'
+      item.appendChild(open)
+    }
+    item.addEventListener('click', () => api.action('quick-connect', { key: device.key }))
+    row.appendChild(item)
+    if (device.removable === true) {
+      const del = document.createElement('button')
+      del.type = 'button'
+      del.className = 'launcher-item-delete'
+      del.title = '删除此终端'
+      del.setAttribute('aria-label', `删除终端 ${device.label}`)
+      del.textContent = '×'
+      del.addEventListener('click', () => api.action('remove-device', { key: device.key }))
+      row.appendChild(del)
+    }
+    list.appendChild(row)
+  }
+}
+
+$('launcher-other').addEventListener('click', () => {
+  api.navigate('connection')
+})
+
+// 等待计时：加载面板显示期间每秒刷新「已等待 Ns」，让无日志输出的
+// 阶段（如 SSH 环境检查）也能感知到进程还活着。
+let loadingSince = null
+let waitTimer = null
+function refreshWait() {
+  if (loadingSince === null) return
+  const seconds = Math.max(0, Math.round((Date.now() - loadingSince) / 1000))
+  $('loading-wait').textContent = seconds > 0 ? `已等待 ${seconds}s` : ''
+}
+function startWaitTimer() {
+  if (waitTimer !== null) return
+  waitTimer = setInterval(refreshWait, 1000)
+}
+function stopWaitTimer() {
+  if (waitTimer !== null) { clearInterval(waitTimer); waitTimer = null }
+  $('loading-wait').textContent = ''
+}
+
+// 加载面板显示决策表：
+//   view === 'harness' 且终端启动器未接管（connForm）且
+//   （有进度条 或 harness 未就绪 或 连接非 ready）→ 显示；其余 → 隐藏。
+function renderLoading(state) {
+  const panel = $('loading-panel')
+  const show = state.view === 'harness' && state.connForm !== true
+    && (state.progress !== null || !state.harnessReady || state.connState !== 'ready')
+  panel.classList.toggle('hidden', !show)
+  if (!show) {
+    loadingSince = null
+    stopWaitTimer()
+    return
+  }
+  if (loadingSince === null) {
+    loadingSince = Date.now()
+    refreshWait()
+  }
+  startWaitTimer()
+
+  // 首次进入加载态：回放会话日志历史（窗口可能晚于连接流程打开，
+  // 或刚从设置页切回来）。实时行会继续经 onLog 追加在历史之后。
+  if (panel.dataset.hydrated !== '1' && typeof api.getLogDump === 'function') {
+    panel.dataset.hydrated = '1'
+    api.getLogDump().then(text => {
+      if (typeof text !== 'string' || text === '') return
+      const live = loadingLog.textContent
+      loadingLog.textContent = live === '' ? `${text}\n` : `${text}\n${live}`
+      loadingLog.scrollTop = loadingLog.scrollHeight
+    }).catch(() => {})
+  }
 
   // 阻塞型进度（初始化构建 / 更新并重启）优先于连接状态显示。
   if (state.progress !== null && typeof state.progress === 'object') {
@@ -118,43 +217,47 @@ function renderLoading(state) {
     return
   }
 
+  const terminal = state.terminal || '本地'
   let tone = 'busy'
-  let title = '正在连接…'
+  let title = `正在连接 · DSH-[${terminal}]`
   let status = state.status || ''
   let actions = []
   switch (state.connState) {
     case 'idle':
       tone = 'idle'
       if (state.detached) {
-        if (state.hasOpenWindow) {
-          title = '终端已在另一个窗口打开'
-          status = '同一终端只保留一个窗口实例，不会重复连接。'
-          actions = [{ label: '切换到该窗口', name: 'focus-terminal-window', primary: true }]
-        } else {
-          title = '待连接'
-          status = '当前窗口尚未连接终端，请先在「连接」中选择并保存。'
-          actions = [{ label: '打开连接设置', name: 'open-connection', primary: true }]
-        }
+        // 兜底文案：正常情况下该状态由 harness 页的终端启动器接管。
+        title = '待连接'
+        status = state.status || '请在终端启动器中选择要连接的终端。'
       } else {
-        title = '未连接'
-        status = state.status || '尚未连接，可在「连接」中配置。'
+        // 保存后到连接启动之间的间隙：视作即将连接。
+        title = `正在连接 · DSH-[${terminal}]`
       }
       break
     case 'error':
       tone = 'error'
-      title = '连接失败'
+      title = `连接失败 · DSH-[${terminal}]`
       status = state.status || state.loadError || '未知错误'
-      actions = [{ label: '连接设置', name: 'open-connection' }]
+      actions = [
+        { label: '重试', name: 'retry-connect', primary: true },
+        { label: '连接设置', name: 'open-connection' },
+      ]
       break
     case 'restarting':
       tone = 'busy'
-      title = '正在重启服务…'
+      title = `正在重启服务 · DSH-[${terminal}]`
       break
     case 'ready':
-      title = '正在加载界面…'
+      title = `正在加载界面 · DSH-[${terminal}]`
       break
     default:
       break
+  }
+  // 连接等待期提供取消出口：漫长超时不再是不可操作的假卡死。
+  // 覆盖 idle-pre-connect（环境检查）与 connecting/restarting 阶段；
+  // ready 加载界面为瞬时阶段、error 已有重试/设置按钮，均不需要取消。
+  if (state.connState !== 'ready' && state.connState !== 'error' && !state.detached) {
+    actions = [{ label: '取消', name: 'cancel-connect' }]
   }
   panel.dataset.tone = tone
   $('loading-title').textContent = title
@@ -173,6 +276,7 @@ api.onState(state => {
   $('shell-terminal').textContent = `DSH-[${state.terminal || '本地'}]`
   $('shell-status').textContent = state.detached && state.hasOpenWindow ? '终端已打开' : ((state.task && state.task.label) || state.status || '')
   $('shell-status').title = state.detached && state.hasOpenWindow ? '终端已打开' : ((state.task && state.task.label) || state.status || '')
+  renderLauncher(state)
   renderLoading(state)
 })
 </script>

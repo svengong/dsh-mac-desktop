@@ -16,33 +16,25 @@
   body { width: 100%; height: 100vh; }
   .section-lead { margin: 2px 0 12px; color: var(--ds-text-muted); font-size: 12.5px; }
   #update-components .component { margin-bottom: 0; }
-  .nav-badge { min-width: 18px; padding: 0 6px; text-align: center; }
+  .page-block-head {
+    margin: 0 0 var(--ds-space-2);
+    font-size: var(--ds-font-size-lg);
+    font-weight: var(--ds-font-weight-semibold);
+  }
+  .settings-section + .settings-section { margin-top: 26px; }
+  /* Single scrolling page: keep the reading width bounded on wide windows. */
+  .settings-scroll > .settings-section { max-width: 780px; }
+  /* All settings text is copyable: the shell disables selection globally,
+     but a settings page is reference material users quote from. */
+  .settings-main { user-select: text; -webkit-user-select: text; }
 </style>
 </head>
 <body>
 <div class="settings-shell">
-  <aside class="settings-sidebar">
-    <div class="settings-brand">
-      <span class="settings-brand-mark">DS</span>
-      <span>DSH</span>
-    </div>
-    <nav class="settings-nav" aria-label="设置栏目">
-      <button type="button" data-section="connection" class="active">
-        <span class="nav-icon">⌁</span><span>连接</span>
-      </button>
-      <button type="button" data-section="updates">
-        <span class="nav-icon">↻</span><span>设置</span>
-        <span class="badge warn nav-badge" id="nav-update-count" hidden>0</span>
-      </button>
-    </nav>
-    <div class="settings-sidebar-footer">桌面壳 · 本地 / SSH 远程</div>
-  </aside>
-
   <main class="settings-main">
     <header class="settings-titlebar">
       <div class="settings-title-group">
-        <h1 id="section-title">连接</h1>
-        <span class="titlebar-subtitle" id="section-subtitle">选择运行 DeepSeek Harness 的方式</span>
+        <h1>设置</h1>
       </div>
       <span class="badge info titlebar-terminal" id="titlebar-terminal">DSH-[本地]</span>
       <div class="titlebar-actions">
@@ -51,8 +43,27 @@
     </header>
 
     <div class="settings-scroll">
+      <section id="section-updates" class="settings-section">
+        <div class="page-block-head">更新</div>
+        <p class="section-lead" id="updates-lead">检查与更新当前设备的 Harness。</p>
+        <div class="top-actions">
+          <button id="check-all" class="button" type="button">检查更新</button>
+          <button id="update-all" class="button primary" type="button">更新 Harness 并重启</button>
+          <button id="cancel-update" class="button danger" type="button" hidden>取消更新</button>
+          <button id="restart-service" class="button" type="button">重启服务</button>
+          <span style="flex:1"></span>
+          <label class="switch-row">
+            <span style="color:var(--ds-text-muted);font-size:12px">启动自动检查</span>
+            <button id="auto-check" class="switch" type="button" role="switch" aria-label="启动自动检查"></button>
+          </label>
+        </div>
+
+        <div class="component-list" id="update-components" style="margin-bottom:12px" aria-live="polite"></div>
+      </section>
+
       <section id="section-connection" class="settings-section">
-        <p class="section-lead">本地模式直接使用本机仓库；SSH 远程模式参考 VS Code Remote。</p>
+        <div class="page-block-head">连接</div>
+        <p class="section-lead">本地模式直接使用本机仓库；SSH 远程模式参考 VS Code Remote。保存后自动连接并进入界面。</p>
         <div id="live-strip" class="live-strip ok" hidden></div>
 
         <div class="card">
@@ -71,13 +82,14 @@
                   <input id="local-repo" class="input" type="text" placeholder="deepseek-harness">
                   <button id="pick-local" class="button" type="button">选择…</button>
                 </div>
+                <p class="field-hint">目录不存在时，将按下方「仓库地址」自动克隆。</p>
               </div>
               <div class="field">
-                <label class="field-label" for="local-url">仓库地址 <small>（可选；目录不存在时自动克隆）</small></label>
+                <label class="field-label" for="local-url">仓库地址 <small>（可选）</small></label>
                 <input id="local-url" class="input" type="text" placeholder="https://github.com/deepseek-ai/deepseek-harness.git">
               </div>
               <div class="field">
-                <label class="field-label" for="local-home">数据目录（dsh home）</label>
+                <label class="field-label" for="local-home">数据目录 <small>（dsh home，会话与运行数据）</small></label>
                 <input id="local-home" class="input" type="text" value="~/.dsh-dev">
               </div>
             </section>
@@ -97,35 +109,27 @@
               <p class="field-hint" id="ssh-host-detail"></p>
               <p class="field-hint" id="ssh-test-result"></p>
               <div class="row-grid">
-                <div class="field"><label class="field-label" for="ssh-url">远程仓库地址</label><input id="ssh-url" class="input" type="text" placeholder="https://github.com/deepseek-ai/deepseek-harness.git"></div>
+                <div class="field"><label class="field-label" for="ssh-url">远程仓库地址 <small>（可选）</small></label><input id="ssh-url" class="input" type="text" placeholder="https://github.com/deepseek-ai/deepseek-harness.git"></div>
                 <div class="field"><label class="field-label" for="ssh-dir">远程仓库目录</label><input id="ssh-dir" class="input" type="text" value="~/deepseek-harness"></div>
               </div>
             </section>
+
+            <div class="panel-actions">
+              <button type="button" class="button primary save-card" id="save-settings">保存并连接</button>
+            </div>
           </div>
         </div>
       </section>
 
-      <section id="section-updates" class="settings-section hidden">
-        <p class="section-lead">检查与更新当前设备的 Harness。</p>
-        <div class="top-actions">
-          <button id="check-all" class="button" type="button">检查更新</button>
-          <button id="update-all" class="button primary" type="button">更新 Harness 并重启</button>
-          <button id="cancel-update" class="button danger" type="button" hidden>取消更新</button>
-          <button id="restart-service" class="button" type="button">重启服务</button>
-          <span style="flex:1"></span>
-          <label class="switch-row">
-            <span style="color:var(--ds-text-muted);font-size:12px">启动自动检查</span>
-            <button id="auto-check" class="switch" type="button" role="switch" aria-label="启动自动检查"></button>
-          </label>
-        </div>
-
+      <section id="section-appearance" class="settings-section">
+        <div class="page-block-head">外观</div>
         <div class="appearance-block">
-          <div class="appearance-heading">外观主题</div>
           <div class="theme-grid" id="theme-grid" role="radiogroup" aria-label="外观主题"></div>
         </div>
+      </section>
 
-        <div class="component-list" id="update-components" style="margin-bottom:12px" aria-live="polite"></div>
-
+      <section id="section-log" class="settings-section">
+        <div class="page-block-head">日志</div>
         <div class="log-wrap updates-log" id="update-log-wrap">
           <div class="log-tools">
             <span class="log-label">操作日志</span>
@@ -157,8 +161,10 @@ const embedded = params.get('embedded') === '1'
 if (embedded) document.body.classList.add('embedded')
 let sshHostEntries = []
 let activeMode = 'local'
-let activeSection = ['connection', 'updates'].includes(params.get('section')) ? params.get('section') : 'connection'
 let updateState = { busy: false, updating: false, autoCheckOnLaunch: true, lastCheckAt: '', components: [], available: [] }
+// One-shot guard for the cancel button click state. Set while a cancel
+// request is in flight; renderUpdates() resets it once the update settles.
+let cancelClickPending = false
 let deviceTerminal = '本地'
 let savedSettings = null
 let activeTheme = 'default'
@@ -171,57 +177,31 @@ function status(text, ok) {
 function switchOf(id) { return $(id).getAttribute('aria-checked') === 'true' }
 function setSwitch(id, value) { $(id).setAttribute('aria-checked', value ? 'true' : 'false') }
 
-// ── section navigation ──────────────────────────────────────────────────────
+// ── single-page layout ─────────────────────────────────────────────────────
+// The settings panel is ONE scrolling page (更新 → 连接 → 外观 → 日志).
+// `dialog:section` from the main process (launcher / menus / error buttons)
+// only scrolls to the matching anchor.
 
-function refreshSections() {
-  for (const button of document.querySelectorAll('.settings-nav button')) {
-    button.classList.toggle('active', button.dataset.section === activeSection)
-  }
-  for (const name of ['connection', 'updates']) {
-    $(`section-${name}`).classList.toggle('hidden', name !== activeSection)
-  }
-  const meta = {
-    connection: ['连接', '选择运行 DeepSeek Harness 的方式'],
-    updates: ['设置', '检查与更新当前设备的 Harness'],
-  }
-  $('section-title').textContent = meta[activeSection][0]
-  $('section-subtitle').textContent = meta[activeSection][1]
-  renderFooter()
+function anchorSection(section) {
+  const target = section === 'updates' ? $('section-updates') : $('section-connection')
+  if (target !== null) target.scrollIntoView({ behavior: 'smooth', block: 'start' })
 }
-function selectSection(name) {
-  if (!['connection', 'updates'].includes(name)) name = 'connection'
-  activeSection = name
-  refreshSections()
-  if (name === 'updates') void refreshUpdatesLog()
-}
-for (const button of document.querySelectorAll('.settings-nav button')) {
-  button.addEventListener('click', () => selectSection(button.dataset.section))
-}
+
 $('close-window').addEventListener('click', () => {
   if (api.closePanel) api.closePanel()
   else window.close()
 })
-api.onSection && api.onSection(section => selectSection(section))
-refreshSections()
+api.onSection && api.onSection(section => anchorSection(section))
 
 function renderFooter() {
-  const actions = $('footer-actions')
-  actions.textContent = ''
-  if (activeSection === 'updates') {
-    const last = updateState.lastCheckAt
-      ? new Date(updateState.lastCheckAt).toLocaleString('zh-CN', { hour12: false })
-      : '尚未检查'
-    status(`上次检查：${last}${updateState.busy ? ' · 任务执行中' : ''}`)
-    return
-  }
-  const save = document.createElement('button')
-  save.id = 'save-settings'
-  save.className = 'button primary'
-  save.type = 'button'
-  save.textContent = '保存并连接'
-  save.addEventListener('click', saveSettings)
-  actions.appendChild(save)
+  // Footer only shows the live status note; the primary save action lives
+  // inline at the bottom of the connection card (right where the form is),
+  // so the footer stops being a misplaced global action.
+  $('footer-actions').textContent = ''
 }
+
+// Wire the connection card's primary save button once.
+$('save-settings').addEventListener('click', saveSettings)
 
 // ── connection form ─────────────────────────────────────────────────────────
 
@@ -287,7 +267,6 @@ function renderUpdates() {
     empty.style.cssText = 'display:flex;min-height:180px;align-items:center;justify-content:center;color:var(--ds-text-muted);border:1px dashed var(--ds-border-strong);border-radius:10px;margin:12px 0'
     empty.textContent = '当前窗口尚未连接终端。请先在「连接」中选择并保存终端。'
     list.appendChild(empty)
-    const badgeEl = $('nav-update-count'); badgeEl.hidden = true; badgeEl.textContent = '0'
     setSwitch('auto-check', updateState.autoCheckOnLaunch === false ? false : true)
     $('check-all').disabled = true
     $('update-all').disabled = true
@@ -314,8 +293,8 @@ function renderUpdates() {
       // during an update this row's primary action yields to it.
       if (updateState.updating) {
         const button = document.createElement('button'); button.className = 'button danger'; button.type = 'button'
-        button.textContent = '取消更新'; button.disabled = false
-        button.addEventListener('click', () => api.updates.action('cancel-update', {})); actions.appendChild(button)
+        button.textContent = cancelClickPending ? '正在取消…' : '取消更新'; button.disabled = cancelClickPending
+        button.addEventListener('click', requestCancelUpdate); actions.appendChild(button)
       } else if (row.updateAvailable) {
         const button = document.createElement('button'); button.className = 'button primary'; button.type = 'button'
         button.textContent = '更新并重启'; button.disabled = busy
@@ -329,24 +308,40 @@ function renderUpdates() {
     item.appendChild(actions); list.appendChild(item)
   }
   const count = updateState.available.filter(row => row.enabled).length
-  const badgeEl = $('nav-update-count'); badgeEl.hidden = count === 0; badgeEl.textContent = String(count)
   setSwitch('auto-check', updateState.autoCheckOnLaunch !== false)
+  // Single page: surface the last-check time in the section lead instead of
+  // the old per-section footer note.
+  {
+    const last = updateState.lastCheckAt
+      ? new Date(updateState.lastCheckAt).toLocaleString('zh-CN', { hour12: false })
+      : '尚未检查'
+    $('updates-lead').textContent = `检查与更新当前设备的 Harness。上次检查：${last}`
+  }
   const updating = updateState.updating === true
+  // Once the update settles (success/failure/cancel) the one-shot cancel
+  // state is over; the next update starts with a fresh 「取消更新」 button.
+  if (!updating) cancelClickPending = false
   // The shared top bar flips between 「更新并重启」 and 「取消更新」 — the
   // button is never disabled mid-update so cancel always stays clickable.
   $('check-all').disabled = updateState.busy
   $('update-all').disabled = !updating && (updateState.busy || count === 0)
   $('update-all').hidden = updating
   $('cancel-update').hidden = !updating
+  // The cancel button is reused across update runs: reset its one-shot
+  // click state so a new update always starts with a clickable 「取消更新」.
+  $('cancel-update').disabled = updating && cancelClickPending
+  $('cancel-update').textContent = cancelClickPending ? '正在取消…' : '取消更新'
   renderFooter()
 }
 $('check-all').addEventListener('click', () => api.updates.action('check-all', {}))
 $('update-all').addEventListener('click', () => api.updates.action('update-all', {}))
-$('cancel-update').addEventListener('click', () => {
-  const button = $('cancel-update'); if (button.disabled) return
-  button.disabled = true; button.textContent = '正在取消…'
+function requestCancelUpdate() {
+  if (cancelClickPending) return
+  cancelClickPending = true
+  renderUpdates()
   api.updates.action('cancel-update', {})
-})
+}
+$('cancel-update').addEventListener('click', requestCancelUpdate)
 $('restart-service').addEventListener('click', async () => {
   const button = $('restart-service'); if (button.disabled) return
   button.disabled = true; button.textContent = '重启中…'
@@ -381,9 +376,15 @@ api.updates.onState(state => { updateState = state; renderUpdates() })
 /** Live connection strip for the connection page; no page jump on connect. */
 function renderLive(live) {
   const strip = $('live-strip')
+  strip.textContent = ''
   if (live && live.state === 'ready' && live.url) {
     strip.hidden = false
-    strip.textContent = '当前连接：' + live.url + ' — ' + live.detail
+    // Healthy state: normal text colour with a leading green dot — the text
+    // itself stays readable/copyable instead of being tinted green.
+    const dot = document.createElement('span')
+    dot.className = 'live-dot'
+    strip.appendChild(dot)
+    strip.appendChild(document.createTextNode('当前连接：' + live.url + ' — ' + live.detail))
   } else if (live && live.detail) {
     strip.hidden = false
     strip.textContent = '状态：' + live.detail
@@ -483,13 +484,14 @@ async function saveSettings() {
     local: { repoDir: $('local-repo').value.trim(), repoUrl: $('local-url').value.trim(), dshHome: $('local-home').value.trim(), port: savedSettings?.local?.port ?? 3080 },
     ssh: { host: selectedSshHost(), remoteRepoUrl: $('ssh-url').value.trim(), remoteRepoDir: $('ssh-dir').value.trim(), remotePort: savedSettings?.ssh?.remotePort ?? 3080, localPort: savedSettings?.ssh?.localPort ?? 3080 },
   }
-  if (mode === 'local' && raw.local.repoDir === '') { status('请填写仓库目录', false); return }
-  if (mode === 'ssh' && raw.ssh.host === '') { status('请选择 SSH 主机', false); return }
+  if (mode === 'local' && raw.local.repoDir === '') { status('请填写仓库目录（默认：产品目录下的 deepseek-harness/）。', false); return }
+  if (mode === 'ssh' && raw.ssh.host === '') { status('请选择 SSH 主机，或填写自定义地址。', false); return }
   const save = $('save-settings'); if (save) save.disabled = true
-  status('保存并重新连接…')
+  status('保存并连接…')
   const outcome = await api.save(raw)
   if (save) save.disabled = false
   if (!outcome.ok) status(outcome.error || '保存失败', false)
+  else status('已保存，正在连接…')
 }
 
 // ── boot ────────────────────────────────────────────────────────────────────
@@ -520,8 +522,12 @@ api.getState().then(state => {
   setSwitch('auto-check', updateState.autoCheckOnLaunch)
   renderLive(state.live)
   renderThemes()
-  refreshMode(); refreshSshHost(); refreshSections()
-  if (activeSection === 'updates') void refreshUpdatesLog()
+  refreshMode(); refreshSshHost(); renderFooter()
+  // Single page: the log card is always visible, so hydrate it once at boot.
+  void refreshUpdatesLog()
+  // Anchor from the query param (launcher / menu deep links).
+  const section = ['connection', 'updates'].includes(params.get('section')) ? params.get('section') : ''
+  if (section !== '') anchorSection(section)
 })
 
 api.updates.getState().then(state => { updateState = state; renderUpdates() })

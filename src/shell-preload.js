@@ -18,7 +18,11 @@ function subscribe(channel, callback) {
 contextBridge.exposeInMainWorld('desktopShell', {
   navigate: view => ipcRenderer.invoke('shell:navigate', view),
   newWindow: () => ipcRenderer.invoke('shell:new-window'),
-  action: name => ipcRenderer.invoke('shell:action', name),
+  action: (name, payload) => ipcRenderer.invoke('shell:action', name, payload),
+  // Session log history replay: hydrates the loading panel when it first
+  // appears, so a window opened (or switched back) mid-connect sees the
+  // full story instead of starting from an empty console.
+  getLogDump: () => ipcRenderer.invoke('shell:log-dump'),
   onState: callback => subscribe('shell:state', callback),
   onLog: callback => subscribe('shell:log', callback),
   onTheme: callback => subscribe('shell:theme', callback),
