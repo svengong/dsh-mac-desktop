@@ -493,6 +493,7 @@ async function main() {
   // Updater cancel contract: requestCancel flips the intent immediately and
   // awaitCancelled settles once the pipeline is done; a cancelled pipeline
   // reports { ok:false, cancelled:true } and never touches the runtime.
+  const { Updater } = require('../src/update')
   const cancelHome = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-cancel-'))
   const cancelCalls = []
   const cancelUpdater = new Updater({
@@ -523,7 +524,6 @@ async function main() {
 
   // artifact preference: SSH-remote with the official repo URL prefers the
   // prebuilt npm artifact too (no remote compilation); forks stay source.
-  const { Updater } = require('../src/update')
   const prefUpdater = new Updater({ getSettings: () => ({}), connection: null })
   assert.strictEqual(prefUpdater.preferArtifact({ mode: 'ssh', ssh: { remoteRepoUrl: '' } }), true)
   assert.strictEqual(prefUpdater.preferArtifact({ mode: 'ssh', ssh: { remoteRepoUrl: 'https://github.com/deepseek-ai/deepseek-harness.git' } }), true)
