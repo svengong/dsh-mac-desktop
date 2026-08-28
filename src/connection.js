@@ -248,6 +248,57 @@ async function discoverLocalService({ runtimeDir = null, dshHome = null } = {}) 
   return null
 }
 
+// One round-trip inventory of every `dsh web` host on a remote machine:
+// `pid|files-under-home|port,port`. The port scan and the home-ownership
+// check are folded into the same `ps` loop on purpose — each remote command
+// costs a full ssh handshake, and a remote connect already spends several.
+// No single quotes: `shellQuote` wraps the whole thing in them.
+// `node` only: a `bash -c "… bin.js web …"` launcher shares the host's
+// command line and often its cwd under the home, and killing it would take
+// down a wrapper rather than a host. Real hosts always exec node.
+const REMOTE_HOST_SCAN = 'ps ax -o pid=,command= 2>/dev/null | grep -E "bin\\.js +web" | grep -v grep | grep -E "^[[:space:]]*[0-9]+[[:space:]]+([^[:space:]]*/)?node([0-9.]*)?[[:space:]]" | sed -E "s/^[[:space:]]*([0-9]+).*/\\1/" | while read p; do uses=$(lsof -Fn -p $p 2>/dev/null | grep -c "^n$HOME/.dsh/"); ports=$(lsof -nP -a -p $p -iTCP -sTCP:LISTEN 2>/dev/null | grep -oE "(127\\.0\\.0\\.1|\\[::1\\]):[0-9]+" | sed -E "s/.*:([0-9]+)$/\\1/" | tr "\\n" "," | sed "s/,$//"); echo "$p|$uses|$ports"; done'
+
+/**
+ * Parse `REMOTE_HOST_SCAN` output into host records. Pure so the parsing —
+ * the easiest part to get wrong — is testable without an ssh connection.
+ * @param {string[]} lines
+ * @returns {Array<{pid: number, usesHome: boolean, ports: number[]}>}
+ */
+function parseRemoteHostScan(lines) {
+  const hosts = []
+  for (const line of lines ?? []) {
+    const match = /^(\d+)\|(\d+)\|(.*)$/u.exec(line.trim())
+    if (match === null) continue
+    const pid = Number(match[1])
+    if (!Number.isInteger(pid) || pid <= 0) continue
+    hosts.push({
+      pid,
+      usesHome: Number(match[2]) > 0,
+      ports: match[3]
+        .split(',')
+        .map(value => Number(value))
+        .filter(port => Number.isInteger(port) && port > 0),
+    })
+  }
+  return hosts
+}
+
+/**
+ * Which ports the remote probe reported as serving the dsh boot page.
+ * Input lines look like `44571=1`; anything that is not a positive count
+ * (curl failed, connection refused, non-dsh listener) is dropped.
+ * @param {string[]} lines
+ * @returns {Set<number>}
+ */
+function parseRemoteProbe(lines) {
+  const live = new Set()
+  for (const line of lines ?? []) {
+    const match = /^(\d+)=(\d+)$/u.exec(line.trim())
+    if (match !== null && Number(match[2]) > 0) live.add(Number(match[1]))
+  }
+  return live
+}
+
 async function waitReady(url, timeoutMs = READY_TIMEOUT_MS) {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
@@ -1217,15 +1268,23 @@ class ConnectionManager extends EventEmitter {
     // This fast path is lock-free: reusing an already-running service never
     // spawns anything, so it cannot orphan a process.
     if (state !== null && state.version === version) {
-      this.remotePort = state.port
-      await this.startTunnelOnFreePort(settings, state.port)
-      const probe = await probeOnce(this.url())
-      if (probe.up && probe.isDsh) {
-        this.log(`复用远端 dsh web（端口 ${state.port}，版本 ${version.slice(0, 8)}）`)
-        this.setStatus({ state: 'ready', url: this.url(), detail: `已连接（${displayLabel(target)}，复用远端服务）`, serviceOwner: 'remote' })
-        return
+      // Ask the host itself before spending an ssh tunnel on the recorded
+      // port: a service that already died would otherwise cost a full tunnel
+      // setup and surface ssh's `channel N: open failed: Connection refused`
+      // in the log before falling through.
+      if (await this.remoteProbePort(settings, state.port)) {
+        this.remotePort = state.port
+        await this.startTunnelOnFreePort(settings, state.port)
+        const probe = await probeOnce(this.url())
+        if (probe.up && probe.isDsh) {
+          this.log(`复用远端 dsh web（端口 ${state.port}，版本 ${version.slice(0, 8)}）`)
+          this.setStatus({ state: 'ready', url: this.url(), detail: `已连接（${displayLabel(target)}，复用远端服务）`, serviceOwner: 'remote' })
+          return
+        }
+        // Tunnel is up but nothing dsh answers behind it: fall through.
       }
-      // Tunnel is up but nothing dsh answers behind it: fall through to (re)start.
+      // The recorded port is dead (crash, remote reboot, self-restart): fall
+      // through to adoption / relaunch instead of reusing a stale tunnel.
     }
 
     // The reap→launch→write-state sequence is serialized under a remote lock
@@ -1245,15 +1304,28 @@ class ConnectionManager extends EventEmitter {
           // reboot) while the state stayed intact. Reuse only a LIVE service;
           // otherwise reap and relaunch instead of building a tunnel to a
           // dead port and timing out in waitReady.
-          const alive = await this.remoteRun(
-            settings.ssh.host,
-            `node -e "fetch('http://127.0.0.1:${fresh.port}/').then(r=>r.text()).then(t=>process.stdout.write(t.includes('__DSH_BOOT__')?'yes':'no')).catch(()=>process.stdout.write('no'))" 2>/dev/null || echo no`,
-            { timeoutMs: 10_000 },
-          )
-          if (alive.code === 0 && alive.lines.includes('yes')) return fresh.port
+          if (await this.remoteProbePort(settings, fresh.port)) return fresh.port
           this.log(`远端服务已退出（端口 ${fresh.port}），自动重启…`)
         }
-        await this.reapRemoteService(settings, fresh ?? state)
+        // The recorded port may also be stale because the harness relaunched
+        // ITSELF: dsh-market's self-restart starts the replacement detached
+        // with its stdout sent to a temp file, so the port it moved to never
+        // reaches us and the state still names the port of the process that
+        // exited. That host is usually up and healthy — adopt it. Spawning
+        // blindly would start a second host over the same dsh home, and the
+        // task-board ledger makes that a crash loop, not a fallback.
+        const orphan = await this.discoverRemoteService(settings)
+        if (orphan !== null) {
+          this.log(`接管未托管的远端 dsh web（pid ${orphan.pid}，端口 ${orphan.port}）`)
+          await this.writeRemoteState(settings, { pid: orphan.pid, port: orphan.port, version })
+          return orphan.port
+        }
+        // Nothing healthy to adopt, so a host we could NOT reach may still be
+        // holding the remote task-board ledger. Clear every host over this
+        // dsh home before spawning — `reapRemoteService` alone only ever knew
+        // about the recorded pid and port, which is exactly what a
+        // self-restart invalidates.
+        if ((await this.reapRemoteHosts(settings, fresh ?? state)) > 0) await sleep(2000)
         return this.launchRemoteService(settings, 0, version)
       },
       { timeoutMs: 90_000 },
@@ -1304,6 +1376,116 @@ class ConnectionManager extends EventEmitter {
         await sleep(800)
       }
     }
+  }
+
+  /**
+   * Every `dsh web` host on the remote machine: its loopback ports and whether
+   * it serves this shell's remote dsh home (`~/.dsh`, hard-coded by the remote
+   * state/pid/port files — `settings.local.dshHome` is local-only).
+   * @returns {Promise<Array<{pid: number, usesHome: boolean, ports: number[]}>>}
+   */
+  async remoteHostCandidates(settings) {
+    const scan = await this.remoteRun(settings.ssh.host, REMOTE_HOST_SCAN, { timeoutMs: 20_000 })
+      .catch(() => null)
+    if (scan === null || scan.code !== 0) return []
+    return parseRemoteHostScan(scan.lines)
+  }
+
+  /**
+   * Whether a remote port answers with the dsh boot page. Runs ON the remote
+   * host: the port is not reachable from here until a tunnel is built, which
+   * is exactly what we are trying to decide.
+   *
+   * `curl`, not `node -e fetch(...)`: a remote box may ship an ancient node
+   * (v12 has no global `fetch`), and the old probe silently answered "no"
+   * there — a healthy service was reported dead and reaped on every connect.
+   */
+  async remoteProbePort(settings, port) {
+    if (!Number.isInteger(port) || port <= 0) return false
+    const result = await this.remoteRun(
+      settings.ssh.host,
+      `curl -s --max-time 5 http://127.0.0.1:${port}/ | grep -c "__DSH_BOOT__"`,
+      { timeoutMs: 20_000 },
+    ).catch(() => null)
+    if (result === null || result.code !== 0) return false
+    return result.lines.some(line => /^[1-9]/u.test(line.trim()))
+  }
+
+  /**
+   * Find a `dsh web` host on the remote machine that this shell did not start
+   * but that serves its dsh home — the remote twin of `discoverOwnedService`.
+   * A dsh-market self-restart leaves exactly this behind: the replacement
+   * listens on a port the state file never learned, so the recorded pid/port
+   * both look dead while a perfectly healthy host is running.
+   * @returns {Promise<{pid: number, port: number}|null>}
+   */
+  async discoverRemoteService(settings) {
+    const candidates = (await this.remoteHostCandidates(settings))
+      .filter(host => host.usesHome && host.ports.length > 0)
+    if (candidates.length === 0) return null
+    const ports = [...new Set(candidates.flatMap(host => host.ports))]
+    // One round-trip for every candidate port rather than one per port.
+    const probe = await this.remoteRun(
+      settings.ssh.host,
+      `for port in ${ports.join(' ')}; do n=$(curl -s --max-time 3 http://127.0.0.1:$port/ | grep -c "__DSH_BOOT__"); echo "$port=$n"; done`,
+      { timeoutMs: 15_000 + ports.length * 5000 },
+    ).catch(() => null)
+    if (probe === null || probe.code !== 0) return null
+    const live = parseRemoteProbe(probe.lines)
+    for (const host of candidates) {
+      const port = host.ports.find(value => live.has(value))
+      if (port !== undefined) return { pid: host.pid, port }
+    }
+    return null
+  }
+
+  /**
+   * Reap EVERY `dsh web` host over this shell's remote dsh home — the remote
+   * twin of `reapLocalHosts`. Only called once adoption has been ruled out,
+   * so anything still running is a host we could not reach: the task-board
+   * plugin releases its ledger lock only when the owning pid dies, so a wedged
+   * host crash-loops every spawn below. `usesHome` confines this to OUR home,
+   * so a colleague's instance on a shared box is never touched.
+   *
+   * The sweep can see nothing at all when `lsof` is missing; the recorded pid
+   * is then still signalled, preserving the old targeted behaviour.
+   * @returns {Promise<number>} how many host processes were signalled.
+   */
+  async reapRemoteHosts(settings, state = null) {
+    const candidates = await this.remoteHostCandidates(settings)
+    const pids = candidates.filter(host => host.usesHome).map(host => host.pid)
+    const recorded = state !== null && state !== undefined && Number.isInteger(state.pid) ? state.pid : 0
+    if (recorded > 0 && !pids.includes(recorded)) {
+      // Unclassified (sweep missed it or saw it outside our home). Only add it
+      // when the sweep did not see it — a host we CAN see serving another home
+      // must never be killed.
+      if (!candidates.some(host => host.pid === recorded)) pids.push(recorded)
+    }
+    if (pids.length === 0) return 0
+    const list = pids.join(' ')
+    // One round-trip: report which candidates are actually alive (a stale
+    // recorded pid is the common case), TERM them, wait up to ~5s for the
+    // host to release the task-board ledger, then KILL any straggler.
+    // Counting only the live ones keeps the log — and the caller's "did we
+    // reap anything?" decision — honest.
+    const result = await this.remoteRun(
+      settings.ssh.host,
+      `alive=""; for p in ${list}; do if kill -0 $p 2>/dev/null; then alive="$alive $p"; fi; done; echo "ALIVE$alive"; if [ -n "$alive" ]; then for p in $alive; do kill $p 2>/dev/null; done; for i in 1 2 3 4 5 6 7 8 9 10; do left=0; for p in $alive; do if kill -0 $p 2>/dev/null; then left=1; fi; done; if [ $left -eq 0 ]; then break; fi; sleep 0.5; done; for p in $alive; do kill -9 $p 2>/dev/null; done; sleep 0.5; fi`,
+      { timeoutMs: 30_000 },
+    ).catch(() => null)
+    if (result === null || result.code !== 0) return 0
+    const reported = result.lines
+      .map(line => /^ALIVE(.*)$/u.exec(line.trim()))
+      .find(match => match !== null)
+    if (reported === undefined) return 0
+    const killed = reported[1]
+      .trim()
+      .split(/\s+/u)
+      .filter(part => part !== '')
+      .map(Number)
+      .filter(pid => Number.isInteger(pid) && pid > 0)
+    if (killed.length > 0) this.log(`清理残留远端 dsh web（pid ${killed.join('、')}）…`)
+    return killed.length
   }
 
   /**
@@ -1555,6 +1737,10 @@ class ConnectionManager extends EventEmitter {
       { timeoutMs: 15_000 },
     )
     await sleep(1500)
+    // A self-restart invalidates the recorded pid: the replacement keeps
+    // running on a port the state never learned, and it still owns the
+    // task-board ledger — the spawn below would crash-loop against it.
+    if ((await this.reapRemoteHosts(settings, state)) > 0) await sleep(2000)
     const version = await this.serviceVersion(settings)
     return this.launchRemoteService(settings, 0, version)
   }
@@ -1567,4 +1753,7 @@ module.exports = {
   dshWebProcesses,
   listeningLoopbackPorts,
   discoverLocalService,
+  parseRemoteHostScan,
+  parseRemoteProbe,
+  REMOTE_HOST_SCAN,
 }

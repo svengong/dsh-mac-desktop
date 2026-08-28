@@ -388,6 +388,38 @@ async function main() {
   )
   fs.rmSync(bystanderHome, { recursive: true, force: true })
 
+  // Remote twin of the above: an ssh round-trip costs a full handshake, so a
+  // single command returns `pid|files-under-home|port,port` per host and the
+  // parsing is a pure function — the part most likely to rot, so it is
+  // asserted here with no ssh connection involved.
+  const { parseRemoteHostScan, parseRemoteProbe, REMOTE_HOST_SCAN } = require('../src/connection')
+  assert.deepStrictEqual(
+    parseRemoteHostScan(['3663408|8|35993']),
+    [{ pid: 3663408, usesHome: true, ports: [35993] }],
+    'a host with files under the home is one we may adopt',
+  )
+  assert.deepStrictEqual(
+    parseRemoteHostScan(['42|0|53100,53101']),
+    [{ pid: 42, usesHome: false, ports: [53100, 53101] }],
+    'a host outside our dsh home must be marked a bystander',
+  )
+  assert.deepStrictEqual(
+    parseRemoteHostScan(['7|3|']),
+    [{ pid: 7, usesHome: true, ports: [] }],
+    'a host not listening yet still has to be reaped',
+  )
+  assert.deepStrictEqual(parseRemoteHostScan(['garbage', '', '|1|80', '0|1|80']), [], 'malformed scan lines are ignored')
+  assert.deepStrictEqual(parseRemoteHostScan([]), [], 'an empty scan yields no hosts')
+  assert.deepStrictEqual(parseRemoteHostScan(undefined), [], 'a missing scan yields no hosts')
+  assert.deepStrictEqual([...parseRemoteProbe(['35993=1'])], [35993])
+  assert.deepStrictEqual([...parseRemoteProbe(['35993=0'])], [], 'a non-dsh listener must not be adopted')
+  assert.deepStrictEqual([...parseRemoteProbe(['35993=1', '44571=0', '53100=2'])], [35993, 53100])
+  assert.deepStrictEqual([...parseRemoteProbe(['junk', ''])], [])
+  // The scan command itself: `shellQuote` wraps the whole remote command in
+  // single quotes, so an unescaped one inside would break it.
+  assert.ok(!REMOTE_HOST_SCAN.includes("'"), 'the remote scan must not use single quotes')
+  assert.ok(REMOTE_HOST_SCAN.includes('$HOME/.dsh/'), 'the remote scan must confine itself to the remote dsh home')
+
   // Local `--port 0`: the shell adopts the OS-chosen port from stdout.
   // This needs a BUILT local checkout (deepseek-harness/); on CI the
   // checkout is absent (it is gitignored), so skip instead of failing —
