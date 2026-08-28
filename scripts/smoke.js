@@ -411,10 +411,20 @@ async function main() {
   assert.deepStrictEqual(parseRemoteHostScan(['garbage', '', '|1|80', '0|1|80']), [], 'malformed scan lines are ignored')
   assert.deepStrictEqual(parseRemoteHostScan([]), [], 'an empty scan yields no hosts')
   assert.deepStrictEqual(parseRemoteHostScan(undefined), [], 'a missing scan yields no hosts')
+  // A raw string is split into lines. Passing one to a `for..of` over an array
+  // would iterate CHARACTER by character and match nothing — and an empty sweep
+  // reads as "nothing to reap", leaving an orphan to hold the task-board ledger
+  // and crash-loop the next spawn. The failure is silent, so it is asserted.
+  assert.deepStrictEqual(
+    parseRemoteHostScan('3663408|8|35993\n42|0|53100,53101\n'),
+    [{ pid: 3663408, usesHome: true, ports: [35993] }, { pid: 42, usesHome: false, ports: [53100, 53101] }],
+    'a raw scan string is split into lines instead of iterated per character',
+  )
   assert.deepStrictEqual([...parseRemoteProbe(['35993=1'])], [35993])
   assert.deepStrictEqual([...parseRemoteProbe(['35993=0'])], [], 'a non-dsh listener must not be adopted')
   assert.deepStrictEqual([...parseRemoteProbe(['35993=1', '44571=0', '53100=2'])], [35993, 53100])
   assert.deepStrictEqual([...parseRemoteProbe(['junk', ''])], [])
+  assert.deepStrictEqual([...parseRemoteProbe('35993=1\n44571=0\n')], [35993], 'a raw probe string is split into lines too')
   // The scan command itself: `shellQuote` wraps the whole remote command in
   // single quotes, so an unescaped one inside would break it.
   assert.ok(!REMOTE_HOST_SCAN.includes("'"), 'the remote scan must not use single quotes')

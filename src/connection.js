@@ -255,7 +255,13 @@ const REMOTE_HOST_SCAN = 'ps ax -o pid=,command= 2>/dev/null | grep -E "bin\\.js
  */
 function parseRemoteHostScan(lines) {
   const hosts = []
-  for (const line of lines ?? []) {
+  // Accept a raw string too. `for..of` over a string walks it CHARACTER by
+  // character, so a string argument would match nothing and silently yield no
+  // hosts — and an empty sweep means "nothing to reap", letting an orphan
+  // survive to hold the task-board ledger and crash-loop the next spawn. An
+  // empty result is the worst possible answer here, so make it impossible to
+  // reach by accident.
+  for (const line of typeof lines === 'string' ? lines.split('\n') : lines ?? []) {
     const match = /^(\d+)\|(\d+)\|(.*)$/u.exec(line.trim())
     if (match === null) continue
     const pid = Number(match[1])
@@ -281,7 +287,9 @@ function parseRemoteHostScan(lines) {
  */
 function parseRemoteProbe(lines) {
   const live = new Set()
-  for (const line of lines ?? []) {
+  // Same string-safety as `parseRemoteHostScan`: an empty probe means "this
+  // port is dead", so a miscalled parse would reap a healthy service.
+  for (const line of typeof lines === 'string' ? lines.split('\n') : lines ?? []) {
     const match = /^(\d+)=(\d+)$/u.exec(line.trim())
     if (match !== null && Number(match[2]) > 0) live.add(Number(match[1]))
   }
