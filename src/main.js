@@ -3025,8 +3025,15 @@ if (!gotLock) {
     // by the atomic `current`-symlink switch. So quit tears down children
     // directly instead of blocking on a busy gate. The registry kills every
     // child this shell spawned — including in-flight git/pnpm commands that
-    // no session reference covers — so quitting never orphans a build or an
-    // adopted service (both would otherwise keep running after exit).
+    // no session reference covers — so quitting never orphans a build.
+    //
+    // It deliberately does NOT reach an adopted service. An adopted service
+    // has no ChildProcess here: it was found by scanning ports, so it never
+    // went through `spawnService` and `killActiveChildren` has no handle on
+    // it. Leaving it alive is the point — it already outlived one shell (a
+    // dsh-market self-restart, or the user starting it by hand), and killing
+    // it on quit would discard a warm service the next run would only have to
+    // rebuild. The next launch re-adopts it by port instead.
     quitting = true
     if (windowManager !== null) windowManager.save()
     for (const session of sessions.values()) session.connection.stop()
