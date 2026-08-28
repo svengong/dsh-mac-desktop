@@ -160,6 +160,94 @@ async function findListeningPid(port) {
   return 0
 }
 
+/**
+ * Every running `dsh web` host process, with the runtime bin it boots.
+ *
+ * Needed because the harness can end up running WITHOUT the shell having
+ * spawned it: the dsh-market plugin relaunches the host through a detached
+ * helper (`dshmarket/src/restart.ts`) whose stdout is redirected to a temp
+ * file. The shell's port handshake reads the child's stdout, so it never
+ * learns the replacement's port — and the state file keeps pointing at the
+ * port the process that just exited was using. The service is healthy and
+ * answering; the shell simply has no idea where it went.
+ * @returns {Array<{pid: number, bin: string}>}
+ */
+async function dshWebProcesses() {
+  const result = await runCommand({
+    cmd: 'ps',
+    args: ['ax', '-o', 'pid=,command='],
+    timeoutMs: 5000,
+  }).catch(() => null)
+  if (result === null || result.code !== 0) return []
+  const found = []
+  for (const line of result.lines) {
+    const match = /^\s*(\d+)\s+(.*)$/u.exec(line)
+    if (match === null) continue
+    const pid = Number(match[1])
+    if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) continue
+    // `node <bin> web …` — matches both the npm artifact and the repo layout.
+    const binMatch = /(\S*(?:@deepseek-ai[\\/]dsh|apps[\\/]cli)[\\/]lib[\\/]bin\.js)\s+web\b/u.exec(match[2])
+    if (binMatch === null) continue
+    found.push({ pid, bin: binMatch[1] })
+  }
+  return found
+}
+
+/** Loopback TCP ports one process is listening on. */
+async function listeningLoopbackPorts(pid) {
+  const result = await runCommand({
+    cmd: 'lsof',
+    args: ['-nP', '-a', '-p', String(pid), '-iTCP', '-sTCP:LISTEN'],
+    timeoutMs: 5000,
+  }).catch(() => null)
+  if (result === null || result.code !== 0) return []
+  const ports = []
+  for (const line of result.lines) {
+    const match = /(?:127\.0\.0\.1|\[::1\]|localhost):(\d{1,5})\s+\(LISTEN\)/u.exec(line)
+    if (match === null) continue
+    const port = Number(match[1])
+    if (Number.isInteger(port) && port > 0) ports.push(port)
+  }
+  return ports
+}
+
+/**
+ * Whether a process has files open under `dshHome` — its settings or
+ * credentials. This is what tells two `dsh web` hosts that share one
+ * installed runtime apart: the shell must only ever adopt the instance
+ * serving ITS dsh home, never a bystander started from another one.
+ */
+async function processUsesHome(pid, dshHome) {
+  if (dshHome === null || dshHome === undefined || dshHome === '') return true
+  const result = await runCommand({
+    cmd: 'lsof',
+    args: ['-Fn', '-p', String(pid)],
+    timeoutMs: 5000,
+  }).catch(() => null)
+  if (result === null || result.code !== 0) return false
+  const prefix = dshHome.endsWith('/') ? dshHome : `${dshHome}/`
+  // `-Fn` prints one field per line, `n` being the file name.
+  return result.lines.some(line => line.startsWith('n') && line.slice(1).startsWith(prefix))
+}
+
+/**
+ * Find a `dsh web` instance the shell did not spawn but that serves this
+ * runtime and dsh home, confirmed by probing the port it actually listens on.
+ * @returns {Promise<{pid: number, port: number}|null>}
+ */
+async function discoverLocalService({ runtimeDir = null, dshHome = null } = {}) {
+  for (const entry of await dshWebProcesses()) {
+    if (runtimeDir !== null && runtimeDir !== '' && !entry.bin.startsWith(runtimeDir)) continue
+    for (const port of await listeningLoopbackPorts(entry.pid)) {
+      const probe = await probeOnce(`http://127.0.0.1:${port}`)
+      if (!probe.up || !probe.isDsh) continue
+      if (!(await processUsesHome(entry.pid, dshHome))) continue
+      return { pid: entry.pid, port }
+    }
+  }
+  return null
+}
+
 async function waitReady(url, timeoutMs = READY_TIMEOUT_MS) {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
@@ -388,6 +476,54 @@ class ConnectionManager extends EventEmitter {
     const active = await runtimeStore.remoteActiveRuntimeDir(settings, remoteRun)
     if (manifest.current !== null && active !== null) return manifest.current
     return 'unknown'
+  }
+
+  /**
+   * A `dsh web` instance serving THIS shell's runtime and dsh home that the
+   * shell did not spawn — the detached-relaunch case described on
+   * `discoverLocalService`. Adopting it is safe and preferable to spawning:
+   * a second host over the same dsh home would fight it for the session
+   * store and the task-board ledger.
+   * @returns {Promise<{pid: number, port: number}|null>}
+   */
+  async discoverOwnedService(settings) {
+    const runtimeDir = runtimeStore.localActiveRuntimeDir(settings) ?? settings.local.repoDir
+    return discoverLocalService({
+      runtimeDir,
+      dshHome: expandHome(settings.local.dshHome),
+    })
+  }
+
+  /**
+   * Reap every `dsh web` host serving this shell's dsh home — the hosts a
+   * fresh spawn would have to fight.
+   *
+   * Only ever called once adoption has been ruled out, so anything still
+   * running here is a host we could not reach: the task-board plugin releases
+   * its ledger lock only when the owning pid dies (it never probes a port),
+   * so a wedged host crash-loops every spawn until it is signalled. Two hosts
+   * on one dsh home are illegal regardless — they would fight over the
+   * session store — and `processUsesHome` confines this to OUR home so a
+   * bystander instance is never touched. The guard shells wrapped around a
+   * host hold no files under the home, so they are filtered out too and only
+   * real hosts are signalled.
+   * @returns {Promise<number>} how many host processes were signalled.
+   */
+  async reapLocalHosts(settings) {
+    const home = expandHome(settings.local.dshHome)
+    if (home === '') return 0
+    let reaped = 0
+    for (const entry of await dshWebProcesses()) {
+      if (!(await processUsesHome(entry.pid, home))) continue
+      reaped += 1
+      this.log(`清理残留 dsh web（pid ${entry.pid}，${entry.bin}）…`)
+      try {
+        process.kill(entry.pid, 'SIGTERM')
+      } catch {
+        // Already gone.
+      }
+    }
+    return reaped
   }
 
   localStatePath(settings) {
@@ -688,6 +824,10 @@ class ConnectionManager extends EventEmitter {
             // Already gone; fall through to a fresh spawn.
           }
           this.localPort = null
+          // Clear EVERY host over this dsh home, not just the recorded pid:
+          // a market-restart replacement parked on an untracked port still
+          // owns the task-board ledger and would crash-loop the spawn below.
+          if ((await this.reapLocalHosts(settings)) > 0) await sleep(2000)
           await this.spawnLocalService(settings, 0, version)
           await waitReady(this.url())
           this.localRetries = 0
@@ -704,6 +844,9 @@ class ConnectionManager extends EventEmitter {
         return
       }
       this.localPort = null
+      // Same ledger hazard on the no-service path: an unadopted replacement
+      // holds the task-board lock, so clear every host over this home first.
+      if ((await this.reapLocalHosts(settings)) > 0) await sleep(2000)
       await this.spawnLocalService(settings, 0, version)
       await waitReady(this.url())
       this.setStatus({
@@ -744,6 +887,36 @@ class ConnectionManager extends EventEmitter {
         return
       }
     }
+
+    // The recorded port may be stale because the harness relaunched ITSELF:
+    // dsh-market's self-restart spawns the replacement detached with its
+    // stdout sent to a temp file, so the port it moved to never reaches us
+    // and the state above still names the port the process that exited used.
+    // The service is usually up and healthy — find it and adopt it. Spawning
+    // blindly here would start a second host over the same dsh home.
+    const orphan = await this.discoverOwnedService(settings)
+    if (orphan !== null) {
+      this.localPort = orphan.port
+      this.localVersion = version
+      this.writeLocalState(settings, { pid: orphan.pid, port: orphan.port, version })
+      const url = `http://127.0.0.1:${orphan.port}`
+      this.log(`接管未托管的 dsh web（pid ${orphan.pid}，端口 ${orphan.port}）`)
+      this.setStatus({
+        state: 'ready',
+        url,
+        detail: `已连接（接管未托管服务，端口 ${orphan.port}）`,
+        serviceOwner: 'external',
+      })
+      return
+    }
+
+    // Nothing healthy to adopt, so a host we could NOT reach may still be
+    // holding the task-board ledger. The plugin only releases a lock once
+    // the owning pid is gone — it never probes the port — so a wedged host
+    // crash-loops every spawn below. Clear every host over this dsh home:
+    // two hosts on one home are illegal anyway (they would fight over the
+    // session store), and `processUsesHome` confines this to OUR home.
+    if ((await this.reapLocalHosts(settings)) > 0) await sleep(2000)
 
     // Otherwise reap a stale/outdated leftover service (auto-upgrade) so it
     // never lingers as an orphan, then serve on the first free port.
@@ -887,6 +1060,25 @@ class ConnectionManager extends EventEmitter {
           // stale bound port can never force a crash-loop.
           Promise.resolve(this.serviceVersion(settings)).then(async version => {
             if (this.stopped) return
+            // The exit may have been the harness relaunching ITSELF: the
+            // replacement is already booting detached, on a port we are never
+            // told. Adopt it rather than racing it for the same dsh home —
+            // two hosts over one home corrupt the session store.
+            const orphan = await this.discoverOwnedService(settings)
+            if (orphan !== null) {
+              if (epoch !== this.connectEpoch || this.stopped) return
+              this.localPort = orphan.port
+              this.localRetries = 0
+              this.writeLocalState(settings, { pid: orphan.pid, port: orphan.port, version: version || serveVersion })
+              this.log(`接管未托管的 dsh web（pid ${orphan.pid}，端口 ${orphan.port}）`)
+              this.setStatus({
+                state: 'ready',
+                url: `http://127.0.0.1:${orphan.port}`,
+                detail: `已自动重连（接管未托管服务，端口 ${orphan.port}）`,
+                serviceOwner: 'external',
+              })
+              return
+            }
             await this.spawnLocalService(settings, 0, version || serveVersion)
             // A stale timer (superseded by a newer connect) must not emit a
             // ready for a service it no longer owns.
@@ -928,6 +1120,18 @@ class ConnectionManager extends EventEmitter {
       if (this.localChild === service.child) {
         this.killChild(this.localChild)
         this.localChild = null
+      }
+      // Before failing, check whether the handoff actually worked: the child
+      // may have exited because dsh-market relaunched the host detached (its
+      // replacement's stdout goes to a temp file, never to our pipe). That
+      // service is up on a port we were never told — adopt it instead of
+      // reporting a port timeout for a host that is serving fine.
+      const orphan = await this.discoverOwnedService(settings)
+      if (orphan !== null) {
+        this.localPort = orphan.port
+        this.writeLocalState(settings, { pid: orphan.pid, port: orphan.port, version: serveVersion })
+        this.log(`接管未托管的 dsh web（pid ${orphan.pid}，端口 ${orphan.port}）`)
+        return
       }
       throw error
     }
@@ -1356,4 +1560,11 @@ class ConnectionManager extends EventEmitter {
   }
 }
 
-module.exports = { ConnectionManager, probeOnce, waitReady }
+module.exports = {
+  ConnectionManager,
+  probeOnce,
+  waitReady,
+  dshWebProcesses,
+  listeningLoopbackPorts,
+  discoverLocalService,
+}
