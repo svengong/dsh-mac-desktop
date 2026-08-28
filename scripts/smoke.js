@@ -360,13 +360,12 @@ async function main() {
   const fakeWorkspace = { id: 7, deviceKey: 'ssh:dev', window: fakeWin, activeView: 'updates' }
   assert.strictEqual(restoredWm.lastActiveWorkspace(new Map([[7, fakeWorkspace]])), fakeWorkspace)
 
-  // Unmanaged-service discovery: the harness can relaunch itself detached
-  // (dsh-market's self-restart), leaving a healthy host on a port the shell
-  // was never told. Discovery finds it by process scan + probe, and refuses a
-  // host serving a DIFFERENT dsh home so the shell can never adopt a
-  // bystander instance. Assertions are shape- and guard-only: whether a host
-  // happens to be running depends on the machine.
-  const { dshWebProcesses, listeningLoopbackPorts, discoverLocalService } = require('../src/connection')
+  // Host inventory: the shell clears every `dsh web` serving its own dsh home
+  // before starting a known-good one, so the scan must recognise hosts and
+  // their loopback ports, and `processUsesHome` must never claim a host that
+  // belongs to somebody else's home. Assertions are shape- and guard-only:
+  // whether a host happens to be running depends on the machine.
+  const { dshWebProcesses, listeningLoopbackPorts, processUsesHome } = require('../src/connection')
   const bystanderHome = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-bystander-'))
   const scanned = await dshWebProcesses()
   assert.ok(Array.isArray(scanned), 'dshWebProcesses must return an array')
@@ -379,13 +378,14 @@ async function main() {
       assert.ok(Number.isInteger(port) && port > 0 && port <= 65535, `port out of range: ${port}`)
     }
   }
-  // A dsh home nobody uses can never be adopted — the guard that keeps the
-  // shell from hijacking a bystander's instance.
+  // The guard that keeps a sweep from killing a bystander's instance: this
+  // process holds nothing under a throwaway home, so it must not be claimed.
   assert.strictEqual(
-    await discoverLocalService({ runtimeDir: null, dshHome: bystanderHome }),
-    null,
-    'discovery must not adopt a host serving a different dsh home',
+    await processUsesHome(process.pid, bystanderHome),
+    false,
+    'a host serving a different dsh home must never be swept',
   )
+  assert.strictEqual(await processUsesHome(process.pid, ''), true, 'an empty home disables the ownership check')
   fs.rmSync(bystanderHome, { recursive: true, force: true })
 
   // Remote twin of the above: an ssh round-trip costs a full handshake, so a
@@ -419,6 +419,61 @@ async function main() {
   // single quotes, so an unescaped one inside would break it.
   assert.ok(!REMOTE_HOST_SCAN.includes("'"), 'the remote scan must not use single quotes')
   assert.ok(REMOTE_HOST_SCAN.includes('$HOME/.dsh/'), 'the remote scan must confine itself to the remote dsh home')
+
+  // Following a peer shell that is mid-startup: this is what stops two shells
+  // from ping-ponging (each sweeping the host the other just spawned). The
+  // grace period must follow a host that becomes healthy, and must refuse
+  // anything whose recorded version is not ours.
+  const peerWait = new ConnectionManager({ getSettings: () => ({}), onLog: () => {} })
+  let peerReads = 0
+  assert.deepStrictEqual(
+    await peerWait.awaitPeerService({
+      version: 'v2',
+      attempts: 5,
+      intervalMs: 1,
+      readState: async () => {
+        peerReads += 1
+        return peerReads < 3 ? { pid: 1, port: 56000, version: 'v2' } : { pid: 2, port: 41451, version: 'v2' }
+      },
+      probePort: async port => port === 41451,
+    }),
+    { pid: 2, port: 41451, version: 'v2' },
+    'a peer that finishes starting within the grace period is followed',
+  )
+  assert.strictEqual(peerReads, 3, 'following must stop polling as soon as a healthy peer appears')
+  assert.strictEqual(
+    await peerWait.awaitPeerService({
+      version: 'v2',
+      attempts: 3,
+      intervalMs: 1,
+      readState: async () => ({ pid: 1, port: 41451, version: 'v1' }),
+      probePort: async () => true,
+    }),
+    null,
+    'a host recorded against another version must never be followed — it is the old runtime',
+  )
+  assert.strictEqual(
+    await peerWait.awaitPeerService({
+      version: 'v2',
+      attempts: 3,
+      intervalMs: 1,
+      readState: async () => { throw new Error('ssh down') },
+      probePort: async () => true,
+    }),
+    null,
+    'a failing state read must not break the connect',
+  )
+  assert.strictEqual(
+    await peerWait.awaitPeerService({
+      version: 'v2',
+      attempts: 3,
+      intervalMs: 1,
+      readState: async () => null,
+      probePort: async () => true,
+    }),
+    null,
+    'no peer at all falls through to a clean restart',
+  )
 
   // Local `--port 0`: the shell adopts the OS-chosen port from stdout.
   // This needs a BUILT local checkout (deepseek-harness/); on CI the

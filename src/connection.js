@@ -40,6 +40,13 @@ const LOG_RING_LINES = 300
 // reload, an externally-owned or remote service restarting on a new port).
 const HEALTH_INTERVAL_MS = 4000
 const HEALTH_FAILURE_THRESHOLD = 2
+// Grace period for following a peer shell that is mid-startup, before we
+// conclude nothing is serving and take over the restart ourselves. Long enough
+// to cover a peer's port announcement (it polls every 200ms for up to 30s, but
+// a healthy host announces in a couple of seconds), short enough that a genuine
+// restart only ever pays a few seconds of delay.
+const PEER_WAIT_INTERVAL_MS = 1000
+const PEER_WAIT_ATTEMPTS = 6
 
 // Sentinel markers for remoteRun: some ssh gateways (e.g. Tencent devcloud)
 // print a banner line such as `authz success` onto stdout from the remote
@@ -228,24 +235,6 @@ async function processUsesHome(pid, dshHome) {
   const prefix = dshHome.endsWith('/') ? dshHome : `${dshHome}/`
   // `-Fn` prints one field per line, `n` being the file name.
   return result.lines.some(line => line.startsWith('n') && line.slice(1).startsWith(prefix))
-}
-
-/**
- * Find a `dsh web` instance the shell did not spawn but that serves this
- * runtime and dsh home, confirmed by probing the port it actually listens on.
- * @returns {Promise<{pid: number, port: number}|null>}
- */
-async function discoverLocalService({ runtimeDir = null, dshHome = null } = {}) {
-  for (const entry of await dshWebProcesses()) {
-    if (runtimeDir !== null && runtimeDir !== '' && !entry.bin.startsWith(runtimeDir)) continue
-    for (const port of await listeningLoopbackPorts(entry.pid)) {
-      const probe = await probeOnce(`http://127.0.0.1:${port}`)
-      if (!probe.up || !probe.isDsh) continue
-      if (!(await processUsesHome(entry.pid, dshHome))) continue
-      return { pid: entry.pid, port }
-    }
-  }
-  return null
 }
 
 // One round-trip inventory of every `dsh web` host on a remote machine:
@@ -527,22 +516,6 @@ class ConnectionManager extends EventEmitter {
     const active = await runtimeStore.remoteActiveRuntimeDir(settings, remoteRun)
     if (manifest.current !== null && active !== null) return manifest.current
     return 'unknown'
-  }
-
-  /**
-   * A `dsh web` instance serving THIS shell's runtime and dsh home that the
-   * shell did not spawn — the detached-relaunch case described on
-   * `discoverLocalService`. Adopting it is safe and preferable to spawning:
-   * a second host over the same dsh home would fight it for the session
-   * store and the task-board ledger.
-   * @returns {Promise<{pid: number, port: number}|null>}
-   */
-  async discoverOwnedService(settings) {
-    const runtimeDir = runtimeStore.localActiveRuntimeDir(settings) ?? settings.local.repoDir
-    return discoverLocalService({
-      runtimeDir,
-      dshHome: expandHome(settings.local.dshHome),
-    })
   }
 
   /**
@@ -939,34 +912,46 @@ class ConnectionManager extends EventEmitter {
       }
     }
 
-    // The recorded port may be stale because the harness relaunched ITSELF:
-    // dsh-market's self-restart spawns the replacement detached with its
-    // stdout sent to a temp file, so the port it moved to never reaches us
-    // and the state above still names the port the process that exited used.
-    // The service is usually up and healthy — find it and adopt it. Spawning
-    // blindly here would start a second host over the same dsh home.
-    const orphan = await this.discoverOwnedService(settings)
-    if (orphan !== null) {
-      this.localPort = orphan.port
+    // The recorded port is stale — either the recorded host died, or the
+    // harness relaunched ITSELF (dsh-market's self-restart spawns the
+    // replacement detached with its stdout sent to a temp file, so the port
+    // it moved to never reaches us and the state above still names the port
+    // the process that exited used).
+    //
+    // Deliberately NOT adopting the replacement. A host we did not start runs
+    // a runtime whose version we cannot establish: locally we could match its
+    // bin against the active runtime dir, but only because the bin path is
+    // absolute. Adopting one on that guess and recording the CURRENT version
+    // would leave the state file lying — the next connect would take the
+    // reuse fast path (version matches, port answers) and the device would be
+    // pinned to the old runtime for good.
+    //
+    // Follow a peer shell that is mid-startup before taking over: see
+    // `awaitPeerService` for the ping-pong this avoids. Only ever follow a
+    // host whose recorded version is ours — the same condition the reuse fast
+    // path above requires.
+    const peer = await this.awaitPeerService({
+      version,
+      readState: () => this.readLocalState(settings),
+      probePort: async port => {
+        const probe = await probeOnce(`http://127.0.0.1:${port}`)
+        return probe.up && probe.isDsh
+      },
+    })
+    if (peer !== null) {
+      this.localPort = peer.port
       this.localVersion = version
-      this.writeLocalState(settings, { pid: orphan.pid, port: orphan.port, version })
-      const url = `http://127.0.0.1:${orphan.port}`
-      this.log(`接管未托管的 dsh web（pid ${orphan.pid}，端口 ${orphan.port}）`)
-      this.setStatus({
-        state: 'ready',
-        url,
-        detail: `已连接（接管未托管服务，端口 ${orphan.port}）`,
-        serviceOwner: 'external',
-      })
+      const url = `http://127.0.0.1:${peer.port}`
+      this.log(`跟随其他终端已启动的 dsh web（端口 ${peer.port}）`)
+      this.setStatus({ state: 'ready', url, detail: `已连接（跟随其他终端，端口 ${peer.port}）`, serviceOwner: 'external' })
       return
     }
 
-    // Nothing healthy to adopt, so a host we could NOT reach may still be
-    // holding the task-board ledger. The plugin only releases a lock once
-    // the owning pid is gone — it never probes the port — so a wedged host
-    // crash-loops every spawn below. Clear every host over this dsh home:
-    // two hosts on one home are illegal anyway (they would fight over the
-    // session store), and `processUsesHome` confines this to OUR home.
+    // So: clear every host over this dsh home and start a known-good one. The
+    // plugin only releases a lock once the owning pid is gone — it never
+    // probes the port — so a wedged host crash-loops every spawn below. Two
+    // hosts on one home are illegal anyway (they would fight over the session
+    // store), and `processUsesHome` confines this to OUR home.
     if ((await this.reapLocalHosts(settings)) > 0) await sleep(2000)
 
     // Otherwise reap a stale/outdated leftover service (auto-upgrade) so it
@@ -1113,23 +1098,15 @@ class ConnectionManager extends EventEmitter {
             if (this.stopped) return
             // The exit may have been the harness relaunching ITSELF: the
             // replacement is already booting detached, on a port we are never
-            // told. Adopt it rather than racing it for the same dsh home —
-            // two hosts over one home corrupt the session store.
-            const orphan = await this.discoverOwnedService(settings)
-            if (orphan !== null) {
-              if (epoch !== this.connectEpoch || this.stopped) return
-              this.localPort = orphan.port
-              this.localRetries = 0
-              this.writeLocalState(settings, { pid: orphan.pid, port: orphan.port, version: version || serveVersion })
-              this.log(`接管未托管的 dsh web（pid ${orphan.pid}，端口 ${orphan.port}）`)
-              this.setStatus({
-                state: 'ready',
-                url: `http://127.0.0.1:${orphan.port}`,
-                detail: `已自动重连（接管未托管服务，端口 ${orphan.port}）`,
-                serviceOwner: 'external',
-              })
-              return
-            }
+            // told. Do NOT adopt it — a host we did not start runs a runtime
+            // whose version we cannot establish, and recording the current
+            // version for it would pin the device to whatever it happens to
+            // be running (see connectLocal). Clear every host over this dsh
+            // home instead and start one we own: the task-board plugin only
+            // releases its ledger once the owning pid dies, so the leftover
+            // would crash-loop this spawn.
+            if ((await this.reapLocalHosts(settings)) > 0) await sleep(2000)
+            if (epoch !== this.connectEpoch || this.stopped) return
             await this.spawnLocalService(settings, 0, version || serveVersion)
             // A stale timer (superseded by a newer connect) must not emit a
             // ready for a service it no longer owns.
@@ -1172,18 +1149,16 @@ class ConnectionManager extends EventEmitter {
         this.killChild(this.localChild)
         this.localChild = null
       }
-      // Before failing, check whether the handoff actually worked: the child
-      // may have exited because dsh-market relaunched the host detached (its
-      // replacement's stdout goes to a temp file, never to our pipe). That
-      // service is up on a port we were never told — adopt it instead of
-      // reporting a port timeout for a host that is serving fine.
-      const orphan = await this.discoverOwnedService(settings)
-      if (orphan !== null) {
-        this.localPort = orphan.port
-        this.writeLocalState(settings, { pid: orphan.pid, port: orphan.port, version: serveVersion })
-        this.log(`接管未托管的 dsh web（pid ${orphan.pid}，端口 ${orphan.port}）`)
-        return
-      }
+      // Before failing, clear whatever the handoff left behind: the child may
+      // have exited because dsh-market relaunched the host detached (its
+      // replacement's stdout goes to a temp file, never to our pipe), and that
+      // replacement now holds the task-board ledger on a port we were never
+      // told. We do not adopt it — a host we did not start runs a runtime whose
+      // version we cannot establish, and recording ours for it would pin the
+      // device to whatever it happens to be running. Sweep it so the retry (or
+      // the next connect) starts from a clean home instead of crash-looping
+      // against the ledger it still holds.
+      await this.reapLocalHosts(settings).catch(() => 0)
       throw error
     }
   }
@@ -1287,49 +1262,97 @@ class ConnectionManager extends EventEmitter {
       // through to adoption / relaunch instead of reusing a stale tunnel.
     }
 
-    // The reap→launch→write-state sequence is serialized under a remote lock
-    // so two shells (e.g. two aliases reaching the same machine concurrently)
-    // cannot both decide to start and leave one service orphaned. Inside the
-    // lock the state is re-read: a peer may have already started a matching
-    // service, in which case it is adopted instead of started again.
-    const remoteRun = (host, inner, options) => this.remoteRun(host, inner, options)
-    const remotePort = await runtimeStore.withRemoteLock(
-      settings,
-      remoteRun,
-      `service-${settings.ssh.host}`,
-      async () => {
-        const fresh = await this.readRemoteState(settings)
-        if (fresh !== null && fresh.version === version) {
-          // The state matches, but the service may have died (crash, remote
-          // reboot) while the state stayed intact. Reuse only a LIVE service;
-          // otherwise reap and relaunch instead of building a tunnel to a
-          // dead port and timing out in waitReady.
-          if (await this.remoteProbePort(settings, fresh.port)) return fresh.port
-          this.log(`远端服务已退出（端口 ${fresh.port}），自动重启…`)
+    // Deliberately NOT serialized under a remote lock. A lock here buys
+    // nothing that matters and costs a failure mode we have already been
+    // bitten by:
+    //
+    //   * Concurrent *access* is harmless — the remote harness is a web
+    //     service and this shell only renders it. Two shells (or two aliases
+    //     reaching the same machine) reading the same port is the normal
+    //     case, not a conflict.
+    //   * The one thing serialization would protect is the spawn race: two
+    //     shells both seeing a dead port and both starting a service, leaving
+    //     one unrecorded. Its worst case is a spare remote process that the
+    //     NEXT connect's reap sweeps — degraded, not broken.
+    //   * Against that, a lock carries its own outage: it goes stale only
+    //     after 2h, and a shell that dies between acquire and release (or an
+    //     ssh drop inside the finally) leaves every other shell waiting until
+    //     the timeout fires and the connect FAILS. Serializing startup would
+    //     reintroduce exactly the "reconnect does nothing" symptom this code
+    //     exists to fix.
+    //
+    // What closes the race that actually hurts — two shells sweeping each
+    // other's freshly spawned host in a ping-pong — is waiting for the peer
+    // to publish its port, not excluding it. See `awaitPeerService`.
+    const fresh = await this.readRemoteState(settings)
+    if (fresh !== null && fresh.version === version) {
+      // The state matches, but the service may have died (crash, remote
+      // reboot) while the state stayed intact. Reuse only a LIVE service;
+      // otherwise reap and relaunch instead of building a tunnel to a dead
+      // port and timing out in waitReady.
+      if (await this.remoteProbePort(settings, fresh.port)) {
+        this.remotePort = fresh.port
+        await this.startTunnelOnFreePort(settings, fresh.port)
+        const probe = await probeOnce(this.url())
+        if (probe.up && probe.isDsh) {
+          this.log(`复用远端 dsh web（端口 ${fresh.port}，版本 ${version.slice(0, 8)}）`)
+          this.setStatus({
+            state: 'ready',
+            url: this.url(),
+            detail: `已连接（${displayLabel(target)}，复用远端服务）`,
+            serviceOwner: 'remote',
+          })
+          return
         }
-        // The recorded port may also be stale because the harness relaunched
-        // ITSELF: dsh-market's self-restart starts the replacement detached
-        // with its stdout sent to a temp file, so the port it moved to never
-        // reaches us and the state still names the port of the process that
-        // exited. That host is usually up and healthy — adopt it. Spawning
-        // blindly would start a second host over the same dsh home, and the
-        // task-board ledger makes that a crash loop, not a fallback.
-        const orphan = await this.discoverRemoteService(settings)
-        if (orphan !== null) {
-          this.log(`接管未托管的远端 dsh web（pid ${orphan.pid}，端口 ${orphan.port}）`)
-          await this.writeRemoteState(settings, { pid: orphan.pid, port: orphan.port, version })
-          return orphan.port
-        }
-        // Nothing healthy to adopt, so a host we could NOT reach may still be
-        // holding the remote task-board ledger. Clear every host over this
-        // dsh home before spawning — `reapRemoteService` alone only ever knew
-        // about the recorded pid and port, which is exactly what a
-        // self-restart invalidates.
-        if ((await this.reapRemoteHosts(settings, fresh ?? state)) > 0) await sleep(2000)
-        return this.launchRemoteService(settings, 0, version)
-      },
-      { timeoutMs: 90_000 },
-    )
+      }
+      this.log(`远端服务已退出（端口 ${fresh.port}），自动重启…`)
+    }
+    // The recorded port may also be stale because the harness relaunched
+    // ITSELF: dsh-market's self-restart starts the replacement detached with
+    // its stdout sent to a temp file, so the port it moved to never reaches
+    // us and the state still names the port of the process that exited.
+    //
+    // Do NOT adopt the replacement: a host we did not start runs a runtime
+    // whose version we cannot establish from here (a remote host launches
+    // `bin.js` by a path relative to its cwd, so its command line carries no
+    // runtime dir to match). Recording the CURRENT version for it would leave
+    // the state file lying, and the next connect would take the reuse fast
+    // path and pin the device to that unknown build for good.
+    //
+    // Follow a PEER shell that is mid-startup instead. Two shells that both
+    // saw the recorded port die would otherwise race: ours sweeps the host
+    // theirs has just spawned, their close watcher fires and sweeps ours, and
+    // the two ping-pong without ever connecting. A lock does not close that
+    // window either — it re-reads the state on entry, but a peer still waiting
+    // for its port has not written one yet. Polling does.
+    const peer = await this.awaitPeerService({
+      version,
+      readState: () => this.readRemoteState(settings),
+      probePort: port => this.remoteProbePort(settings, port),
+    })
+    if (peer !== null) {
+      this.log(`跟随其他终端已启动的远端 dsh web（端口 ${peer.port}）`)
+      this.remotePort = peer.port
+      await this.startTunnelOnFreePort(settings, peer.port)
+      const url = this.url()
+      const ready = await waitReady(url)
+      this.setStatus({
+        state: 'ready',
+        url,
+        detail: ready.isDsh
+          ? `已连接（${displayLabel(target)}，跟随其他终端）`
+          : '隧道已建立，但该端口响应的可能不是 DeepSeek Harness',
+        serviceOwner: 'remote',
+      })
+      return
+    }
+    // Nobody else is serving, so a host we could NOT reach may still be
+    // holding the remote task-board ledger. Clear every host over this dsh
+    // home before spawning — `reapRemoteService` alone only ever knew about
+    // the recorded pid and port, which is exactly what a self-restart
+    // invalidates.
+    if ((await this.reapRemoteHosts(settings, fresh ?? state)) > 0) await sleep(2000)
+    const remotePort = await this.launchRemoteService(settings, 0, version)
 
     this.remotePort = remotePort
     await this.startTunnelOnFreePort(settings, remotePort)
@@ -1412,37 +1435,49 @@ class ConnectionManager extends EventEmitter {
   }
 
   /**
-   * Find a `dsh web` host on the remote machine that this shell did not start
-   * but that serves its dsh home — the remote twin of `discoverOwnedService`.
-   * A dsh-market self-restart leaves exactly this behind: the replacement
-   * listens on a port the state file never learned, so the recorded pid/port
-   * both look dead while a perfectly healthy host is running.
-   * @returns {Promise<{pid: number, port: number}|null>}
+   * Wait briefly for a PEER shell to finish starting a service, and follow it
+   * if it does. Returns the peer's recorded state, or null when the grace
+   * period expires with nothing healthy to follow.
+   *
+   * This is what keeps two shells from ping-ponging. Two of them that both saw
+   * the recorded port die would otherwise race: each concludes nothing is
+   * serving, sweeps every host over the dsh home, and spawns its own — so each
+   * one kills what the other just built, the loser's close watcher fires, and
+   * the pair thrashes without ever connecting.
+   *
+   * A mutual-exclusion lock does NOT close that window. It re-reads the state
+   * on entry, which is the right thing, but a peer that is still waiting for
+   * its port has not written a state yet — so a locker still sees nothing and
+   * still sweeps the peer's half-built host. Only waiting helps, because the
+   * thing we are waiting for is the peer's write.
+   *
+   * Following is safe by construction: we only ever follow a host whose
+   * recorded version equals ours, which is the same condition the reuse fast
+   * path already requires. Anything else falls through to a clean restart.
+   * @param {object} options
+   * @param {string} options.version - the runtime version we want to serve
+   * @param {() => Promise<{pid: number, port: number, version: string}|null>} options.readState
+   * @param {(port: number) => Promise<boolean>} options.probePort
+   * @param {number} [options.attempts]
+   * @param {number} [options.intervalMs]
+   * @returns {Promise<{pid: number, port: number, version: string}|null>}
    */
-  async discoverRemoteService(settings) {
-    const candidates = (await this.remoteHostCandidates(settings))
-      .filter(host => host.usesHome && host.ports.length > 0)
-    if (candidates.length === 0) return null
-    const ports = [...new Set(candidates.flatMap(host => host.ports))]
-    // One round-trip for every candidate port rather than one per port.
-    const probe = await this.remoteRun(
-      settings.ssh.host,
-      `for port in ${ports.join(' ')}; do n=$(curl -s --max-time 3 http://127.0.0.1:$port/ | grep -c "__DSH_BOOT__"); echo "$port=$n"; done`,
-      { timeoutMs: 15_000 + ports.length * 5000 },
-    ).catch(() => null)
-    if (probe === null || probe.code !== 0) return null
-    const live = parseRemoteProbe(probe.lines)
-    for (const host of candidates) {
-      const port = host.ports.find(value => live.has(value))
-      if (port !== undefined) return { pid: host.pid, port }
+  async awaitPeerService({ version, readState, probePort, attempts = PEER_WAIT_ATTEMPTS, intervalMs = PEER_WAIT_INTERVAL_MS }) {
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      await sleep(intervalMs)
+      const fresh = await readState().catch(() => null)
+      if (fresh === null || fresh.version !== version) continue
+      if (!Number.isInteger(fresh.port) || fresh.port <= 0) continue
+      if (!(await probePort(fresh.port).catch(() => false))) continue
+      return fresh
     }
     return null
   }
 
   /**
    * Reap EVERY `dsh web` host over this shell's remote dsh home — the remote
-   * twin of `reapLocalHosts`. Only called once adoption has been ruled out,
-   * so anything still running is a host we could not reach: the task-board
+   * twin of `reapLocalHosts`. Only called once following a peer has been ruled
+   * out, so anything still running is a host we could not reach: the task-board
    * plugin releases its ledger lock only when the owning pid dies, so a wedged
    * host crash-loops every spawn below. `usesHome` confines this to OUR home,
    * so a colleague's instance on a shared box is never touched.
@@ -1752,8 +1787,10 @@ module.exports = {
   waitReady,
   dshWebProcesses,
   listeningLoopbackPorts,
-  discoverLocalService,
+  processUsesHome,
   parseRemoteHostScan,
   parseRemoteProbe,
   REMOTE_HOST_SCAN,
+  PEER_WAIT_ATTEMPTS,
+  PEER_WAIT_INTERVAL_MS,
 }
