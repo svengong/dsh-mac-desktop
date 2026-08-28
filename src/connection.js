@@ -232,7 +232,19 @@ async function processUsesHome(pid, dshHome) {
     timeoutMs: 5000,
   }).catch(() => null)
   if (result === null || result.code !== 0) return false
-  const prefix = dshHome.endsWith('/') ? dshHome : `${dshHome}/`
+  // `lsof` reports paths with symlinks resolved — on macOS `/tmp` comes back
+  // as `/private/tmp`. The home has to be resolved the same way, or a home
+  // configured under a symlink matches NOTHING: every host then looks like a
+  // bystander, the sweep reaps nothing, and an orphan keeps holding the
+  // session store. The failure is silent, which is the worst kind here.
+  let home = dshHome
+  try {
+    home = fs.realpathSync(dshHome)
+  } catch {
+    // Unresolvable (missing or unreadable): match on the path we were given
+    // rather than giving up — this check only ever errs toward NOT killing.
+  }
+  const prefix = home.endsWith('/') ? home : `${home}/`
   // `-Fn` prints one field per line, `n` being the file name.
   return result.lines.some(line => line.startsWith('n') && line.slice(1).startsWith(prefix))
 }
@@ -962,8 +974,13 @@ class ConnectionManager extends EventEmitter {
     // store), and `processUsesHome` confines this to OUR home.
     if ((await this.reapLocalHosts(settings)) > 0) await sleep(2000)
 
-    // Otherwise reap a stale/outdated leftover service (auto-upgrade) so it
-    // never lingers as an orphan, then serve on the first free port.
+    // Backstop for the sweep above, not an alternative to it: `reapLocalHosts`
+    // finds hosts by scanning command lines and lsof, which can miss one (a
+    // wrapper that has exec'd, a process whose open files are not visible).
+    // This asks about the RECORDED pid directly — a second, independent
+    // discovery path — so a host the sweep missed cannot survive to fight the
+    // new one over the session store. It matters most right after an upgrade,
+    // where the recorded host is an older build.
     if (state !== null && pidAlive(state.pid)) {
       this.log(`检测到旧版/残留服务（pid ${state.pid}），清理后升级…`)
       try {

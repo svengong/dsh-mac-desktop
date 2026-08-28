@@ -387,6 +387,31 @@ async function main() {
   )
   assert.strictEqual(await processUsesHome(process.pid, ''), true, 'an empty home disables the ownership check')
   fs.rmSync(bystanderHome, { recursive: true, force: true })
+  // The same home reached through a symlink must give the same answer: `lsof`
+  // reports paths with symlinks resolved (macOS `/tmp` is `/private/tmp`), so
+  // if only one side is resolved every host looks like a bystander, the sweep
+  // reaps nothing, and an orphan survives to hold the session store — silently.
+  const linkTarget = path.join(os.tmpdir(), `dsh-link-target-${process.pid}`)
+  const linkPath = path.join(os.tmpdir(), `dsh-link-${process.pid}`)
+  fs.mkdirSync(linkTarget, { recursive: true })
+  const marker = fs.openSync(path.join(linkTarget, 'marker'), 'w')
+  try {
+    fs.symlinkSync(linkTarget, linkPath)
+    assert.strictEqual(await processUsesHome(process.pid, linkTarget), true, 'a home this process holds a file in is ours')
+    assert.strictEqual(
+      await processUsesHome(process.pid, linkPath),
+      true,
+      'the same home reached through a symlink is still ours',
+    )
+  } finally {
+    fs.closeSync(marker)
+    fs.rmSync(linkTarget, { recursive: true, force: true })
+    try {
+      fs.rmSync(linkPath)
+    } catch {
+      // Already gone.
+    }
+  }
 
   // Remote twin of the above: an ssh round-trip costs a full handshake, so a
   // single command returns `pid|files-under-home|port,port` per host and the
