@@ -551,16 +551,25 @@ class ConnectionManager extends EventEmitter {
    * bystander instance is never touched. The guard shells wrapped around a
    * host hold no files under the home, so they are filtered out too and only
    * real hosts are signalled.
+   * @param {object} settings
+   * @param {number} [keepPid] - a pid to SPARE: the host we are reusing. Pass
+   *   the state file's pid to sweep strays on the reuse path.
    * @returns {Promise<number>} how many host processes were signalled.
    */
-  async reapLocalHosts(settings) {
+  async reapLocalHosts(settings, keepPid = 0) {
     const home = expandHome(settings.local.dshHome)
     if (home === '') return 0
     let reaped = 0
     for (const entry of await dshWebProcesses()) {
+      // `keepPid` is the host the state file names, i.e. the one we are about
+      // to connect through. Skipping it turns this from "clear everything"
+      // into "clear everything ELSE", which is what lets the reuse fast path
+      // enforce the one-host-per-home invariant without dropping the service
+      // it just validated. See `reapStrayRemoteHosts`.
+      if (entry.pid === keepPid) continue
       if (!(await processUsesHome(entry.pid, home))) continue
       reaped += 1
-      this.log(`清理残留 dsh web（pid ${entry.pid}，${entry.bin}）…`)
+      this.log(`清理${keepPid > 0 ? '多余' : '残留'} dsh web（pid ${entry.pid}，${entry.bin}）…`)
       try {
         process.kill(entry.pid, 'SIGTERM')
       } catch {
@@ -927,6 +936,10 @@ class ConnectionManager extends EventEmitter {
         this.localPort = state.port
         this.localVersion = version
         this.log(`复用已运行的 dsh web（端口 ${state.port}，版本 ${version.slice(0, 8)}）`)
+        // Sweep strays before declaring ready, same reasoning as the remote
+        // twin: the reuse path is the only one a healthy device ever takes, so
+        // a second host over this home would otherwise never be evicted.
+        await this.reapLocalHosts(settings, state.pid).catch(() => 0)
         this.setStatus({ state: 'ready', url, detail: '已连接（复用已运行服务）', serviceOwner: 'external' })
         return
       }
@@ -963,6 +976,7 @@ class ConnectionManager extends EventEmitter {
       this.localVersion = version
       const url = `http://127.0.0.1:${peer.port}`
       this.log(`跟随其他终端已启动的 dsh web（端口 ${peer.port}）`)
+      await this.reapLocalHosts(settings, peer.pid).catch(() => 0)
       this.setStatus({ state: 'ready', url, detail: `已连接（跟随其他终端，端口 ${peer.port}）`, serviceOwner: 'external' })
       return
     }
@@ -1264,29 +1278,6 @@ class ConnectionManager extends EventEmitter {
     const version = await this.serviceVersion(settings)
     const state = await this.readRemoteState(settings)
 
-    // Reuse a previously started remote service when its build still matches.
-    // This fast path is lock-free: reusing an already-running service never
-    // spawns anything, so it cannot orphan a process.
-    if (state !== null && state.version === version) {
-      // Ask the host itself before spending an ssh tunnel on the recorded
-      // port: a service that already died would otherwise cost a full tunnel
-      // setup and surface ssh's `channel N: open failed: Connection refused`
-      // in the log before falling through.
-      if (await this.remoteProbePort(settings, state.port)) {
-        this.remotePort = state.port
-        await this.startTunnelOnFreePort(settings, state.port)
-        const probe = await probeOnce(this.url())
-        if (probe.up && probe.isDsh) {
-          this.log(`复用远端 dsh web（端口 ${state.port}，版本 ${version.slice(0, 8)}）`)
-          this.setStatus({ state: 'ready', url: this.url(), detail: `已连接（${displayLabel(target)}，复用远端服务）`, serviceOwner: 'remote' })
-          return
-        }
-        // Tunnel is up but nothing dsh answers behind it: fall through.
-      }
-      // The recorded port is dead (crash, remote reboot, self-restart): fall
-      // through to adoption / relaunch instead of reusing a stale tunnel.
-    }
-
     // Deliberately NOT serialized under a remote lock. A lock here buys
     // nothing that matters and costs a failure mode we have already been
     // bitten by:
@@ -1294,11 +1285,13 @@ class ConnectionManager extends EventEmitter {
     //   * Concurrent *access* is harmless — the remote harness is a web
     //     service and this shell only renders it. Two shells (or two aliases
     //     reaching the same machine) reading the same port is the normal
-    //     case, not a conflict.
+    //     case, not a conflict. Measured: two shells connecting at once both
+    //     succeed and both land on the same service.
     //   * The one thing serialization would protect is the spawn race: two
     //     shells both seeing a dead port and both starting a service, leaving
-    //     one unrecorded. Its worst case is a spare remote process that the
-    //     NEXT connect's reap sweeps — degraded, not broken.
+    //     one unrecorded. That race is closed below without a lock, by
+    //     waiting for the peer to publish (`awaitPeerService`) and by
+    //     sweeping strays on the reuse path (`reapStrayRemoteHosts`).
     //   * Against that, a lock carries its own outage: it goes stale only
     //     after 2h, and a shell that dies between acquire and release (or an
     //     ssh drop inside the finally) leaves every other shell waiting until
@@ -1306,21 +1299,27 @@ class ConnectionManager extends EventEmitter {
     //     reintroduce exactly the "reconnect does nothing" symptom this code
     //     exists to fix.
     //
-    // What closes the race that actually hurts — two shells sweeping each
-    // other's freshly spawned host in a ping-pong — is waiting for the peer
-    // to publish its port, not excluding it. See `awaitPeerService`.
+    // Reuse a previously started remote service when its build still matches.
+    // This fast path spawns nothing, so it cannot orphan a process.
     const fresh = await this.readRemoteState(settings)
     if (fresh !== null && fresh.version === version) {
-      // The state matches, but the service may have died (crash, remote
-      // reboot) while the state stayed intact. Reuse only a LIVE service;
-      // otherwise reap and relaunch instead of building a tunnel to a dead
-      // port and timing out in waitReady.
+      // Ask the host itself before spending an ssh tunnel on the recorded
+      // port: a service that already died would otherwise cost a full tunnel
+      // setup and surface ssh's `channel N: open failed: Connection refused`
+      // in the log before falling through. A state that matches is not
+      // evidence the host is alive — a crash or a remote reboot leaves it
+      // intact — so reuse only a LIVE service.
       if (await this.remoteProbePort(settings, fresh.port)) {
         this.remotePort = fresh.port
         await this.startTunnelOnFreePort(settings, fresh.port)
         const probe = await probeOnce(this.url())
         if (probe.up && probe.isDsh) {
           this.log(`复用远端 dsh web（端口 ${fresh.port}，版本 ${version.slice(0, 8)}）`)
+          // Sweep strays BEFORE declaring ready. This is the only path that
+          // runs on every healthy connect, so it is the only place a second
+          // host sharing this home can be evicted — the slow path's
+          // `reapRemoteHosts` is never reached once reuse works.
+          await this.reapStrayRemoteHosts(settings, fresh.pid).catch(() => 0)
           this.setStatus({
             state: 'ready',
             url: this.url(),
@@ -1329,6 +1328,7 @@ class ConnectionManager extends EventEmitter {
           })
           return
         }
+        // Tunnel is up but nothing dsh answers behind it: fall through.
       }
       this.log(`远端服务已退出（端口 ${fresh.port}），自动重启…`)
     }
@@ -1361,6 +1361,7 @@ class ConnectionManager extends EventEmitter {
       await this.startTunnelOnFreePort(settings, peer.port)
       const url = this.url()
       const ready = await waitReady(url)
+      await this.reapStrayRemoteHosts(settings, peer.pid).catch(() => 0)
       this.setStatus({
         state: 'ready',
         url,
@@ -1522,29 +1523,83 @@ class ConnectionManager extends EventEmitter {
       if (!candidates.some(host => host.pid === recorded)) pids.push(recorded)
     }
     if (pids.length === 0) return 0
-    const list = pids.join(' ')
-    // One round-trip: report which candidates are actually alive (a stale
-    // recorded pid is the common case), TERM them, wait up to ~5s for the
-    // host to release the task-board ledger, then KILL any straggler.
-    // Counting only the live ones keeps the log — and the caller's "did we
-    // reap anything?" decision — honest.
+    const killed = await this.killRemotePids(settings.ssh.host, pids)
+    if (killed.length > 0) this.log(`清理残留远端 dsh web（pid ${killed.join('、')}）…`)
+    return killed.length
+  }
+
+  /**
+   * Signal remote pids and wait for them to actually go: report which ones are
+   * alive, TERM them, poll up to ~5s for the host to release the task-board
+   * ledger, then KILL any straggler.
+   *
+   * One round-trip, because every one of these costs a full ssh handshake and
+   * the whole sweep only ever runs while the user is watching a spinner.
+   *
+   * Counting only the live ones keeps the log — and the caller's "did we reap
+   * anything?" decision — honest: a stale recorded pid is the common case and
+   * must not read as a kill.
+   * @returns {Promise<number[]>} the pids that were alive and got signalled.
+   */
+  async killRemotePids(target, pids) {
+    const list = pids.filter(pid => Number.isInteger(pid) && pid > 0).join(' ')
+    if (list === '') return []
     const result = await this.remoteRun(
-      settings.ssh.host,
+      target,
       `alive=""; for p in ${list}; do if kill -0 $p 2>/dev/null; then alive="$alive $p"; fi; done; echo "ALIVE$alive"; if [ -n "$alive" ]; then for p in $alive; do kill $p 2>/dev/null; done; for i in 1 2 3 4 5 6 7 8 9 10; do left=0; for p in $alive; do if kill -0 $p 2>/dev/null; then left=1; fi; done; if [ $left -eq 0 ]; then break; fi; sleep 0.5; done; for p in $alive; do kill -9 $p 2>/dev/null; done; sleep 0.5; fi`,
       { timeoutMs: 30_000 },
     ).catch(() => null)
-    if (result === null || result.code !== 0) return 0
+    if (result === null || result.code !== 0) return []
     const reported = result.lines
       .map(line => /^ALIVE(.*)$/u.exec(line.trim()))
       .find(match => match !== null)
-    if (reported === undefined) return 0
-    const killed = reported[1]
+    if (reported === undefined) return []
+    return reported[1]
       .trim()
       .split(/\s+/u)
       .filter(part => part !== '')
       .map(Number)
       .filter(pid => Number.isInteger(pid) && pid > 0)
-    if (killed.length > 0) this.log(`清理残留远端 dsh web（pid ${killed.join('、')}）…`)
+  }
+
+  /**
+   * Kill every `dsh web` host over this dsh home EXCEPT the one the state file
+   * names — the remote twin of `reapLocalHosts(settings, keepPid)`.
+   *
+   * This is what makes "one host per home" an invariant instead of a hope.
+   * Two shells that both saw the recorded port die can each spawn a host
+   * before the other publishes its port (the grace period in
+   * `awaitPeerService` is 6s; a cold remote spawn takes ~14s), leaving two
+   * hosts sharing one session store. Nothing fixes that later: the reuse fast
+   * path returns before it reaches `reapRemoteHosts`, so the stray would
+   * survive for good.
+   *
+   * Measured on a real machine (two shells, port killed underneath both): the
+   * race does happen — both shells spawn, and for a while two hosts serve the
+   * same home. It self-limits rather than self-heals, though: the loser's
+   * `rm -f` of the pid/port files lands before the winner announces its port,
+   * so BOTH shells end up recording the winner, and the state file stays
+   * self-consistent (it names a live pid). The spare host is left for this
+   * sweep to evict on the NEXT connect — verified: one connect over a home
+   * with two hosts kills exactly the unrecorded one and keeps the recorded
+   * one. So the race costs one stray process, not a wedged device.
+   *
+   * The state file is the arbiter, not "whichever port we happen to be
+   * attached to". Two shells sweeping concurrently therefore agree on who to
+   * spare and who to kill, and cannot ping-pong. A missing or nonsensical
+   * `keepPid` means we cannot tell them apart, so we kill nothing — this check
+   * only ever errs toward leaving a stray alive.
+   * @returns {Promise<number>} how many stray hosts were signalled.
+   */
+  async reapStrayRemoteHosts(settings, keepPid) {
+    if (!Number.isInteger(keepPid) || keepPid <= 0) return 0
+    const candidates = await this.remoteHostCandidates(settings)
+    const pids = candidates
+      .filter(host => host.usesHome && host.pid !== keepPid)
+      .map(host => host.pid)
+    if (pids.length === 0) return 0
+    const killed = await this.killRemotePids(settings.ssh.host, pids)
+    if (killed.length > 0) this.log(`清理多余远端 dsh web（pid ${killed.join('、')}）…`)
     return killed.length
   }
 

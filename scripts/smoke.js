@@ -455,6 +455,83 @@ async function main() {
   assert.ok(!REMOTE_HOST_SCAN.includes("'"), 'the remote scan must not use single quotes')
   assert.ok(REMOTE_HOST_SCAN.includes('$HOME/.dsh/'), 'the remote scan must confine itself to the remote dsh home')
 
+  // The stray sweep answers exactly one question, and it is the one that rots
+  // silently: WHICH hosts to signal. It runs on every HEALTHY connect (the
+  // reuse fast path returns before the slow path's full sweep), so a wrong
+  // answer means either two hosts left fighting over one session store —
+  // measured: they coexist indefinitely — or the service we just validated
+  // getting killed. Asserted against stubs: deciding does not need ssh.
+  const sweepCases = [
+    {
+      name: 'a second host sharing our home is killed',
+      candidates: [{ pid: 10, usesHome: true, ports: [5110] }, { pid: 20, usesHome: true, ports: [5120] }],
+      keepPid: 10,
+      expect: [20],
+    },
+    {
+      name: 'the host the state file names is spared',
+      candidates: [{ pid: 10, usesHome: true, ports: [5110] }],
+      keepPid: 10,
+      expect: null,
+    },
+    {
+      name: 'a host serving another dsh home is never touched',
+      candidates: [{ pid: 10, usesHome: true, ports: [5110] }, { pid: 30, usesHome: false, ports: [5130] }],
+      keepPid: 10,
+      expect: null,
+    },
+    {
+      name: 'a home with no spare host yields no round-trip',
+      candidates: [],
+      keepPid: 10,
+      expect: null,
+    },
+  ]
+  for (const sweepCase of sweepCases) {
+    let asked = null
+    const sweeper = Object.create(ConnectionManager.prototype)
+    sweeper.log = () => {}
+    sweeper.remoteHostCandidates = async () => sweepCase.candidates
+    sweeper.killRemotePids = async (_target, pids) => {
+      asked = pids
+      return pids
+    }
+    const killed = await sweeper.reapStrayRemoteHosts({ ssh: { host: 'stub' } }, sweepCase.keepPid)
+    assert.deepStrictEqual(asked, sweepCase.expect, sweepCase.name)
+    assert.strictEqual(killed, sweepCase.expect === null ? 0 : sweepCase.expect.length, `${sweepCase.name} (count)`)
+  }
+  // A corrupt state file must not become "kill everything". The arbiter is the
+  // recorded pid, so when it is missing or nonsense we cannot tell the hosts
+  // apart and must kill none — leaving a stray alive is the survivable error.
+  for (const keepPid of [0, -1, null, undefined, '10', 1.5, NaN]) {
+    let asked = null
+    const sweeper = Object.create(ConnectionManager.prototype)
+    sweeper.log = () => {}
+    sweeper.remoteHostCandidates = async () => [{ pid: 10, usesHome: true, ports: [5110] }]
+    sweeper.killRemotePids = async (_target, pids) => {
+      asked = pids
+      return pids
+    }
+    await sweeper.reapStrayRemoteHosts({ ssh: { host: 'stub' } }, keepPid)
+    assert.strictEqual(asked, null, `keepPid ${String(keepPid)} must not authorise any kill`)
+  }
+  // Local twin: sparing a pid can only ever REMOVE a kill, never add one. A
+  // home no host serves yields nothing either way.
+  const emptyHome = fs.mkdtempSync(path.join(os.tmpdir(), `dsh-empty-home-${process.pid}-`))
+  try {
+    const localSweeper = Object.create(ConnectionManager.prototype)
+    localSweeper.log = () => {}
+    const localSettings = { local: { dshHome: emptyHome } }
+    assert.strictEqual(await localSweeper.reapLocalHosts(localSettings), 0, 'a home no host serves yields nothing')
+    assert.strictEqual(
+      await localSweeper.reapLocalHosts(localSettings, process.pid),
+      0,
+      'sparing a pid cannot add a kill',
+    )
+  } finally {
+    fs.rmSync(emptyHome, { recursive: true, force: true })
+  }
+
   // Following a peer shell that is mid-startup: this is what stops two shells
   // from ping-ponging (each sweeping the host the other just spawned). The
   // grace period must follow a host that becomes healthy, and must refuse
