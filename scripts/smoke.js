@@ -19,7 +19,7 @@ const {
 } = require('../src/components')
 const { UpdateManager } = require('../src/update-manager')
 const { parseTarget, shellQuote, remotePath, tunnelArgs, parseSshConfig, listSshHosts } = require('../src/ssh')
-const { runCommand, spawnService, killActiveChildren } = require('../src/runner')
+const { runCommand, spawnService, killActiveChildren, SERVICE_PID_PREFIX } = require('../src/runner')
 const { ConnectionManager } = require('../src/connection')
 const { findFreePort, releasePort, reservePort } = require('../src/ports')
 const runtimeStore = require('../src/runtime-store')
@@ -532,6 +532,92 @@ async function main() {
     fs.rmSync(emptyHome, { recursive: true, force: true })
   }
 
+  // ── local watchParent family: guard wrapper + real service, one group ──
+  // Regression (local twin of the reapStrayRemoteHosts bug): spawnLocalService
+  // launches dsh web through a watchParent guard shell, so the state file used
+  // to record the WRAPPER pid while the sweep exempted only that wrapper — the
+  // reuse path then KILLED the real service it had just validated ("清理多余
+  // dsh web" naming the very port it reused). The fix has three legs, all
+  // asserted here against REAL processes: the guard announces the service pid,
+  // the sweep exempts the keepPid's whole process GROUP (covers state files in
+  // both the old wrapper-pid and new service-pid formats), and wrappers are
+  // never host candidates (a full sweep kills exactly the one real host).
+  const alive = pid => {
+    try { process.kill(pid, 0); return true } catch { return false }
+  }
+  const familyHome = fs.mkdtempSync(path.join(os.tmpdir(), `dsh-family-home-${process.pid}-`))
+  const fakeBin = path.join(familyHome, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
+  fs.mkdirSync(path.dirname(fakeBin), { recursive: true })
+  // The fake host must LOOK like a real one to `processUsesHome`: a real dsh
+  // web holds files open under its dsh home (settings, session store), which
+  // is what separates hosts sharing one runtime install. cwd alone does not
+  // match — the check compares against `home + '/'`, so a cwd that IS the
+  // home is not enough. Hold a marker file open under the home.
+  fs.writeFileSync(fakeBin, [
+    'const fs = require("node:fs")',
+    'fs.openSync(__dirname + "/../../../../session-store.marker", "a")',
+    'setInterval(() => {}, 1000)',
+    '',
+  ].join('\n'))
+  let familySpawn = null
+  try {
+    let servicePid = null
+    familySpawn = spawnService({
+      cmd: process.execPath,
+      args: [fakeBin, 'web', '--port', '0'],
+      cwd: familyHome,
+      onLine: line => {
+        if (line.startsWith(SERVICE_PID_PREFIX)) servicePid = Number(line.slice(SERVICE_PID_PREFIX.length))
+      },
+      watchParent: true,
+    })
+    const familySweeper = Object.create(ConnectionManager.prototype)
+    familySweeper.log = () => {}
+    const familySettings = { local: { dshHome: familyHome } }
+    const deadline = Date.now() + 10_000
+    while (servicePid === null && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 100))
+    }
+    assert.ok(Number.isInteger(servicePid) && servicePid > 0, 'guard must announce the real service pid')
+    assert.notStrictEqual(servicePid, familySpawn.child.pid, 'announced pid is the SERVICE, not the wrapper')
+    assert.ok(alive(servicePid), 'announced service pid is alive')
+
+    assert.strictEqual(
+      await familySweeper.reapLocalHosts(familySettings, familySpawn.child.pid),
+      0,
+      'OLD-format state (wrapper pid) must spare the service — same group',
+    )
+    assert.ok(alive(servicePid), 'service survives a wrapper-pid keepPid sweep')
+    assert.strictEqual(
+      await familySweeper.reapLocalHosts(familySettings, servicePid),
+      0,
+      'NEW-format state (service pid) must spare the service',
+    )
+    assert.ok(alive(servicePid), 'service survives a service-pid keepPid sweep')
+
+    // Register the close listener BEFORE the kill: the wrapper can exit (and
+    // emit its one close event) while the sweep+sleep below runs, and a
+    // listener attached after that fires never will.
+    const wrapperClosed = new Promise(resolve => {
+      familySpawn.child.once('close', () => resolve('closed'))
+    })
+    assert.strictEqual(
+      await familySweeper.reapLocalHosts(familySettings),
+      1,
+      'full sweep kills exactly the one real host (the wrapper is not a host candidate)',
+    )
+    await new Promise(resolve => setTimeout(resolve, 2000))
+    assert.ok(!alive(servicePid), 'full sweep killed the real service')
+    const wrapperEnd = await Promise.race([
+      wrapperClosed,
+      new Promise(resolve => setTimeout(() => resolve('timeout'), 8000)),
+    ])
+    assert.strictEqual(wrapperEnd, 'closed', 'wrapper exits once its service is gone')
+  } finally {
+    if (familySpawn !== null) familySpawn.stop()
+    fs.rmSync(familyHome, { recursive: true, force: true })
+  }
+
   // Following a peer shell that is mid-startup: this is what stops two shells
   // from ping-ponging (each sweeping the host the other just spawned). The
   // grace period must follow a host that becomes healthy, and must refuse
@@ -585,6 +671,47 @@ async function main() {
     }),
     null,
     'no peer at all falls through to a clean restart',
+  )
+  // Regression for "readState(...).catch is not a function": the LOCAL caller
+  // passes runtimeStore.readLocalState, a plain sync fs.readFileSync wrapper
+  // whose return is a state object or null — NOT a Promise. Every awaitPeerService
+  // assertion above uses an async mock, which is exactly how this shipped.
+  let syncPeerReads = 0
+  assert.deepStrictEqual(
+    await peerWait.awaitPeerService({
+      version: 'v2',
+      attempts: 3,
+      intervalMs: 1,
+      readState: () => {
+        syncPeerReads += 1
+        return syncPeerReads < 2 ? null : { pid: 9, port: 41452, version: 'v2' }
+      },
+      probePort: async port => port === 41452,
+    }),
+    { pid: 9, port: 41452, version: 'v2' },
+    'a SYNC readState (local state file) is followed just the same',
+  )
+  assert.strictEqual(
+    await peerWait.awaitPeerService({
+      version: 'v2',
+      attempts: 2,
+      intervalMs: 1,
+      readState: () => null,
+      probePort: async () => true,
+    }),
+    null,
+    'a SYNC readState with no state falls through without throwing',
+  )
+  assert.strictEqual(
+    await peerWait.awaitPeerService({
+      version: 'v2',
+      attempts: 2,
+      intervalMs: 1,
+      readState: () => { throw new Error('sync read blew up') },
+      probePort: async () => true,
+    }),
+    null,
+    'a SYNC readState that throws must not break the connect either',
   )
 
   // Local `--port 0`: the shell adopts the OS-chosen port from stdout.

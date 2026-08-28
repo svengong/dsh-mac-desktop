@@ -22,7 +22,7 @@ const path = require('node:path')
 const http = require('node:http')
 const { randomUUID } = require('node:crypto')
 const { EventEmitter } = require('node:events')
-const { runCommand, spawnService } = require('./runner')
+const { runCommand, spawnService, SERVICE_PID_PREFIX } = require('./runner')
 const { sshCommandArgs, tunnelArgs, shellQuote, remotePath, remoteToolchainPrefix, displayLabel } = require('./ssh')
 const { resolveTools } = require('./tools')
 const { findFreePort, releasePort, reservePort, tcpProbe } = require('./ports')
@@ -177,6 +177,13 @@ async function findListeningPid(port) {
  * learns the replacement's port — and the state file keeps pointing at the
  * port the process that just exited was using. The service is healthy and
  * answering; the shell simply has no idea where it went.
+ *
+ * `node` only, exactly like the remote twin (REMOTE_HOST_SCAN): a
+ * `sh/bash -c "… bin.js web …"` wrapper shares the host's command line and
+ * killing it would take down the wrapper, not the host. Real hosts always
+ * exec node — the local watchParent guard is the one wrapper in play, and it
+ * must never be mistaken for a second host (or a keepPid sweep protecting
+ * the real service while the wrapper is killed out from under it).
  * @returns {Array<{pid: number, bin: string}>}
  */
 async function dshWebProcesses() {
@@ -192,8 +199,12 @@ async function dshWebProcesses() {
     if (match === null) continue
     const pid = Number(match[1])
     if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) continue
+    const command = match[2]
     // `node <bin> web …` — matches both the npm artifact and the repo layout.
-    const binMatch = /(\S*(?:@deepseek-ai[\\/]dsh|apps[\\/]cli)[\\/]lib[\\/]bin\.js)\s+web\b/u.exec(match[2])
+    // The command must START with the node binary: launcher shells that merely
+    // quote the same argv in their `-c` string are wrappers, not hosts.
+    if (!/^(\S*\/)?node(\d+(\.\d+)*)?\s/u.test(command)) continue
+    const binMatch = /(\S*(?:@deepseek-ai[\\/]dsh|apps[\\/]cli)[\\/]lib[\\/]bin\.js)\s+web\b/u.exec(command)
     if (binMatch === null) continue
     found.push({ pid, bin: binMatch[1] })
   }
@@ -247,6 +258,28 @@ async function processUsesHome(pid, dshHome) {
   const prefix = home.endsWith('/') ? home : `${home}/`
   // `-Fn` prints one field per line, `n` being the file name.
   return result.lines.some(line => line.startsWith('n') && line.slice(1).startsWith(prefix))
+}
+
+/**
+ * The process group a pid belongs to, or null when it cannot be determined
+ * (already dead, ps missing). Local dsh web services are spawned detached:
+ * the watchParent guard shell is the group LEADER and the real node service
+ * is its group MEMBER, so "keep this service" must exempt the whole GROUP,
+ * not just the one pid the state file happens to record (older builds
+ * recorded the wrapper's pid, newer ones the service's — the group covers
+ * both).
+ * @returns {Promise<number|null>}
+ */
+async function processGroupOf(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return null
+  const result = await runCommand({
+    cmd: 'ps',
+    args: ['-o', 'pgid=', '-p', String(pid)],
+    timeoutMs: 5000,
+  }).catch(() => null)
+  if (result === null || result.code !== 0 || result.lines.length === 0) return null
+  const pgid = Number(result.lines[0].trim())
+  return Number.isInteger(pgid) && pgid > 0 ? pgid : null
 }
 
 // One round-trip inventory of every `dsh web` host on a remote machine:
@@ -559,6 +592,13 @@ class ConnectionManager extends EventEmitter {
   async reapLocalHosts(settings, keepPid = 0) {
     const home = expandHome(settings.local.dshHome)
     if (home === '') return 0
+    // A keepPid names ONE process, but a local dsh web is a FAMILY: the
+    // watchParent guard shell plus the node service it backgrounds. Older
+    // state files record the guard's pid, newer ones the service's — either
+    // way the group both live in is the same, so exempting the whole group
+    // protects the service a reuse path just validated, whatever pid the
+    // state file named. See `processGroupOf`.
+    const keepGroup = keepPid > 0 ? await processGroupOf(keepPid) : null
     let reaped = 0
     for (const entry of await dshWebProcesses()) {
       // `keepPid` is the host the state file names, i.e. the one we are about
@@ -567,6 +607,7 @@ class ConnectionManager extends EventEmitter {
       // enforce the one-host-per-home invariant without dropping the service
       // it just validated. See `reapStrayRemoteHosts`.
       if (entry.pid === keepPid) continue
+      if (keepGroup !== null && (await processGroupOf(entry.pid)) === keepGroup) continue
       if (!(await processUsesHome(entry.pid, home))) continue
       reaped += 1
       this.log(`清理${keepPid > 0 ? '多余' : '残留'} dsh web（pid ${entry.pid}，${entry.bin}）…`)
@@ -577,6 +618,32 @@ class ConnectionManager extends EventEmitter {
       }
     }
     return reaped
+  }
+
+  /**
+   * Kill the whole family behind a recorded local service pid. A local dsh
+   * web spawns as a detached GROUP: the watchParent guard shell (leader) plus
+   * the node service it backgrounds. Signalling only the recorded pid leaves
+   * the other one behind — killing the wrapper orphans the service, killing
+   * the service strands the wrapper. Resolve the group first and signal THAT;
+   * a dead/unresolvable pid degrades to a direct signal that no-ops.
+   */
+  async killLocalServiceTree(pid) {
+    if (!Number.isInteger(pid) || pid <= 0) return
+    const pgid = await processGroupOf(pid)
+    if (pgid !== null) {
+      try {
+        process.kill(-pgid, 'SIGTERM')
+        return
+      } catch {
+        // Group already gone (or permission); fall through to the direct pid.
+      }
+    }
+    try {
+      process.kill(pid, 'SIGTERM')
+    } catch {
+      // Already gone; nothing to reap.
+    }
   }
 
   localStatePath(settings) {
@@ -761,11 +828,10 @@ class ConnectionManager extends EventEmitter {
       const state = this.readLocalState(settings)
       if (state !== null && pidAlive(state.pid)) {
         this.log(`重置：终止本地服务（pid ${state.pid}）…`)
-        try {
-          process.kill(state.pid, 'SIGTERM')
-        } catch {
-          // Already gone.
-        }
+        // Group kill: the recorded pid may be the guard wrapper OR the node
+        // service (see `killLocalServiceTree`) — signalling just one strands
+        // the other as an orphan.
+        await this.killLocalServiceTree(state.pid)
       }
       runtimeStore.removeLocalState(settings)
     }
@@ -965,7 +1031,7 @@ class ConnectionManager extends EventEmitter {
     // path above requires.
     const peer = await this.awaitPeerService({
       version,
-      readState: () => this.readLocalState(settings),
+      readState: async () => this.readLocalState(settings),
       probePort: async port => {
         const probe = await probeOnce(`http://127.0.0.1:${port}`)
         return probe.up && probe.isDsh
@@ -997,11 +1063,10 @@ class ConnectionManager extends EventEmitter {
     // where the recorded host is an older build.
     if (state !== null && pidAlive(state.pid)) {
       this.log(`检测到旧版/残留服务（pid ${state.pid}），清理后升级…`)
-      try {
-        process.kill(state.pid, 'SIGTERM')
-      } catch {
-        // Already gone; nothing to reap.
-      }
+      // Group kill — the recorded pid may be the guard wrapper or the node
+      // service; signalling just one strands the other (see
+      // `killLocalServiceTree`).
+      await this.killLocalServiceTree(state.pid)
     }
 
     // Start with `--port 0` and adopt the OS-chosen port reported by the CLI
@@ -1070,6 +1135,10 @@ class ConnectionManager extends EventEmitter {
 
     let resolvePort
     let rejectPort
+    // The REAL service pid, announced by the watchParent guard on stdout —
+    // `service.child.pid` is only the wrapper shell. Recorded in the state
+    // file so keepPid sweeps protect the service itself (see reapLocalHosts).
+    let servicePid = null
     const portSeen = new Promise((resolve, reject) => {
       resolvePort = resolve
       rejectPort = reject
@@ -1088,6 +1157,16 @@ class ConnectionManager extends EventEmitter {
       // 父进程监护：壳被强杀/崩溃时让 dsh web 随父退出，避免孤儿实例。
       watchParent: true,
       onLine: line => {
+        // The guard announces the REAL service pid (the wrapper's own pid is
+        // not it — see runner.spawnService). Swallow the marker line instead
+        // of logging it: it is machinery, not service output.
+        const pidMatch = line.startsWith(SERVICE_PID_PREFIX)
+          ? /^(\d+)$/u.exec(line.slice(SERVICE_PID_PREFIX.length))
+          : null
+        if (pidMatch !== null) {
+          servicePid = Number(pidMatch[1])
+          return
+        }
         this.log(`[web] ${line}`)
         const parsed = runtimeStore.parseDshWebUrl(line)
         if (parsed !== null && parsed.port > 0) resolvePort(parsed.port)
@@ -1177,7 +1256,15 @@ class ConnectionManager extends EventEmitter {
       const actualPort = await portSeen
       clearTimeout(portTimer)
       this.localPort = actualPort
-      this.writeLocalState(settings, { pid: service.child.pid, port: actualPort, version: serveVersion })
+      // Record the REAL service pid, not the wrapper's: a keepPid sweep (or a
+      // recorded-pid backstop) that targets the wrapper leaves the service
+      // running as an orphan — and one that targets the service while
+      // protecting the wrapper kills the very host it validated.
+      this.writeLocalState(settings, {
+        pid: servicePid ?? service.child.pid,
+        port: actualPort,
+        version: serveVersion,
+      })
       this.log(`dsh web 已监听端口 ${actualPort}。`)
     } catch (error) {
       clearTimeout(portTimer)
@@ -1482,7 +1569,9 @@ class ConnectionManager extends EventEmitter {
    * path already requires. Anything else falls through to a clean restart.
    * @param {object} options
    * @param {string} options.version - the runtime version we want to serve
-   * @param {() => Promise<{pid: number, port: number, version: string}|null>} options.readState
+   * @param {() => ({pid: number, port: number, version: string}|null)|Promise<{pid: number, port: number, version: string}|null>} options.readState
+   *      may return the state (sync, e.g. local `readLocalState`) or a Promise
+   *      of it (async, e.g. remote `readRemoteState`) — both are awaited here
    * @param {(port: number) => Promise<boolean>} options.probePort
    * @param {number} [options.attempts]
    * @param {number} [options.intervalMs]
@@ -1491,7 +1580,12 @@ class ConnectionManager extends EventEmitter {
   async awaitPeerService({ version, readState, probePort, attempts = PEER_WAIT_ATTEMPTS, intervalMs = PEER_WAIT_INTERVAL_MS }) {
     for (let attempt = 0; attempt < attempts; attempt += 1) {
       await sleep(intervalMs)
-      const fresh = await readState().catch(() => null)
+      // Promise.resolve().then(...) neutralises BOTH shapes a readState can
+      // take: a SYNC one (local state reads are plain fs.readFileSync
+      // wrappers — calling .catch on their plain return throws "readState(...)
+      // .catch is not a function") and a sync throw, which would otherwise
+      // reject this loop exactly like the async failure below.
+      const fresh = await Promise.resolve().then(readState).catch(() => null)
       if (fresh === null || fresh.version !== version) continue
       if (!Number.isInteger(fresh.port) || fresh.port <= 0) continue
       if (!(await probePort(fresh.port).catch(() => false))) continue

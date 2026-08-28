@@ -13,6 +13,13 @@ const { spawn } = require('node:child_process')
 
 const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000
 
+/**
+ * Prefix of the stdout line the watchParent guard prints to announce the REAL
+ * service pid (`"$@" &` backgrounds the service, so the wrapper's own pid is
+ * NOT it). Consumers parse this to record the true pid in state files.
+ */
+const SERVICE_PID_PREFIX = '__DSH_SERVICE_PID__:'
+
 function linePump(onLine) {
   let buffer = ''
   const pump = chunk => {
@@ -144,11 +151,24 @@ function spawnService({ cmd, args, cwd, env, onLine, watchParent = false }) {
     // 自动退出，会变成孤儿实例。macOS 无 PDEATHSIG，故用 shell wrapper
     // 记住父 pid 并循环探测——父进程消失则 kill 服务进程；服务进程自行
     // 退出则 shell 透传其退出码退出，保证 close 事件照常触发。
+    // The wrapper and the service are TWO processes: `"$@" &` backgrounds the
+    // real service, so child.pid (the wrapper) is NOT the service pid. The
+    // guard echoes SERVICE_PID_PREFIX with the real one — the local dsh web
+    // state file must record THAT pid, or a keepPid sweep "protecting" the
+    // wrapper kills the service it meant to protect.
     const guard = [
       'ppid=$PPID',
       '"$@" & child=$!',
-      'while kill -0 "$child" 2>/dev/null; do',
+      `echo "${SERVICE_PID_PREFIX}$child"`,
+      // A dead child that has not been reaped is a ZOMBIE: `kill -0` keeps
+      // succeeding against its pid, so a `while kill -0 "$child"` loop spins
+      // forever and the wrapper never reaches its `wait` (the only thing
+      // that reaps the zombie and lets the wrapper exit). Poll the process
+      // STATE instead: gone or zombie both end the loop, then `wait` reaps.
+      'while :; do',
       '  if ! kill -0 "$ppid" 2>/dev/null; then kill "$child" 2>/dev/null; break; fi',
+      '  state=$(ps -o stat= -p "$child" 2>/dev/null | tr -d " ")',
+      '  case "$state" in ""|Z*) break ;; esac',
       '  sleep 1',
       'done',
       'wait "$child" 2>/dev/null',
@@ -276,4 +296,4 @@ function killActiveChildren() {
   activeChildren.clear()
   ownedChildren.clear()
 }
-module.exports = { runCommand, spawnService, spawnDetached, DEFAULT_TIMEOUT_MS, killActiveChildren, cancelOwnedChildren, trackChild }
+module.exports = { runCommand, spawnService, spawnDetached, DEFAULT_TIMEOUT_MS, killActiveChildren, cancelOwnedChildren, trackChild, SERVICE_PID_PREFIX }
