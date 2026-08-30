@@ -44,7 +44,7 @@ const { buildMenu } = require('./menu')
 const { createTray } = require('./tray')
 const { presentWindow } = require('./windows')
 const { WindowManager } = require('./window-manager')
-const { isExternalUrl } = require('./external-open')
+const { isExternalUrl, isExternalSubFrameUrl } = require('./external-open')
 
 const BUILD_DIR = path.join(__dirname, '..', 'build')
 // Single source of truth: the shell version always follows package.json (and
@@ -1076,19 +1076,61 @@ function installHarnessNavigationGuard(workspace) {
   // Top-level navigations triggered by the page (link navigation of the
   // harness frame). The shell's own loadURL calls are not renderer-driven and
   // still pass through.
+  //
+  // Denying a navigation is not self-healing: the measured order for a
+  // blocked in-page nav is `did-start-loading → will-navigate →
+  // preventDefault → did-stop-loading`. The navigation has already dropped
+  // `harnessReady` (see did-start-navigation), and the denied load never emits
+  // `did-finish-load`, so without the restore below the frame's loading panel
+  // covers the harness forever.
   webContents.on('will-navigate', (event, url) => {
     if (!isExternalUrl(url)) return
     event.preventDefault()
     openHarnessPopupUrl(workspace, url)
+    restoreHarnessAfterBlockedNav(workspace)
   })
 
-  // Navigations spawned by sub-frames, which `will-navigate` does not cover
-  // on its own.
+  // Sub-frame navigations, which `will-navigate` does not cover. A sub-frame
+  // belongs to the plugin that embedded it — the sidebar's file preview among
+  // them — so the shell only expels genuinely off-origin content and lets the
+  // plugin route everything else in place. Intercepting those here hijacked
+  // the plugin's UI (a preview click jumped to the system browser).
   webContents.on('will-frame-navigate', (event) => {
-    if (event.isMainFrame || !isExternalUrl(event.url)) return
+    if (event.isMainFrame || !isExternalSubFrameUrl(event.url)) return
     event.preventDefault()
     openHarnessPopupUrl(workspace, event.url)
   })
+}
+
+/**
+ * Undo the loading state a blocked navigation leaves behind.
+ *
+ * Measured event order for a denied in-page navigation (Electron 35):
+ *
+ *   did-start-loading → will-navigate → preventDefault → did-stop-loading
+ *
+ * `did-start-navigation` already dropped `harnessReady` before the guard gets
+ * a chance to deny the navigation, and the denied load never emits
+ * `did-finish-load`, so nothing restores the flag and the frame's loading
+ * panel would cover the harness permanently.
+ *
+ * Restore from `blockedNavRestore` — the readiness captured BEFORE it was
+ * cleared — rather than from the live flags, which are already gone at this
+ * point. The snapshot exists only between a main-frame navigation and its
+ * settle, so it is `undefined` for any other blocked nav and this is then a
+ * no-op: a page that never finished loading can never be marked ready.
+ * @param {object} workspace - the workspace owning the harness view.
+ */
+function restoreHarnessAfterBlockedNav(workspace) {
+  if (workspace === null || workspace === undefined) return
+  if (workspace.loadedUrl === '') return
+  const view = workspace.harnessView
+  if (view === null || view === undefined || view.webContents.isDestroyed()) return
+  const wasReady = workspace.blockedNavRestore
+  workspace.blockedNavRestore = undefined
+  if (wasReady !== true) return
+  workspace.harnessReady = true
+  updateHarnessVisibility(workspace)
 }
 
 /**
@@ -1632,21 +1674,48 @@ function createWorkspace(deviceKey = null, options = {}) {
       session.connection.log('[window] frame load failed ' + code + ' ' + description)
     }
   })
+  // A MAIN-frame navigation means the harness document itself is being
+  // replaced, so the view is no longer showing a loaded page. Tracked here
+  // (not in did-start-loading) because that event fires for SUB-FRAME loads
+  // too — see the did-start-loading handler below.
+  harnessView.webContents.on('did-start-navigation', (_event, url, isInPlace, isMainFrame) => {
+    if (!isMainFrame) return
+    if (workspace.loadedUrl === '') return
+    // Snapshot readiness BEFORE clearing it: a navigation denied in
+    // `will-navigate` (which fires after this event) needs to know whether a
+    // harness document was on screen to restore the view. See
+    // restoreHarnessAfterBlockedNav.
+    workspace.blockedNavRestore = workspace.harnessReady === true && workspace.loadError === ''
+    workspace.harnessReady = false
+  })
   harnessView.webContents.on('did-start-loading', () => {
     if (workspace.loadedUrl === '') return
-    workspace.harnessReady = false
+    // Sub-frames must not disturb the harness's readiness.
+    //
+    // Measured: `did-start-loading` fires for ANY frame's load, including an
+    // iframe belonging to a plugin panel (the sidebar's file preview). Such a
+    // load is allowed through — it is the plugin's own content, not an
+    // external page — so it never produces a top-level `did-finish-load`.
+    // Clearing `harnessReady` here therefore stranded the flag at false and
+    // left the shell's loading panel covering the harness permanently.
+    // Only a main-frame navigation (tracked above) drops readiness; this
+    // handler just refreshes what is on screen.
     updateHarnessVisibility(workspace)
   })
   harnessView.webContents.on('did-finish-load', () => {
     if (workspace.loadedUrl === '') return
     workspace.harnessReady = true
     workspace.loadError = ''
+    // The load the snapshot was guarding has completed; drop it so a later,
+    // unrelated blocked navigation cannot reuse a stale answer.
+    workspace.blockedNavRestore = undefined
     updateHarnessVisibility(workspace)
   })
   harnessView.webContents.on('did-fail-load', (_event, code, description) => {
     if (code === -3) return
     workspace.harnessReady = false
     workspace.loadError = description
+    workspace.blockedNavRestore = undefined
     if (session !== null) {
       session.connection.log('[window] load failed ' + code + ' ' + description)
     }

@@ -27,7 +27,7 @@ const { WindowManager } = require('../src/window-manager')
 const { mergeUpdates } = require('../src/device-merge')
 const { resolveTools, engineOk } = require('../src/tools')
 const { presentWindow } = require('../src/windows')
-const { isExternalUrl } = require('../src/external-open')
+const { isExternalUrl, isExternalSubFrameUrl } = require('../src/external-open')
 
 async function main() {
   // settings: flat active-device view plus the per-device map. A legacy
@@ -218,22 +218,64 @@ async function main() {
   assert.strictEqual(presentWindow(hidden), hidden)
   assert.deepStrictEqual(calls, ['show', 'focus'])
 
-  // harness navigation classification: the shell renders only the loopback
-  // harness service; public web pages (search citations, web-search results,
-  // window.open targets) are external and belong in the OS default browser.
+  // harness navigation classification: the shell renders only the ROOT of the
+  // loopback harness service; public web pages (search citations, web-search
+  // results, window.open targets) are external and belong in the OS default
+  // browser. So are non-root loopback paths: the harness is a hash-routed SPA
+  // served from `/`, and any other path is a file the service does not serve
+  // (a 404 blank page), e.g. a clicked workspace .html.
   assert.strictEqual(isExternalUrl('https://example.com/page'), true)
   assert.strictEqual(isExternalUrl('http://example.com'), true)
   assert.strictEqual(isExternalUrl('mailto:a@example.com'), true)
   assert.strictEqual(isExternalUrl('file:///tmp/x.html'), true)
   assert.strictEqual(isExternalUrl('http://192.168.1.10:3080'), true)
+  assert.strictEqual(isExternalUrl('http://127.0.0.1:3080/docs/report.html'), true)
+  assert.strictEqual(isExternalUrl('http://localhost:3080/docs/report.html'), true)
+  assert.strictEqual(isExternalUrl('http://127.0.0.1:3080/artifacts/a.svg'), true)
   assert.strictEqual(isExternalUrl('http://127.0.0.1:3080'), false)
   assert.strictEqual(isExternalUrl('http://localhost:3080'), false)
   assert.strictEqual(isExternalUrl('http://127.0.0.1:3080/'), false)
   assert.strictEqual(isExternalUrl('http://127.0.0.1:3080/?tab=1'), false)
+  // Hash routing keeps pathname === '/', so real in-app routes stay internal.
+  assert.strictEqual(isExternalUrl('http://127.0.0.1:3080/#/session/abc'), false)
   assert.strictEqual(isExternalUrl('about:blank'), false)
   assert.strictEqual(isExternalUrl('javascript:alert(1)'), false)
   assert.strictEqual(isExternalUrl(''), false)
   assert.strictEqual(isExternalUrl('not a url'), false)
+
+  // Sub-frames belong to the plugin that embedded them, so the shell only
+  // expels off-origin content and lets a plugin route its own frame in place.
+  // Loopback paths — the sidebar preview's included — are NOT intercepted:
+  // hijacking them sent a preview click to the system browser.
+  assert.strictEqual(isExternalSubFrameUrl('https://example.com/page'), true)
+  assert.strictEqual(isExternalSubFrameUrl('http://192.168.1.10:3080'), true)
+  assert.strictEqual(isExternalSubFrameUrl('file:///tmp/x.html'), true)
+  assert.strictEqual(isExternalSubFrameUrl('http://127.0.0.1:3080/'), false)
+  assert.strictEqual(isExternalSubFrameUrl('http://localhost:3080/preview'), false)
+  assert.strictEqual(isExternalSubFrameUrl('http://127.0.0.1:3080/docs/x.html'), false)
+  assert.strictEqual(isExternalSubFrameUrl('about:blank'), false)
+  assert.strictEqual(isExternalSubFrameUrl(''), false)
+  assert.strictEqual(isExternalSubFrameUrl('not a url'), false)
+
+  // `dsh web --no-open` is version-gated: the flag landed at 0.1.1-rc.1 and
+  // older artifacts abort the boot on the unknown option, so the shell must
+  // pass it only to runtimes that recognize it. An unresolvable version is
+  // treated as OLD — guessing new would abort the very boot it is fixing.
+  const gated = Object.create(ConnectionManager.prototype)
+  assert.strictEqual(gated.supportsNoOpen('0.1.1-rc.2'), true)
+  assert.strictEqual(gated.supportsNoOpen('0.1.1-rc.1'), true)
+  assert.strictEqual(gated.supportsNoOpen('0.1.1'), true)
+  assert.strictEqual(gated.supportsNoOpen('0.2.0'), true)
+  assert.strictEqual(gated.supportsNoOpen('0.1.1-rc.0'), false)
+  assert.strictEqual(gated.supportsNoOpen('0.1.0-rc.8'), false)
+  assert.strictEqual(gated.supportsNoOpen('unknown'), false)
+  assert.strictEqual(gated.supportsNoOpen(''), false)
+  assert.strictEqual(gated.supportsNoOpen(null), false)
+  assert.strictEqual(gated.supportsNoOpen(undefined), false)
+  assert.deepStrictEqual(gated.webArgs(0, '0.1.1-rc.2'), ['web', '--port', '0', '--no-open'])
+  assert.deepStrictEqual(gated.webArgs(0, '0.1.0-rc.8'), ['web', '--port', '0'])
+  assert.deepStrictEqual(gated.webArgs(0, 'unknown'), ['web', '--port', '0'])
+  assert.deepStrictEqual(gated.webArgs(3080, '0.1.1-rc.2'), ['web', '--port', '3080', '--no-open'])
 
   // tools: engine filter + a pnpm that actually runs under the clean env
   assert.strictEqual(engineOk('v23.11.0'), false)

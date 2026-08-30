@@ -28,6 +28,7 @@ const { resolveTools } = require('./tools')
 const { findFreePort, releasePort, reservePort, tcpProbe } = require('./ports')
 const { runtimeLayout } = require('./runtime-layout')
 const runtimeStore = require('./runtime-store')
+const { compareVersions } = require('./components')
 
 const PROBE_INTERVAL_MS = 750
 const READY_TIMEOUT_MS = 90 * 1000
@@ -47,6 +48,12 @@ const HEALTH_FAILURE_THRESHOLD = 2
 // restart only ever pays a few seconds of delay.
 const PEER_WAIT_INTERVAL_MS = 1000
 const PEER_WAIT_ATTEMPTS = 6
+// `dsh web --no-open` landed in the official artifact at 0.1.1-rc.1 (the
+// "open the ready Web UI by default" change). Older artifacts abort the boot
+// on the unknown option, so only runtimes at or above this floor are given the
+// flag; anything older keeps opening a browser tab on startup (harmless, just
+// noise) rather than failing to start at all.
+const NO_OPEN_MIN_VERSION = '0.1.1-rc.1'
 
 // Sentinel markers for remoteRun: some ssh gateways (e.g. Tencent devcloud)
 // print a banner line such as `authz success` onto stdout from the remote
@@ -1112,6 +1119,26 @@ class ConnectionManager extends EventEmitter {
     return home
   }
 
+  /**
+   * Whether the runtime being served understands `--no-open`. Version-gated:
+   * the flag landed at NO_OPEN_MIN_VERSION and older artifacts abort the boot
+   * on an unknown option. An unresolvable version ('unknown') is treated as
+   * OLD, not new — guessing new would abort the very boot it is meant to fix.
+   * @param {string} version - the runtime's package version.
+   * @returns {boolean}
+   */
+  supportsNoOpen(version) {
+    if (typeof version !== 'string' || version === '' || version === 'unknown') return false
+    return compareVersions(version, NO_OPEN_MIN_VERSION) >= 0
+  }
+
+  /** `dsh web` argv for one runtime: `--no-open` only when that runtime takes it. */
+  webArgs(port, version) {
+    const args = ['web', '--port', String(port)]
+    if (this.supportsNoOpen(version)) args.push('--no-open')
+    return args
+  }
+
   async spawnLocalService(settings, port = 0, version = null) {
     const tools = this.resolvedTools()
     const serveVersion = version ?? this.localVersion ?? 'unknown'
@@ -1149,9 +1176,11 @@ class ConnectionManager extends EventEmitter {
 
     const service = spawnService({
       cmd: tools.node,
-      // NOTE: `--no-open` is intentionally omitted until the official npm
-      // artifact ships it; older artifacts abort on the unknown option.
-      args: [binPath, 'web', '--port', String(port)],
+      // The shell owns the harness view, so the service must not also open a
+      // browser tab on startup (it did so on every spawn, including restarts
+      // that picked a new OS-chosen port). `--no-open` only when the runtime
+      // being served recognizes it — see supportsNoOpen.
+      args: [binPath, ...this.webArgs(port, serveVersion)],
       cwd: runtimeDir,
       env: { ...tools.env, DSH_HOME: expandHome(settings.local.dshHome) },
       // 父进程监护：壳被强杀/崩溃时让 dsh web 随父退出，避免孤儿实例。
@@ -1879,11 +1908,11 @@ class ConnectionManager extends EventEmitter {
     // The runtime dir may be a repo-layout checkout (apps/cli/lib/bin.js)
     // or an npm-layout official artifact; resolve the bin inside the remote
     // shell so one launcher covers both.
-    // No `--no-open` here: the remote service always starts through ssh, so
-    // the harness sees SSH_CONNECTION/SSH_TTY and skips the default-browser
-    // handoff on its own. Older remote harnesses (and older official
-    // artifacts) don't recognize `--no-open`, so passing it would abort the
-    // boot with "unknown option".
+    // No `--no-open` here, and deliberately not version-gated either: the
+    // remote service always starts through ssh, so the harness sees
+    // SSH_CONNECTION/SSH_TTY and skips the default-browser handoff on its
+    // own. Passing the flag would add nothing and would abort an old remote
+    // runtime with "unknown option".
     // The service writes its OWN pid before exec-ing node: `$$` is the
     // launching sh, and `exec` replaces it with node IN THE SAME PROCESS, so
     // pidfile always records the real node pid. Writing `$!` instead used to
