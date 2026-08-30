@@ -692,7 +692,8 @@ body.shell-workspace {
 }
 
 /* Settings panel embedded in the workspace frame: the frame already owns
-   section navigation, so the old settings-window sidebar is hidden. */
+   section navigation, so the old settings-window sidebar is hidden. The
+   locating rail is part of the page itself and stays. */
 body.embedded .settings-shell .settings-sidebar { display: none; }
 body.embedded .settings-shell {
   height: 100%;
@@ -817,11 +818,108 @@ body.embedded .settings-titlebar .titlebar-actions {
 
 /* ── unified settings window ─────────────────────────────────────────────── */
 
+/* Two columns on one page: a left rail that LOCATES sections (nothing
+   collapses — every section stays on the single scrolling page) and the
+   content, centred as a whole so a wide window does not stretch the copy. */
 .settings-shell {
   display: flex;
   width: 100%;
   height: 100vh;
+  min-height: 0;
   overflow: hidden;
+  justify-content: center;
+}
+
+.settings-inner {
+  display: flex;
+  width: 100%;
+  max-width: 940px;
+  min-height: 0;
+  padding: var(--ds-space-5) var(--ds-space-5) 0;
+  gap: var(--ds-space-5);
+}
+
+.settings-menu {
+  flex: none;
+  width: 176px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  align-self: flex-start;
+  padding-top: 2px;
+}
+
+.settings-menu-title {
+  padding: 0 10px var(--ds-space-2);
+  color: var(--ds-text-muted);
+  font-family: var(--ds-mono);
+  font-size: var(--ds-font-size-xs);
+  letter-spacing: 0.06em;
+}
+
+.settings-menu button {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  height: 28px;
+  padding: 0 10px;
+  border: var(--ds-border-width) solid transparent;
+  border-radius: var(--ds-radius-sm);
+  background: transparent;
+  color: var(--ds-text-secondary);
+  font-size: var(--ds-font-size-md);
+  line-height: 18px;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--ds-duration-fast) var(--ds-ease), color var(--ds-duration-fast) var(--ds-ease);
+}
+
+.settings-menu button:hover { background: var(--ds-surface-hover); color: var(--ds-text); }
+
+.settings-menu button.active {
+  background: var(--ds-accent);
+  border-color: var(--ds-accent);
+  color: #fff;
+  font-weight: var(--ds-font-weight-semibold);
+}
+
+.settings-menu .nav-icon {
+  flex: none;
+  width: 16px;
+  text-align: center;
+  font-size: var(--ds-font-size-base);
+  opacity: 0.9;
+}
+
+.settings-menu .nav-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Pending-update marker: the shell's own status-dot semantics. */
+.settings-menu .nav-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ds-warning);
+  display: none;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ds-warning) 22%, transparent);
+}
+
+.settings-menu button[data-dot="1"] .nav-dot { display: block; }
+.settings-menu button.active .nav-dot { background: #fff; box-shadow: none; }
+
+/* Content is centred inside the right column too, so the measure stays
+   readable regardless of window width. */
+.settings-content {
+  width: 100%;
+  max-width: 660px;
+  margin: 0 auto;
 }
 
 .settings-sidebar {
@@ -939,7 +1037,7 @@ body.embedded .settings-titlebar .titlebar-actions {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  background: var(--ds-body-bg);
+  min-height: 0;
 }
 
 .settings-titlebar {
@@ -992,10 +1090,38 @@ body.embedded .settings-titlebar .titlebar-actions {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: var(--ds-space-4) var(--ds-space-5) var(--ds-space-5);
+  scroll-behavior: smooth;
+  /* Bottom spacer so the LAST section can still be scrolled to the top when
+     the menu locates it. */
+  padding: var(--ds-space-5) var(--ds-space-4) 40vh;
 }
 
-.settings-section { max-width: none; }
+.settings-section {
+  max-width: none;
+  scroll-margin-top: var(--ds-space-5);
+}
+
+/* The trailing section must be able to reach the TOP when the menu locates
+   it. Without a spacer the last section can only scroll until the page runs
+   out, so locating it landed short on a short window. Sized from the
+   viewport: it has to cover everything below the section's own height. */
+.settings-content::after {
+  content: "";
+  display: block;
+  height: 40vh;
+}
+
+.settings-heading {
+  margin: 0 0 3px;
+  font-size: var(--ds-font-size-xl);
+  font-weight: var(--ds-font-weight-semibold);
+}
+
+.settings-lead {
+  margin: 0 0 var(--ds-space-4);
+  color: var(--ds-text-muted);
+  font-size: var(--ds-font-size-base);
+}
 .section-lead {
   margin: 0 0 var(--ds-space-3);
   color: var(--ds-text-muted);

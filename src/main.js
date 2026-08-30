@@ -1175,16 +1175,21 @@ function harnessShowsConnectionForm(workspace) {
 
 /** Show one top-level workspace view: harness or the settings panel. */
 function setWorkspaceView(workspace, view) {
-  // 'connection' and 'updates' stay valid routes (menus, tray, error
-  // buttons): they open the settings panel and anchor on that section.
-  // 'settings' opens the panel as-is (single scrolling page now).
+  // Which settings section to ANCHOR on, or null for "open at the top".
+  //
+  // Only an entry whose semantic is "connect" anchors on 连接 — the terminal
+  // launcher, 「连接设置」, the terminal badge, a failed connect's 连接设置.
+  // A plain 设置 entry (the frame's 设置 tab, tray 设置…) is a request to
+  // look at settings, not at any one section, so it opens at the top and
+  // 更新 — first in reading order — is what the user sees.
   const isSettingsView = view !== 'harness'
+  const anchor = view === 'connection' || view === 'updates' ? view : null
   workspace.activeView = isSettingsView ? 'settings' : 'harness'
   if (isSettingsView) {
     workspace.harnessView.setVisible(false)
     const deviceKey = workspace.session === null ? candidateDeviceKey() : workspace.deviceKey
-    workspace.setupDialog.setDeviceKey(deviceKey, view === 'updates' ? 'updates' : 'connection')
-    workspace.setupDialog.open(view === 'updates' ? 'updates' : 'connection')
+    workspace.setupDialog.setDeviceKey(deviceKey, anchor)
+    workspace.setupDialog.open(anchor)
     layoutWorkspaceViews(workspace)
   } else {
     workspace.setupDialog.close()

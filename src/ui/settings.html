@@ -16,14 +16,7 @@
   body { width: 100%; height: 100vh; }
   .section-lead { margin: 2px 0 12px; color: var(--ds-text-muted); font-size: 12.5px; }
   #update-components .component { margin-bottom: 0; }
-  .page-block-head {
-    margin: 0 0 var(--ds-space-2);
-    font-size: var(--ds-font-size-lg);
-    font-weight: var(--ds-font-weight-semibold);
-  }
-  .settings-section + .settings-section { margin-top: 26px; }
-  /* Single scrolling page: keep the reading width bounded on wide windows. */
-  .settings-scroll > .settings-section { max-width: 780px; }
+  .settings-section + .settings-section { margin-top: var(--ds-space-6); padding-top: var(--ds-space-6); border-top: 1px solid color-mix(in srgb, var(--ds-border) 55%, transparent); }
   /* All settings text is copyable: the shell disables selection globally,
      but a settings page is reference material users quote from. */
   .settings-main { user-select: text; -webkit-user-select: text; }
@@ -31,7 +24,18 @@
 </head>
 <body>
 <div class="settings-shell">
-  <main class="settings-main">
+  <div class="settings-inner">
+    <!-- Left rail: locates sections only. Nothing collapses — every section
+         stays on one scrolling page. -->
+    <nav class="settings-menu" id="settings-menu" aria-label="设置分区">
+      <div class="settings-menu-title">设置</div>
+      <button type="button" data-sec="updates"><span class="nav-icon">↻</span><span class="nav-label">更新</span><span class="nav-dot"></span></button>
+      <button type="button" data-sec="connection"><span class="nav-icon">⇄</span><span class="nav-label">连接</span><span class="nav-dot"></span></button>
+      <button type="button" data-sec="appearance"><span class="nav-icon">◐</span><span class="nav-label">外观</span><span class="nav-dot"></span></button>
+      <button type="button" data-sec="log"><span class="nav-icon">≡</span><span class="nav-label">日志</span><span class="nav-dot"></span></button>
+    </nav>
+
+    <main class="settings-main">
     <header class="settings-titlebar">
       <div class="settings-title-group">
         <h1>设置</h1>
@@ -43,8 +47,9 @@
     </header>
 
     <div class="settings-scroll">
+      <div class="settings-content">
       <section id="section-updates" class="settings-section">
-        <div class="page-block-head">更新</div>
+        <h2 class="settings-heading">更新</h2>
         <p class="section-lead" id="updates-lead">检查与更新当前设备的 Harness。</p>
         <div class="top-actions">
           <button id="check-all" class="button" type="button">检查更新</button>
@@ -62,7 +67,7 @@
       </section>
 
       <section id="section-connection" class="settings-section">
-        <div class="page-block-head">连接</div>
+        <h2 class="settings-heading">连接</h2>
         <p class="section-lead">本地模式直接使用本机仓库；SSH 远程模式参考 VS Code Remote。保存后自动连接并进入界面。</p>
         <div id="live-strip" class="live-strip ok" hidden></div>
 
@@ -122,14 +127,14 @@
       </section>
 
       <section id="section-appearance" class="settings-section">
-        <div class="page-block-head">外观</div>
+        <h2 class="settings-heading">外观</h2>
         <div class="appearance-block">
           <div class="theme-grid" id="theme-grid" role="radiogroup" aria-label="外观主题"></div>
         </div>
       </section>
 
       <section id="section-log" class="settings-section">
-        <div class="page-block-head">日志</div>
+        <h2 class="settings-heading">日志</h2>
         <div class="log-wrap updates-log" id="update-log-wrap">
           <div class="log-tools">
             <span class="log-label">操作日志</span>
@@ -142,13 +147,15 @@
         </div>
       </section>
 
+      </div>
     </div>
 
     <footer class="settings-footer">
       <span class="footer-note" id="footer-note">已载入当前设置</span>
       <span class="footer-actions" id="footer-actions"></span>
     </footer>
-  </main>
+    </main>
+  </div>
 </div>
 
 <script>
@@ -177,21 +184,92 @@ function status(text, ok) {
 function switchOf(id) { return $(id).getAttribute('aria-checked') === 'true' }
 function setSwitch(id, value) { $(id).setAttribute('aria-checked', value ? 'true' : 'false') }
 
-// ── single-page layout ─────────────────────────────────────────────────────
-// The settings panel is ONE scrolling page (更新 → 连接 → 外观 → 日志).
-// `dialog:section` from the main process (launcher / menus / error buttons)
-// only scrolls to the matching anchor.
+// ── single-page layout: locating menu + entry-dependent focus ──────────────
+// The settings panel is ONE scrolling page (更新 → 连接 → 外观 → 日志). The
+// left rail only LOCATES sections — nothing collapses, nothing is hidden.
+//
+// Focus is decided by how the panel was opened: an entry whose semantic is
+// "connect" (terminal launcher, 「连接设置」, the terminal badge, a failed
+// connect's 连接设置) lands on 连接; the frame's 设置 tab — plain "open
+// settings" — starts at the TOP. See the `section` query param.
 
-function anchorSection(section) {
-  const target = section === 'updates' ? $('section-updates') : $('section-connection')
-  if (target !== null) target.scrollIntoView({ behavior: 'smooth', block: 'start' })
+const SECTIONS = ['updates', 'connection', 'appearance', 'log']
+const menuButtons = Array.from(document.querySelectorAll('#settings-menu button'))
+const scroll = document.querySelector('.settings-scroll')
+// Guards the scroll-spy while a menu click animates, so the highlight does
+// not flicker through intermediate sections on the way to the target.
+let spyLocked = false
+
+/** Offset of one section inside the scroll container's scrollable content. */
+function sectionOffset(section) {
+  const target = $('section-' + section)
+  if (target === null || scroll === null) return 0
+  // Measured from rects on purpose: `offsetTop` resolves against an outer
+  // offsetParent (the viewport), which overshoots by the titlebar height.
+  return Math.max(0, target.getBoundingClientRect().top - scroll.getBoundingClientRect().top + scroll.scrollTop)
+}
+
+function setActiveSection(section) {
+  for (const button of menuButtons) {
+    const on = button.dataset.sec === section
+    button.classList.toggle('active', on)
+    button.setAttribute('aria-current', on ? 'true' : 'false')
+  }
+}
+
+function goToSection(section) {
+  if (!SECTIONS.includes(section)) return
+  setActiveSection(section)
+  if (scroll === null) return
+  spyLocked = true
+  scroll.scrollTo({ top: Math.max(0, sectionOffset(section) - 20), behavior: 'smooth' })
+  setTimeout(() => { spyLocked = false }, 420)
+}
+
+for (const button of menuButtons) button.addEventListener('click', () => goToSection(button.dataset.sec))
+
+if (scroll !== null) {
+  scroll.addEventListener('scroll', () => {
+    if (spyLocked) return
+    // At the very bottom the LAST section is what the user is looking at,
+    // even though its offset never crosses the probe line on a short window.
+    if (scroll.scrollTop + scroll.clientHeight >= scroll.scrollHeight - 2) {
+      setActiveSection(SECTIONS[SECTIONS.length - 1])
+      return
+    }
+    const line = scroll.scrollTop + 24
+    let current = SECTIONS[0]
+    for (const id of SECTIONS) {
+      if (sectionOffset(id) <= line) current = id
+    }
+    setActiveSection(current)
+  }, { passive: true })
+}
+
+/**
+ * Apply the panel's initial focus from its `section` query param.
+ *
+ * The main process sets `section=connection` ONLY for entries whose semantic
+ * is "connect"; a plain 设置 entry sends no section (or an unknown one), and
+ * the panel then starts at the top — the first thing on the page is 更新,
+ * which is the natural reading order for someone who just opened settings.
+ */
+function applyInitialFocus() {
+  const requested = params.get('section')
+  if (SECTIONS.includes(requested)) {
+    goToSection(requested)
+    return
+  }
+  // Default: top of the page.
+  setActiveSection(SECTIONS[0])
+  if (scroll !== null) scroll.scrollTop = 0
 }
 
 $('close-window').addEventListener('click', () => {
   if (api.closePanel) api.closePanel()
   else window.close()
 })
-api.onSection && api.onSection(section => anchorSection(section))
+api.onSection && api.onSection(section => { if (SECTIONS.includes(section)) goToSection(section) })
 
 function renderFooter() {
   // Footer only shows the live status note; the primary save action lives
@@ -309,6 +387,12 @@ function renderUpdates() {
   }
   const count = updateState.available.filter(row => row.enabled).length
   setSwitch('auto-check', updateState.autoCheckOnLaunch !== false)
+  // Locating rail: mark 更新 while something is actually waiting, so the
+  // pending update is visible without scrolling to that section.
+  {
+    const updatesButton = menuButtons.find(button => button.dataset.sec === 'updates')
+    if (updatesButton !== undefined) updatesButton.dataset.dot = count > 0 ? '1' : '0'
+  }
   // Single page: surface the last-check time in the section lead instead of
   // the old per-section footer note.
   {
@@ -496,6 +580,18 @@ async function saveSettings() {
 
 // ── boot ────────────────────────────────────────────────────────────────────
 
+// The sections settle in TWO async passes: this boot state, then the update
+// rows from `updates.getState()`. Both change the page height, so the initial
+// section focus is applied only once both have rendered — anchoring on an
+// offset measured mid-boot landed short of 连接 by however much the later
+// rows added above it.
+let bootSettled = false
+let updatesSettled = false
+function settleAndFocus() {
+  if (!bootSettled || !updatesSettled) return
+  applyInitialFocus()
+}
+
 api.getState().then(state => {
   const s = state.settings
   savedSettings = s
@@ -525,12 +621,16 @@ api.getState().then(state => {
   refreshMode(); refreshSshHost(); renderFooter()
   // Single page: the log card is always visible, so hydrate it once at boot.
   void refreshUpdatesLog()
-  // Anchor from the query param (launcher / menu deep links).
-  const section = ['connection', 'updates'].includes(params.get('section')) ? params.get('section') : ''
-  if (section !== '') anchorSection(section)
+  bootSettled = true
+  settleAndFocus()
 })
 
-api.updates.getState().then(state => { updateState = state; renderUpdates() })
+api.updates.getState().then(state => {
+  updateState = state
+  renderUpdates()
+  updatesSettled = true
+  settleAndFocus()
+})
 </script>
 </body>
 </html>

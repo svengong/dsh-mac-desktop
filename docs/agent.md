@@ -28,6 +28,8 @@ Electron macOS 薄壳：主窗口顶部 46px 壳边框，下面是 harness WebCo
 | 加载面板 | `src/main.js`、`src/ui/shell.html`、`src/ui/shell.css` | 连接/加载/构建/更新期间用主窗口内置面板展示 spinner + 状态 + 实时日志，替代独立进度窗口 |
 | 移除进度窗口 | `src/dialogs.js`、`src/ui/progress.html` | ProgressDialog 已删除；进度经 `shell:state` / `shell:log` 进加载面板，重试走 `shell:action` |
 | 无感自动重连 | `src/connection.js` | close watcher 重启后发布新端口 `ready`；`ready` 态每 4s 健康探测，连续 2 次失败自动 `connect()`（`startHealthMonitor`/`healthTick`/`HEALTH_INTERVAL_MS`/`HEALTH_FAILURE_THRESHOLD`），覆盖插件安装/进程内重载/外部托管/远端崩溃 |
+| 设置定位菜单 | `src/ui/settings.html`、`src/ui/shell.css` | 左侧 176px 菜单只**定位**分区（更新/连接/外观/日志，全部平铺不折叠），随滚动高亮；内容整体居中（外层 940px、正文 660px）；有可用更新时「更新」带橙点 |
+| 设置入口焦点 | `src/main.js#setWorkspaceView`、`src/dialogs.js`、`src/ui/settings.html` | 只有「连接」语义的入口（终端启动器／⌘,／终端徽标／失败页「连接设置」）才锚定到「连接」；顶栏「设置」等普通入口锚点为 `null`，面板停在顶部。初始焦点在 boot 状态与 `updates.getState()` **两次渲染都完成后**才施加，否则偏移量按旧布局计算会落空 |
 
 ## 3. 必须遵守的不变量
 

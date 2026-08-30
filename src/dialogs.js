@@ -14,7 +14,15 @@ const { WebContentsView, dialog } = require('electron')
 const PRELOAD = path.join(__dirname, 'dialog-preload.js')
 const SETTINGS_HTML = path.join(__dirname, 'ui', 'settings.html')
 
-/** Sections the settings panel can open; mirrored by `ui/settings.html`. */
+/**
+ * Sections the panel can ANCHOR on; mirrored by `ui/settings.html`.
+ *
+ * A null/undefined section means "no anchor": the panel opens at the TOP of
+ * the page. That is what a plain 设置 entry gets — opening settings is not a
+ * request to look at any one section. Only an entry whose semantic is
+ * "connect" (terminal launcher, 「连接设置」, the terminal badge, a failed
+ * connect's 连接设置) anchors on `connection`.
+ */
 const SECTIONS = ['connection', 'updates']
 
 /**
@@ -49,8 +57,8 @@ class SetupDialog {
    * the kept-alive panel is reloaded so it can never show stale forms from
    * the previous terminal.
    */
-  setDeviceKey(deviceKey, section = 'connection') {
-    this.activeSection = SECTIONS.includes(section) ? section : 'connection'
+  setDeviceKey(deviceKey, section = null) {
+    this.activeSection = SECTIONS.includes(section) ? section : null
     if (this.deviceKey === deviceKey) return
     this.deviceKey = deviceKey
     this.reload()
@@ -62,7 +70,7 @@ class SetupDialog {
    * otherwise keep displaying (and later save) the stale form.
    */
   reload(section = this.activeSection) {
-    this.activeSection = SECTIONS.includes(section) ? section : 'connection'
+    this.activeSection = SECTIONS.includes(section) ? section : null
     if (this.view !== null && !this.view.webContents.isDestroyed()) {
       // An on-stage panel blanks during reload — hide it and re-show once
       // the fresh page has painted, so device switches don't flash.
@@ -72,16 +80,21 @@ class SetupDialog {
         this.pendingShow = true
         this.view.setVisible(false)
       }
-      this.view.webContents.loadFile(SETTINGS_HTML, {
-        query: { section: this.activeSection, embedded: '1', theme: this.getTheme() },
-      })
+      this.view.webContents.loadFile(SETTINGS_HTML, this.loadQuery(this.activeSection))
     }
   }
 
-  ensureView(section = 'connection') {
+  /** Query params for loading the panel; `section` omitted when it is null. */
+  loadQuery(section) {
+    const query = { embedded: '1', theme: this.getTheme() }
+    if (SECTIONS.includes(section)) query.section = section
+    return query
+  }
+
+  ensureView(section = null) {
     if (this.ownerWindow === null || this.ownerWindow.isDestroyed()) return null
     if (this.view !== null && !this.view.webContents.isDestroyed()) return this.view
-    this.activeSection = section
+    this.activeSection = SECTIONS.includes(section) ? section : null
     this.view = new WebContentsView({
       webPreferences: {
         preload: PRELOAD,
@@ -99,9 +112,7 @@ class SetupDialog {
     // webContents stay alive for re-attach.
     if (this.bounds !== null) this.view.setBounds(this.bounds)
     this.view.setVisible(false)
-    this.view.webContents.loadFile(SETTINGS_HTML, {
-      query: { section, embedded: '1', theme: this.getTheme() },
-    })
+    this.view.webContents.loadFile(SETTINGS_HTML, this.loadQuery(this.activeSection))
     this.hookLoadOnce()
     return this.view
   }
@@ -132,8 +143,12 @@ class SetupDialog {
     })
   }
 
-  open(section = 'connection') {
-    this.activeSection = SECTIONS.includes(section) ? section : 'connection'
+  /**
+   * @param {string|null} section - section to ANCHOR on, or null to open at
+   *   the top of the page.
+   */
+  open(section = null) {
+    this.activeSection = SECTIONS.includes(section) ? section : null
     const view = this.ensureView(this.activeSection)
     if (view === null) return
     // Re-attach after a close() removed it; addChildView also brings the panel
@@ -151,7 +166,9 @@ class SetupDialog {
       this.pendingSection = this.activeSection
     } else {
       view.setVisible(true)
-      this.showSection(this.activeSection)
+      // Anchoring is optional: a null section means "stay at the top", which
+      // is the correct focus for a plain 设置 entry.
+      if (this.activeSection !== null) this.showSection(this.activeSection)
       view.webContents.focus()
     }
   }
@@ -183,6 +200,7 @@ class SetupDialog {
     }
   }
 
+  /** Scroll the live panel to one section. A null section is a no-op. */
   showSection(section) {
     if (!SECTIONS.includes(section)) return
     this.activeSection = section
