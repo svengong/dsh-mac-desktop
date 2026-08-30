@@ -30,6 +30,8 @@ Electron macOS 薄壳：主窗口顶部 46px 壳边框，下面是 harness WebCo
 | 无感自动重连 | `src/connection.js` | close watcher 重启后发布新端口 `ready`；`ready` 态每 4s 健康探测，连续 2 次失败自动 `connect()`（`startHealthMonitor`/`healthTick`/`HEALTH_INTERVAL_MS`/`HEALTH_FAILURE_THRESHOLD`），覆盖插件安装/进程内重载/外部托管/远端崩溃 |
 | 设置定位菜单 | `src/ui/settings.html`、`src/ui/shell.css` | 左侧 176px 菜单只**定位**分区（更新/连接/外观/日志，全部平铺不折叠），随滚动高亮；内容整体居中（外层 940px、正文 660px）；有可用更新时「更新」带橙点 |
 | 设置入口焦点 | `src/main.js#setWorkspaceView`、`src/dialogs.js`、`src/ui/settings.html` | 只有「连接」语义的入口（终端启动器／⌘,／终端徽标／失败页「连接设置」）才锚定到「连接」；顶栏「设置」等普通入口锚点为 `null`，面板停在顶部。初始焦点在 boot 状态与 `updates.getState()` **两次渲染都完成后**才施加，否则偏移量按旧布局计算会落空 |
+| harness 导航护栏 | `src/external-open.js`、`src/main.js#installHarnessNavigationGuard` | 主框架 `isExternalUrl` 只保留 harness 根路径，其余交系统浏览器；子框架 `isExternalSubFrameUrl` 只驱逐跨源内容（插件 iframe 归插件）。拦截后 `restoreHarnessAfterBlockedNav()` 恢复就绪态；`did-start-navigation`(isMainFrame) 才代表文档被替换 |
+| `--no-open` 门控 | `src/connection.js` | `dsh web --no-open` 只在运行时 ≥ `NO_OPEN_MIN_VERSION` 时传（旧产物遇未知选项启动即失败）；`unknown` 版本按旧处理 |
 
 ## 3. 必须遵守的不变量
 
@@ -72,6 +74,26 @@ Electron macOS 薄壳：主窗口顶部 46px 壳边框，下面是 harness WebCo
     被打断（退出/崩溃）后启动时 `resumePendingUpdate()` 询问继续/放弃。detached
     worker（`update-worker.js`）不注册进进程登记表，壳退出不杀它；壳通过
     `runtime/update-status.json` 观察，`done` 后重启服务，下次连接按版本不匹配兜底。
+18. **导航分类分主/子框架，且子框架归插件。** `will-navigate` 用 `isExternalUrl`
+    （只保留 harness 根路径）；`will-frame-navigate` 用 `isExternalSubFrameUrl`
+    （只驱逐真正跨源内容）。子框架属于嵌入它的插件（sidebar 的文件预览就是），
+    壳拦截会把插件 UI 顶到系统浏览器。**不要**把主框架规则套到子框架上。
+19. **拦截导航后必须自己恢复就绪态。** 被 `preventDefault()` 的导航不会发出
+    `did-finish-load`，`harnessReady` 不会自动恢复，加载面板会永久盖住 harness。
+    `will-navigate` 里必须调 `restoreHarnessAfterBlockedNav()`。
+20. **`did-start-loading` 对任意框架都触发，包括 iframe。** 只有主框架的
+    `did-start-navigation`（`isMainFrame`）才代表 harness 文档被替换。在
+    `did-start-loading` 里清 `harnessReady`，会让任何插件 iframe 加载把 harness
+    永久打成加载态——这是「点预览后 harness 进加载页」的根因。
+21. **版本门控新 CLI 选项。** 加 `--no-open` 一类选项前先确认运行时支持
+    （`NO_OPEN_MIN_VERSION`）；未知选项会让旧产物启动即失败。版本解析不出来
+    （`unknown`）时按**旧**处理——猜「新」会搞挂本来要救的那次启动。
+22. **设置面板初始焦点必须在两次渲染都完成后施加。** boot 状态与
+    `updates.getState()` 是两次异步渲染，更新行会改变页面高度；只等第一次就锚定，
+    偏移量按旧布局计算会落空（实测 135 vs 真实 249）。用 `settleAndFocus()` 模式。
+23. **定位目标要夹取到最大可滚动位置。** 页面底部不留垫层（垫层在滚到底时就是一片
+    空白），所以末尾分区物理上到不了顶部；`goToSection` 用
+    `Math.min(maxScroll, …)` 夹取，保证它完整可见即可。
 
 ## 4. 验收命令
 
@@ -104,6 +126,10 @@ for f in /tmp/settings.html.js /tmp/shell.html.js; do node --check "$f"; done
 - 想动壳边框 UI → `shell.css` 设计变量 + `shell.html` 栏目；禁止引入在线字体/图标依赖。
 - 想改日志 → `ConnectionManager.logRing` 是 300 行 ring；面板晚创建用
   `updates:get-log` 回填，不要只依赖实时 push。
+- 想改 harness 导航/外部链接规则 → `external-open.js`（`isExternalUrl` 主框架 /
+  `isExternalSubFrameUrl` 子框架）+ `main.js#installHarnessNavigationGuard`。
+- 想改设置面板布局/入口焦点 → `settings.html`、`shell.css`、`dialogs.js`、
+  `main.js#setWorkspaceView`（锚点语义）。
 
 ## 6. 常见坑
 
@@ -147,6 +173,17 @@ for f in /tmp/settings.html.js /tmp/shell.html.js; do node --check "$f"; done
 18. **健康看门狗只跑在 `ready` 态，且要连败计数防抖。** 非 ready
     （connecting/restarting/error）退避，避免与 close watcher、`onSessionConnectFailed`
     重试、更新流水线抢跑造成双重连/无限重连。
+19. **`--no-open` 要版本门控。** 新选项对旧产物是「未知选项」会启动即失败；
+    用 `supportsNoOpen()`（`NO_OPEN_MIN_VERSION`），`unknown` 版本按旧处理。
+20. **导航被拦截 ≠ 导航没发生副作用。** 实测顺序 `did-start-loading → will-navigate
+    → preventDefault → did-stop-loading`：拦截前 `harnessReady` 已被清掉，必须
+    `restoreHarnessAfterBlockedNav()` 恢复，否则加载面板永久盖住 harness。
+21. **`did-start-loading` 会被子框架触发。** 插件 iframe 加载也会走到它；清
+    readiness 会误伤 harness。只信主框架的 `did-start-navigation`。
+22. **设置面板焦点别在第一次渲染后就锚定。** `updates.getState()` 异步渲染会改变
+    页面高度，导致偏移量过时（实测 135 vs 249）；等两次渲染都完成再锚定。
+23. **别给页面底部加垫层来实现「末分区定位到顶」。** 垫层在滚到底时就是大片空白；
+    用 `Math.min(maxScroll, …)` 夹取，让末分区完整可见即可。
 
 ## 7. 文档同步要求
 

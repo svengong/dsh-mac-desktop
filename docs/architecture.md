@@ -28,6 +28,12 @@ desktop-shell/
 │   ├── ports.js           SSH local-forward port reservation + TCP probe
 │   ├── labels.js          shared DSH-[终端] labels for titles/menus/tray
 │   ├── shell-preload.js   preload for the local workspace frame
+│   ├── dialog-preload.js  preload for the embedded settings panel
+│   ├── external-open.js   URL classification for harness navigation (main/sub frame)
+│   ├── menu.js            application menu
+│   ├── tray.js            menu-bar tray (status + terminal actions)
+│   ├── windows.js         window presentation helpers
+│   ├── device-merge.js    merges one device's settings/update state
 │   ├── dialogs.js         embedded settings panel
 │   ├── components.js      update-component catalog + version/hash helpers
 │   ├── update-manager.js  unified check/update logic for all components
@@ -63,6 +69,24 @@ BrowserWindow (shell.html 边框)
 - 启动/恢复的第一个窗口绑定上次活跃设备并自动连接；显式新建窗口为 detached，默认连接页。每个终端最多一个已绑定窗口；保存已打开终端时仅聚焦已有窗口，当前窗口保持不变。
 - 任务进度横幅存在 session 上（`session.progress`），同终端所有已绑定窗口共享；`sessionTask` 给壳工具栏提供检查/更新/构建/重启状态。切离窗口时通过 runner owner 取消该终端任务，释放锁后再停 session。
 - 窗口切换设备调用 `attachWorkspace`；`local` session 常驻以支持多开。
+
+### 3.1 harness 视图的导航护栏（`external-open.js` + `main.js`）
+
+壳只在 harness 视图内渲染**一个**页面：服务根 `http://127.0.0.1:<port>/`。导航护栏分主/子框架两套规则（`installHarnessNavigationGuard`）：
+
+- **主框架**（`will-navigate`，用 `isExternalUrl`）：只保留根路径（harness 是 hash 路由，真实应用路由的 `pathname` 恒为 `/`）；其他 loopback 路径、`https:`、`file:` 一律交系统默认浏览器。点 workspace `.html` 就是走这条——服务对这些路径回 404 空页，若不拦会得到一张无法自愈的空白 harness 视图。
+- **子框架**（`will-frame-navigate`，用 `isExternalSubFrameUrl`）：子框架属于嵌入它的插件（如 sidebar 文件预览），壳只驱逐真正跨源内容（非 loopback、`file:`），其余让插件自行路由。把主框架规则套到子框架上会劫持插件 UI——预览点击被顶到系统浏览器。
+
+两个关键状态机细节（实测于 Electron 35）：
+
+- 被 `preventDefault()` 的导航不会发出 `did-finish-load`，所以 `harnessReady` 不会自动恢复；`will-navigate` 里必须调 `restoreHarnessAfterBlockedNav()` 从快照恢复。
+- `did-start-loading` 对**任意框架**都触发，包括 iframe；只有主框架的 `did-start-navigation`（`isMainFrame`）才代表 harness 文档被替换。在 `did-start-loading` 里清 `harnessReady`，会让任何插件 iframe 加载把 harness 永久打成加载态。
+
+### 3.2 设置面板（`settings.html` + `shell.css`）
+
+- 左侧 176px 定位菜单（更新/连接/外观/日志，全部平铺不折叠），随滚动高亮；内容整体居中（外层 940px、正文 660px）。
+- 入口焦点：只有「连接」语义的入口（终端启动器／⌘,／终端徽标／失败页「连接设置」）锚定「连接」；顶栏「设置」等普通入口锚点为 `null`，停在顶部。初始焦点在 boot 状态与 `updates.getState()` 两次渲染都完成后施加。
+- 定位目标夹取到最大可滚动位置（底部不留垫层，滚到底就是日志本身）。
 
 ## 4. 端口与进程策略
 

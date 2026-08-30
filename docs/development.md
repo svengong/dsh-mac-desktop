@@ -56,10 +56,11 @@ src/
 ├── runner.js         runCommand / spawnService（独立进程组）
 ├── dialogs.js        SetupDialog（嵌入式 WebContentsView）
 ├── labels.js         全局一致的 DSH-[终端] 标签
+├── external-open.js  harness 导航 URL 分类（主框架根路径 / 子框架跨源）
 ├── menu.js / tray.js / windows.js  macOS 菜单、托盘、窗口呈现
 └── ui/
     ├── shell.html / shell.css / shell-preload.js   主窗口 46px 壳边框
-    └── settings.html / dialog-preload.js           连接/更新嵌入式面板
+    └── settings.html / dialog-preload.js           设置面板（定位菜单 + 居中内容）
 ```
 
 数据流：
