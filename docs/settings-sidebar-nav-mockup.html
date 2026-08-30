@@ -1,0 +1,661 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="liquid-glass-dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DSH · 设置界面改版稿 v1（左侧定位菜单 + 整体居中）</title>
+<style>
+/* ═══ tokens（取自 src/ui/shell.css，深 / 浅两套） ═══ */
+:root, :root[data-theme="liquid-glass-dark"] {
+  color-scheme: dark;
+  --ds-font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Hiragino Sans GB", sans-serif;
+  --ds-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace;
+  --ds-space-1: 4px; --ds-space-2: 8px; --ds-space-3: 12px; --ds-space-4: 16px; --ds-space-5: 20px; --ds-space-6: 24px;
+  --ds-font-size-xs: 10px; --ds-font-size-sm: 11px; --ds-font-size-base: 12px;
+  --ds-font-size-md: 13px; --ds-font-size-lg: 15px; --ds-font-size-xl: 17px;
+  --ds-control-height: 22px; --ds-control-height-sm: 18px; --ds-control-height-lg: 28px;
+  --ds-nav-height: 28px; --ds-input-height: 22px;
+  --ds-bg: #0e0e16;
+  --ds-sidebar-bg: rgba(22, 22, 34, 0.55);
+  --ds-surface: rgba(30, 30, 46, 0.55);
+  --ds-surface-raised: rgba(42, 42, 62, 0.68);
+  --ds-surface-hover: rgba(52, 52, 76, 0.80);
+  --ds-input-bg: rgba(18, 18, 30, 0.55);
+  --ds-button-bg: rgba(52, 52, 76, 0.60);
+  --ds-button-bg-hover: rgba(68, 68, 96, 0.82);
+  --ds-border: rgba(255, 255, 255, 0.16);
+  --ds-border-strong: rgba(255, 255, 255, 0.28);
+  --ds-text: #f5f5f7; --ds-text-secondary: #d2d2d7; --ds-text-muted: #98989d;
+  --ds-accent: #0a84ff; --ds-accent-hover: #409cff; --ds-accent-soft: rgba(10, 132, 255, 0.18);
+  --ds-success: #30d158; --ds-warning: #ff9f0a; --ds-danger: #ff453a;
+  --ds-body-bg:
+    radial-gradient(1100px 600px at 85% -10%, rgba(94, 92, 230, 0.30), transparent 60%),
+    radial-gradient(900px 560px at -8% 112%, rgba(255, 45, 85, 0.16), transparent 55%),
+    radial-gradient(760px 460px at 52% 122%, rgba(48, 209, 88, 0.12), transparent 60%),
+    var(--ds-bg);
+  --ds-radius-xs: 8px; --ds-radius-sm: 12px; --ds-radius-md: 14px; --ds-radius: 20px; --ds-radius-full: 999px;
+  --ds-border-width: 1px;
+  --ds-shadow-sm: 0 4px 14px rgba(0, 0, 0, 0.30);
+  --ds-shadow-md: 0 12px 40px rgba(0, 0, 0, 0.40);
+  --ds-blur: 22px; --ds-saturate: 185%;
+  --ds-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.22), inset 0 -1px 0 rgba(255, 255, 255, 0.08);
+  --ds-ease: cubic-bezier(0.22, 0.61, 0.36, 1);
+  --ds-ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --ds-duration-fast: 90ms; --ds-duration: 160ms;
+}
+:root[data-theme="liquid-glass"] {
+  color-scheme: light;
+  --ds-bg: #e8ecf5;
+  --ds-sidebar-bg: rgba(255, 255, 255, 0.42);
+  --ds-surface: rgba(255, 255, 255, 0.55);
+  --ds-surface-raised: rgba(255, 255, 255, 0.68);
+  --ds-surface-hover: rgba(255, 255, 255, 0.80);
+  --ds-input-bg: rgba(255, 255, 255, 0.50);
+  --ds-button-bg: rgba(255, 255, 255, 0.60);
+  --ds-button-bg-hover: rgba(255, 255, 255, 0.82);
+  --ds-border: rgba(255, 255, 255, 0.70);
+  --ds-border-strong: rgba(255, 255, 255, 0.92);
+  --ds-text: #1c1c1e; --ds-text-secondary: #3a3a3c; --ds-text-muted: #6e6e73;
+  --ds-accent: #0a84ff; --ds-accent-hover: #3a96ff; --ds-accent-soft: rgba(10, 132, 255, 0.14);
+  --ds-success: #28a745; --ds-warning: #d97706; --ds-danger: #e5484d;
+  --ds-body-bg:
+    radial-gradient(1100px 600px at 85% -10%, rgba(94, 92, 230, 0.38), transparent 60%),
+    radial-gradient(900px 560px at -8% 112%, rgba(255, 45, 85, 0.22), transparent 55%),
+    radial-gradient(760px 460px at 52% 122%, rgba(48, 209, 88, 0.16), transparent 60%),
+    var(--ds-bg);
+  --ds-shadow-md: 0 12px 40px rgba(30, 40, 90, 0.14);
+  --ds-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.65), inset 0 -1px 0 rgba(255, 255, 255, 0.14);
+}
+
+/* ═══ base ═══ */
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: var(--ds-font);
+  background: var(--ds-body-bg);
+  background-attachment: fixed;
+  color: var(--ds-text);
+  font-size: var(--ds-font-size-md);
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+}
+button, input, select { font-family: var(--ds-font); }
+button { cursor: pointer; }
+button:focus-visible, input:focus-visible, select:focus-visible {
+  outline: none; box-shadow: 0 0 0 2px var(--ds-accent-soft); border-color: var(--ds-accent);
+}
+
+/* ═══ 原型页外壳（非产品 UI） ═══ */
+.proto-page { max-width: 1240px; margin: 0 auto; padding: 26px 28px 48px; display: grid; grid-template-columns: 1fr 258px; gap: 20px; align-items: start; }
+.proto-head { grid-column: 1 / -1; }
+.proto-head h1 { margin: 0; font-size: 19px; font-weight: 700; }
+.proto-head p { margin: 5px 0 0; color: var(--ds-text-muted); font-size: var(--ds-font-size-base); max-width: 940px; line-height: 1.7; }
+.proto-head b { color: var(--ds-text-secondary); }
+.proto-window {
+  position: relative; height: 660px; display: flex; flex-direction: column; overflow: hidden;
+  border: 1px solid var(--ds-border-strong); border-radius: var(--ds-radius-md);
+  background: var(--ds-bg); box-shadow: var(--ds-highlight), var(--ds-shadow-md);
+}
+.proto-controls {
+  position: sticky; top: 20px; display: flex; flex-direction: column; gap: 10px; padding: 14px;
+  border: 1px solid var(--ds-border); border-radius: var(--ds-radius-sm);
+  background: var(--ds-surface); backdrop-filter: blur(var(--ds-blur)) saturate(var(--ds-saturate));
+}
+.proto-controls h2 { margin: 0; font-size: var(--ds-font-size-base); font-weight: 600; color: var(--ds-text-secondary); letter-spacing: 0.04em; }
+.proto-controls .grp { display: flex; flex-wrap: wrap; gap: 6px; }
+.proto-controls .row { display: flex; align-items: center; gap: 7px; font-size: var(--ds-font-size-base); color: var(--ds-text-secondary); }
+.proto-controls .note { margin: 2px 0 0; font-size: 10.5px; color: var(--ds-text-muted); line-height: 1.65; }
+.proto-controls .sep { height: 1px; background: var(--ds-border); margin: 2px 0; }
+.ctl-btn {
+  min-height: 24px; padding: 2px 10px; border: 1px solid var(--ds-border); border-radius: 8px;
+  background: var(--ds-button-bg); color: var(--ds-text); font-size: var(--ds-font-size-base);
+  transition: background var(--ds-duration-fast) var(--ds-ease);
+}
+.ctl-btn:hover { background: var(--ds-button-bg-hover); }
+.ctl-btn.on { background: var(--ds-accent); border-color: var(--ds-accent); color: #fff; }
+
+/* ═══ 壳顶栏（46px，与真实 SHELL_FRAME_HEIGHT 一致） ═══ */
+.shell-frame {
+  position: relative; z-index: 10; flex: none; height: 46px; display: flex; align-items: center; gap: 14px;
+  padding: 0 12px 0 84px; border-bottom: 1px solid var(--ds-border);
+  background: color-mix(in srgb, var(--ds-sidebar-bg) 86%, var(--ds-bg));
+  box-shadow: var(--ds-highlight); backdrop-filter: blur(var(--ds-blur)) saturate(var(--ds-saturate));
+}
+.lights { position: absolute; left: 16px; top: 50%; transform: translateY(-50%); display: flex; gap: 8px; }
+.lights i { width: 12px; height: 12px; border-radius: 50%; display: block; }
+.lights i:nth-child(1) { background: #ff5f57; } .lights i:nth-child(2) { background: #febc2e; } .lights i:nth-child(3) { background: #28c840; }
+.shell-frame-brand { flex: none; display: flex; align-items: center; gap: 7px; font-size: var(--ds-font-size-base); font-weight: 700; }
+.shell-frame-mark {
+  width: 18px; height: 18px; border-radius: var(--ds-radius-xs); color: #fff; font-size: var(--ds-font-size-xs); font-weight: 700;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: linear-gradient(135deg, var(--ds-accent), var(--ds-accent-hover)); box-shadow: 0 1px 2px rgba(0,0,0,.18);
+}
+.shell-frame-nav { flex: 1; min-width: 0; display: flex; align-items: center; gap: 2px; height: 100%; }
+.shell-frame-nav button {
+  height: var(--ds-nav-height); padding: 0 11px; border: none; border-radius: var(--ds-radius-sm);
+  background: transparent; color: var(--ds-text-secondary); font-size: var(--ds-font-size-md); line-height: 20px;
+  transition: background var(--ds-duration-fast) var(--ds-ease), color var(--ds-duration-fast) var(--ds-ease);
+}
+.shell-frame-nav button:hover { background: var(--ds-surface-hover); color: var(--ds-text); }
+.shell-frame-nav button.active { background: var(--ds-accent); color: #fff; font-weight: 600; }
+.shell-frame-nav button.pending { box-shadow: inset 0 0 0 1px var(--ds-accent); }
+.shell-frame-context { flex: none; max-width: 44%; display: flex; align-items: center; gap: 10px; min-width: 0; }
+.shell-frame-terminal {
+  flex: none; padding: 2px 8px; border-radius: var(--ds-radius-xs); background: var(--ds-accent-soft);
+  color: var(--ds-text-secondary); font-size: var(--ds-font-size-sm); font-weight: 600; border: 1px solid transparent;
+  transition: border-color var(--ds-duration-fast) var(--ds-ease), color var(--ds-duration-fast) var(--ds-ease);
+}
+.shell-frame-terminal:hover { border-color: var(--ds-accent); color: var(--ds-text); }
+.shell-frame-status { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ds-text-muted); font-size: var(--ds-font-size-sm); }
+.shell-frame-status.ok { color: var(--ds-success); }
+.shell-viewport { flex: 1; min-height: 0; position: relative; display: flex; background: var(--ds-body-bg); }
+
+/* ═══ ① 设置两栏：左侧定位菜单 + 右侧滚动内容（整体居中） ═══ */
+.set-shell {
+  flex: 1; min-width: 0; display: flex; justify-content: center; min-height: 0;
+}
+.set-inner {
+  display: flex; width: 100%; max-width: 940px; min-height: 0;
+  padding: var(--ds-space-5) var(--ds-space-5) 0; gap: var(--ds-space-5);
+}
+
+/* 左栏：不滚动、不折叠，纯定位菜单 */
+.set-menu {
+  flex: none; width: 176px; display: flex; flex-direction: column; gap: 2px;
+  align-self: flex-start; position: sticky; top: 0; padding-top: 2px;
+}
+.set-menu-title {
+  padding: 0 10px 8px; color: var(--ds-text-muted); font-size: var(--ds-font-size-xs);
+  font-family: var(--ds-mono); letter-spacing: 0.06em;
+}
+.set-menu button {
+  display: flex; align-items: center; gap: 9px; width: 100%; height: var(--ds-control-height-lg);
+  padding: 0 10px; border: 1px solid transparent; border-radius: var(--ds-radius-sm);
+  background: transparent; color: var(--ds-text-secondary); font-size: var(--ds-font-size-md); line-height: 18px;
+  text-align: left; transition: background var(--ds-duration-fast) var(--ds-ease), color var(--ds-duration-fast) var(--ds-ease);
+}
+.set-menu button:hover { background: var(--ds-surface-hover); color: var(--ds-text); }
+.set-menu button.active { background: var(--ds-accent); border-color: var(--ds-accent); color: #fff; font-weight: 600; }
+.set-menu .ico { flex: none; width: 16px; text-align: center; font-size: var(--ds-font-size-base); opacity: 0.9; }
+.set-menu .label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.set-menu .dot {
+  flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--ds-warning); display: none;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ds-warning) 22%, transparent);
+}
+.set-menu button[data-has-dot="1"] .dot { display: block; }
+.set-menu button.active .dot { background: #fff; box-shadow: none; }
+
+/* 右栏：标题栏 + 滚动区；内容再居中一层 */
+.set-main { flex: 1; min-width: 0; display: flex; flex-direction: column; min-height: 0; }
+.set-titlebar {
+  flex: none; height: 40px; display: flex; align-items: center; gap: var(--ds-space-3);
+  padding: 0 var(--ds-space-2) 0 var(--ds-space-1);
+  border-bottom: 1px solid var(--ds-border);
+}
+.set-titlebar h1 { margin: 0; font-size: var(--ds-font-size-lg); font-weight: 600; }
+.set-titlebar .badge-info {
+  padding: 2px 8px; border-radius: var(--ds-radius-full); border: 1px solid var(--ds-border);
+  background: var(--ds-surface-raised); color: var(--ds-text-secondary); font-size: var(--ds-font-size-sm);
+}
+.set-titlebar .spacer { flex: 1; }
+.set-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: var(--ds-space-5) var(--ds-space-4) 40vh; scroll-behavior: smooth; }
+.set-content { width: 100%; max-width: 660px; margin: 0 auto; }
+
+/* 分区 */
+.set-section { scroll-margin-top: var(--ds-space-5); }
+.set-section + .set-section { margin-top: var(--ds-space-6); padding-top: var(--ds-space-6); border-top: 1px solid color-mix(in srgb, var(--ds-border) 55%, transparent); }
+.set-head { margin: 0 0 3px; font-size: var(--ds-font-size-xl); font-weight: 600; }
+.set-lead { margin: 0 0 var(--ds-space-4); color: var(--ds-text-muted); font-size: var(--ds-font-size-base); }
+
+/* 卡片 / 表单 / 控件（与 src/ui/shell.css 同名类保持一致） */
+.card { border: 1px solid var(--ds-border); border-radius: var(--ds-radius); background: var(--ds-surface); box-shadow: var(--ds-highlight), var(--ds-shadow-sm); overflow: hidden; }
+.card-head { display: flex; align-items: center; justify-content: space-between; gap: var(--ds-space-3); padding: 10px var(--ds-space-4); border-bottom: 1px solid var(--ds-border); }
+.card-title { margin: 0; font-size: var(--ds-font-size-md); font-weight: 600; }
+.card-body { padding: var(--ds-space-3) var(--ds-space-4) var(--ds-space-4); }
+.field { margin-bottom: var(--ds-space-3); }
+.field:last-child { margin-bottom: 0; }
+.field-label { display: block; margin-bottom: 4px; color: var(--ds-text); font-size: var(--ds-font-size-base); font-weight: 500; }
+.field-label small { color: var(--ds-text-muted); font-weight: 400; }
+.field-hint { margin: 4px 0 0; color: var(--ds-text-muted); font-size: var(--ds-font-size-sm); }
+.input, .select {
+  width: 100%; height: var(--ds-input-height); padding: 0 7px; border: 1px solid var(--ds-border-strong);
+  border-radius: var(--ds-radius-sm); background: var(--ds-input-bg); color: var(--ds-text); font-size: var(--ds-font-size-md); line-height: 20px;
+}
+.picker { display: flex; gap: 6px; }
+.picker .input, .picker .select { flex: 1; min-width: 0; }
+.row-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--ds-space-3) var(--ds-space-4); }
+.row-grid .field { margin-bottom: 0; }
+.top-actions { display: flex; align-items: center; gap: var(--ds-space-2); margin-bottom: var(--ds-space-3); }
+.switch-row { display: flex; align-items: center; gap: 8px; }
+.switch { position: relative; flex: none; width: 32px; height: 18px; border-radius: var(--ds-radius-full); border: 1px solid var(--ds-border-strong); background: var(--ds-input-bg); transition: background var(--ds-duration) var(--ds-ease); }
+.switch::after { content: ""; position: absolute; top: 1px; left: 1px; width: 14px; height: 14px; border-radius: 50%; background: var(--ds-text-secondary); transition: transform var(--ds-duration) var(--ds-ease-spring); }
+.switch[aria-checked="true"] { background: var(--ds-accent); border-color: var(--ds-accent); }
+.switch[aria-checked="true"]::after { transform: translateX(14px); background: #fff; }
+.button {
+  display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-height: var(--ds-control-height);
+  padding: 1px 11px; border: 1px solid var(--ds-border-strong); border-radius: var(--ds-radius-sm);
+  background: var(--ds-button-bg); color: var(--ds-text); font-size: var(--ds-font-size-md); line-height: 18px;
+  white-space: nowrap; box-shadow: var(--ds-highlight);
+  transition: background var(--ds-duration-fast) var(--ds-ease);
+}
+.button:hover { background: var(--ds-button-bg-hover); }
+.button:disabled { opacity: 0.4; cursor: default; }
+.button.primary { background: var(--ds-accent); border-color: var(--ds-accent); color: #fff; }
+.button.primary:hover { background: var(--ds-accent-hover); }
+.button.danger { color: var(--ds-danger); border-color: color-mix(in srgb, var(--ds-danger) 45%, transparent); }
+.button.small { min-height: var(--ds-control-height-sm); padding: 0 8px; font-size: var(--ds-font-size-sm); line-height: 16px; }
+.segmented { display: inline-flex; padding: 1px; border: 1px solid var(--ds-border-strong); border-radius: var(--ds-radius-sm); background: var(--ds-input-bg); }
+.segmented button { padding: 1px 12px; min-height: 20px; border: none; border-radius: var(--ds-radius-xs); background: transparent; color: var(--ds-text); font-size: var(--ds-font-size-base); line-height: 18px; }
+.segmented button.active { background: var(--ds-accent); color: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.16); }
+.status-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--ds-text-muted); }
+.status-dot[data-status="available"] { background: var(--ds-warning); }
+.status-dot[data-status="ready"] { background: var(--ds-success); }
+.badge { display: inline-flex; align-items: center; gap: 4px; padding: 1px 7px; border-radius: var(--ds-radius-full); font-size: var(--ds-font-size-sm); font-weight: 500; color: var(--ds-text-secondary); background: var(--ds-surface-raised); border: 1px solid var(--ds-border); }
+.badge.info { color: var(--ds-accent); border-color: color-mix(in srgb, var(--ds-accent) 40%, transparent); }
+.badge.warn { color: var(--ds-warning); border-color: color-mix(in srgb, var(--ds-warning) 40%, transparent); }
+.badge.ok { color: var(--ds-success); border-color: color-mix(in srgb, var(--ds-success) 40%, transparent); }
+.live-strip { display: flex; align-items: center; gap: var(--ds-space-2); margin-bottom: var(--ds-space-3); padding: 6px 10px; border: 1px solid var(--ds-border); border-radius: var(--ds-radius-md); background: var(--ds-surface); color: var(--ds-text-secondary); font-size: var(--ds-font-size-base); }
+.live-strip.ok .live-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--ds-success); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ds-success) 18%, transparent); }
+.card-body .panel-actions { display: flex; justify-content: flex-end; margin-top: var(--ds-space-4); padding-top: var(--ds-space-3); border-top: 1px solid color-mix(in srgb, var(--ds-border) 60%, transparent); }
+.card-body .panel-actions .save-card { min-width: 160px; min-height: 28px; padding: 1px 22px; font-weight: 600; }
+.component-list { display: flex; flex-direction: column; gap: var(--ds-space-2); }
+.component { display: flex; align-items: center; gap: var(--ds-space-3); padding: 10px var(--ds-space-3); border: 1px solid var(--ds-border); border-radius: var(--ds-radius); background: var(--ds-surface); box-shadow: var(--ds-highlight), var(--ds-shadow-sm); }
+.component[data-available="true"] { border-color: color-mix(in srgb, var(--ds-warning) 42%, var(--ds-border)); }
+.component-main { flex: 1; min-width: 0; }
+.component-title-row { display: flex; align-items: center; gap: var(--ds-space-2); min-width: 0; }
+.component-title { font-size: var(--ds-font-size-md); font-weight: 600; }
+.component-desc, .component-meta, .component-summary { margin: 1px 0 0; color: var(--ds-text-muted); font-size: var(--ds-font-size-sm); }
+.theme-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(184px, 1fr)); gap: var(--ds-space-3); }
+.theme-card { position: relative; padding: var(--ds-space-3); border: 1px solid var(--ds-border); border-radius: var(--ds-radius); background: var(--ds-surface); box-shadow: var(--ds-highlight), var(--ds-shadow-sm); text-align: left; transition: border-color var(--ds-duration-fast) var(--ds-ease), transform var(--ds-duration-fast) var(--ds-ease-spring); }
+.theme-card:hover { border-color: var(--ds-accent); transform: translateY(-1px); }
+.theme-card[aria-pressed="true"] { border-color: var(--ds-accent); box-shadow: 0 0 0 2px var(--ds-accent-soft), var(--ds-highlight); }
+.theme-preview { position: relative; height: 72px; margin-bottom: var(--ds-space-3); border-radius: var(--ds-radius-sm); overflow: hidden; box-shadow: inset 0 1px 0 rgba(255,255,255,.18); }
+.theme-check { position: absolute; top: 6px; right: 6px; width: 18px; height: 18px; border-radius: 50%; background: var(--ds-accent); color: #fff; display: flex; align-items: center; justify-content: center; font-size: 11px; opacity: 0; transform: scale(.6); transition: opacity var(--ds-duration) var(--ds-ease), transform var(--ds-duration) var(--ds-ease-spring); }
+.theme-card[aria-pressed="true"] .theme-check { opacity: 1; transform: scale(1); }
+.theme-card-name { font-size: var(--ds-font-size-md); font-weight: 600; color: var(--ds-text); }
+.theme-card-desc { margin: 2px 0 0; font-size: var(--ds-font-size-sm); color: var(--ds-text-muted); }
+.log-wrap { display: flex; flex-direction: column; height: 152px; border: 1px solid var(--ds-border); border-radius: var(--ds-radius-md); background: var(--ds-input-bg); overflow: hidden; }
+.log-tools { flex: none; display: flex; align-items: center; justify-content: space-between; gap: var(--ds-space-2); padding: 4px 6px 4px 10px; border-bottom: 1px solid var(--ds-border); background: var(--ds-surface-raised); }
+.log-tools .log-label { color: var(--ds-text-muted); font-size: var(--ds-font-size-xs); font-family: var(--ds-mono); }
+.log { flex: 1; min-height: 0; margin: 0; padding: var(--ds-space-2) 10px; overflow: auto; color: var(--ds-text-secondary); font-family: var(--ds-mono); font-size: var(--ds-font-size-sm); line-height: 1.55; white-space: pre-wrap; word-break: break-all; user-select: text; -webkit-user-select: text; }
+.set-footer { flex: none; min-height: 40px; display: flex; align-items: center; padding: 0 var(--ds-space-2); border-top: 1px solid var(--ds-border); background: color-mix(in srgb, var(--ds-surface) 70%, transparent); backdrop-filter: blur(var(--ds-blur)); }
+.set-footer .footer-note { color: var(--ds-text-muted); font-size: var(--ds-font-size-sm); }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: var(--ds-border-strong); border: 2px solid transparent; border-radius: var(--ds-radius-md); background-clip: padding-box; }
+::-webkit-scrollbar-track { background: transparent; }
+
+/* ═══ ② 聚焦标注（原型用，可关闭） ═══ */
+.anno { position: absolute; z-index: 40; display: flex; align-items: center; gap: 6px; max-width: 300px; padding: 5px 9px; border: 1px dashed var(--ds-accent); border-radius: var(--ds-radius-sm); background: color-mix(in srgb, var(--ds-accent-soft) 82%, var(--ds-bg)); color: var(--ds-text); font-size: var(--ds-font-size-sm); line-height: 1.5; box-shadow: var(--ds-shadow-sm); backdrop-filter: blur(6px); }
+.anno b { color: var(--ds-accent); font-weight: 600; }
+.anno .num { flex: none; width: 16px; height: 16px; border-radius: 50%; background: var(--ds-accent); color: #fff; font-size: var(--ds-font-size-xs); font-weight: 700; display: inline-flex; align-items: center; justify-content: center; }
+.anno.a1 { right: 14px; top: 58px; }
+.anno.a2 { right: 14px; top: 122px; }
+.anno.a3 { left: 14px; bottom: 14px; }
+.anno.off { display: none; }
+.focus-ring { position: absolute; inset: -3px; border-radius: var(--ds-radius); border: 2px solid var(--ds-accent); box-shadow: 0 0 0 4px var(--ds-accent-soft); opacity: 0; transition: opacity var(--ds-duration) var(--ds-ease); pointer-events: none; }
+.focus-ring.on { opacity: 1; }
+.focus-target { position: relative; }
+
+@media (prefers-reduced-motion: reduce) { .set-scroll { scroll-behavior: auto; } }
+@media (max-width: 1000px) { .proto-page { grid-template-columns: 1fr; } .proto-controls { position: static; } }
+</style>
+</head>
+<body>
+<div class="proto-page">
+
+  <header class="proto-head">
+    <h1>DSH · 设置界面改版稿 v1</h1>
+    <p>两处改动：<b>① 入口决定首屏焦点</b>——从 harness 页进入（终端启动器「连接其他终端…」/ 连接失败页「连接设置」/ 菜单「连接设置…」/ 终端徽标）落在<b>「连接」</b>；从壳顶栏「设置」进入落在<b>最前面（更新）</b>；<b>② 左侧加定位菜单</b>——功能全部平铺不折叠，菜单只负责定位，右侧内容<b>整体居中</b>（最宽 940px，正文 660px）。</p>
+  </header>
+
+  <!-- ═══════════ 模拟的应用窗口 ═══════════ -->
+  <div class="proto-window" id="app">
+    <header class="shell-frame">
+      <span class="lights" title="模拟 macOS 窗口控制"><i></i><i></i><i></i></span>
+      <div class="shell-frame-brand"><span class="shell-frame-mark">DS</span><span>DSH</span></div>
+      <nav class="shell-frame-nav" id="nav" aria-label="工作区栏目">
+        <button type="button" data-view="harness">Harness</button>
+        <button type="button" data-view="settings" class="active">设置</button>
+        <button type="button" class="new-win" id="btn-new-window" title="新建窗口（⌘N）">＋</button>
+      </nav>
+      <div class="shell-frame-context">
+        <button type="button" class="shell-frame-terminal" id="terminal-chip" title="当前终端 · 点击直达连接配置">DSH-[本地]</button>
+        <span class="shell-frame-status ok" id="frame-status">已连接 · 127.0.0.1:3187</span>
+      </div>
+    </header>
+
+    <main class="shell-viewport">
+      <div class="set-shell">
+        <div class="set-inner">
+          <!-- 左：定位菜单 -->
+          <nav class="set-menu" id="set-menu" aria-label="设置分区">
+            <div class="set-menu-title">设置</div>
+            <button type="button" data-sec="updates" class="active"><span class="ico">↻</span><span class="label">更新</span><span class="dot"></span></button>
+            <button type="button" data-sec="connection"><span class="ico">⇄</span><span class="label">连接</span><span class="dot"></span></button>
+            <button type="button" data-sec="appearance"><span class="ico">◐</span><span class="label">外观</span><span class="dot"></span></button>
+            <button type="button" data-sec="log"><span class="ico">≡</span><span class="label">日志</span><span class="dot"></span></button>
+          </nav>
+
+          <!-- 右：标题栏 + 滚动内容 -->
+          <div class="set-main">
+            <div class="set-titlebar">
+              <h1>设置</h1>
+              <span class="badge-info" id="titlebar-terminal">DSH-[本地]</span>
+              <span class="spacer"></span>
+              <button type="button" class="button small" id="btn-close">关闭</button>
+            </div>
+
+            <div class="set-scroll" id="set-scroll">
+              <div class="set-content">
+
+                <section class="set-section" id="sec-updates">
+                  <h2 class="set-head">更新</h2>
+                  <p class="set-lead" id="updates-lead">检查与更新当前设备的 Harness。上次检查：2025-08-28 23:41:06</p>
+                  <div class="top-actions">
+                    <button type="button" class="button" id="btn-check">检查更新</button>
+                    <button type="button" class="button primary" id="btn-update">更新 Harness 并重启</button>
+                    <button type="button" class="button danger" id="btn-cancel" hidden>取消更新</button>
+                    <button type="button" class="button" id="btn-restart">重启服务</button>
+                    <span style="flex:1"></span>
+                    <label class="switch-row">
+                      <span style="color:var(--ds-text-muted);font-size:var(--ds-font-size-sm)">启动自动检查</span>
+                      <button type="button" class="switch" id="sw-auto" role="switch" aria-checked="true" aria-label="启动自动检查"></button>
+                    </label>
+                  </div>
+                  <div class="component-list" id="update-components">
+                    <section class="component" id="comp-harness" data-available="true">
+                      <div class="component-main">
+                        <div class="component-title-row">
+                          <span class="status-dot" id="comp-dot" data-status="available"></span>
+                          <span class="component-title">Harness</span>
+                          <span class="badge info">Harness</span>
+                        </div>
+                        <p class="component-desc">DeepSeek Harness 官方产物（npm 包）</p>
+                        <p class="component-meta">当前 npm:0.9.4  ·  最新 npm:0.9.6</p>
+                        <p class="component-summary" id="comp-summary">发现新版本 npm:0.9.6</p>
+                      </div>
+                      <div class="component-actions">
+                        <button type="button" class="button primary" id="comp-action">更新并重启</button>
+                      </div>
+                    </section>
+                  </div>
+                </section>
+
+                <section class="set-section" id="sec-connection">
+                  <h2 class="set-head">连接</h2>
+                  <p class="set-lead">本地模式直接使用本机仓库；SSH 远程模式参考 VS Code Remote。保存后自动连接并进入界面。</p>
+                  <div class="live-strip ok" id="live-strip"><span class="live-dot"></span>当前连接：http://127.0.0.1:3187/ — 本地服务已就绪</div>
+                  <div class="card focus-target" id="conn-card">
+                    <span class="focus-ring" id="conn-focus"></span>
+                    <div class="card-head">
+                      <h3 class="card-title">连接方式</h3>
+                      <div class="segmented" id="mode-switch" role="tablist" aria-label="连接方式">
+                        <button type="button" data-mode="local" class="active" role="tab" aria-selected="true">本地</button>
+                        <button type="button" data-mode="ssh" role="tab" aria-selected="false">SSH 远程</button>
+                      </div>
+                    </div>
+                    <div class="card-body">
+                      <div id="local-fields">
+                        <div class="field">
+                          <label class="field-label" for="local-repo">仓库目录 <small>（默认：产品目录下的 deepseek-harness/）</small></label>
+                          <div class="picker">
+                            <input id="local-repo" class="input" type="text" value="~/workspace/deepseek-harness">
+                            <button type="button" class="button">选择…</button>
+                          </div>
+                          <p class="field-hint">目录不存在时，将按下方「仓库地址」自动克隆。</p>
+                        </div>
+                        <div class="field">
+                          <label class="field-label" for="local-url">仓库地址 <small>（可选）</small></label>
+                          <input id="local-url" class="input" type="text" placeholder="https://github.com/deepseek-ai/deepseek-harness.git">
+                        </div>
+                        <div class="field">
+                          <label class="field-label" for="local-home">数据目录 <small>（dsh home，会话与运行数据）</small></label>
+                          <input id="local-home" class="input" type="text" value="~/.dsh-dev">
+                        </div>
+                      </div>
+                      <div id="ssh-fields" hidden>
+                        <div class="field">
+                          <label class="field-label" for="ssh-host">SSH 主机 <small>（~/.ssh/config 别名或 user@host[:port]）</small></label>
+                          <div class="picker">
+                            <select id="ssh-host" class="select"><option>home4（dev@10.0.0.8:22）</option><option>自定义地址…</option></select>
+                            <button type="button" class="button">测试连接</button>
+                          </div>
+                        </div>
+                        <div class="row-grid">
+                          <div class="field"><label class="field-label" for="ssh-url">远程仓库地址 <small>（可选）</small></label><input id="ssh-url" class="input" type="text" placeholder="https://github.com/deepseek-ai/deepseek-harness.git"></div>
+                          <div class="field"><label class="field-label" for="ssh-dir">远程仓库目录</label><input id="ssh-dir" class="input" type="text" value="~/deepseek-harness"></div>
+                        </div>
+                      </div>
+                      <div class="panel-actions">
+                        <button type="button" class="button primary save-card" id="btn-save">保存并连接</button>
+                      </div>
+                    </div>
+                  </div>
+                </section>
+
+                <section class="set-section" id="sec-appearance">
+                  <h2 class="set-head">外观</h2>
+                  <p class="set-lead">主题只改颜色与材质，不改布局尺寸——切换不会引起重排。</p>
+                  <div class="theme-grid" id="theme-grid" role="radiogroup" aria-label="外观主题"></div>
+                </section>
+
+                <section class="set-section" id="sec-log">
+                  <h2 class="set-head">日志</h2>
+                  <p class="set-lead">连接与更新共用同一份会话日志；复制到对话里即可定位问题。</p>
+                  <div class="log-wrap">
+                    <div class="log-tools">
+                      <span class="log-label">操作日志</span>
+                      <span>
+                        <button type="button" class="button small" style="border-color:transparent;background:transparent;color:var(--ds-accent)">复制</button>
+                        <button type="button" class="button small" style="border-color:transparent;background:transparent;color:var(--ds-accent)">打开日志文件</button>
+                      </span>
+                    </div>
+                    <pre class="log" id="log">23:41:02 → 启动 dsh web（--port 0）
+23:41:03 ✓ 服务就绪：127.0.0.1:3187
+23:41:06 ✓ 界面加载完成，进入工作区
+23:41:06 ✓ 健康探测通过（第 1 次）</pre>
+                  </div>
+                </section>
+
+              </div>
+            </div>
+
+            <div class="set-footer"><span class="footer-note" id="footer-note">已载入当前设置</span></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 标注 -->
+      <div class="anno a1" id="anno1"><span class="num">1</span><span>入口：<b>从 harness 页进入</b>（启动器／失败页「连接设置」／⌘,／终端徽标）→ 滚到并聚焦<b>「连接」</b></span></div>
+      <div class="anno a2" id="anno2"><span class="num">2</span><span>入口：<b>点顶栏「设置」</b> → 焦点在<b>最前面</b>（停留在「更新」，不滚动）</span></div>
+      <div class="anno a3" id="anno3"><span class="num">3</span><span>菜单<b>只定位不折叠</b>：随滚动高亮当前分区，「更新」有可用更新时带橙点</span></div>
+    </main>
+  </div>
+
+  <!-- ═══════════ 原型控制台（非产品 UI） ═══════════ -->
+  <aside class="proto-controls">
+    <h2>原型控制台</h2>
+    <div class="grp">
+      <button type="button" class="ctl-btn" data-entry="harness">模拟：从 harness 页进入</button>
+      <button type="button" class="ctl-btn on" data-entry="settings">模拟：点顶栏「设置」</button>
+    </div>
+    <div class="sep"></div>
+    <label class="row"><input type="checkbox" id="opt-updates"> 有可用更新（菜单橙点 + 徽标）</label>
+    <label class="row"><input type="checkbox" id="opt-anno" checked> 显示聚焦标注</label>
+    <div class="grp">
+      <button type="button" class="ctl-btn" id="btn-theme">切换 浅色 / 深色</button>
+    </div>
+    <p class="note">点击左侧菜单可定位到任意分区；右侧滚动时菜单高亮跟随。窗口底部留 40vh 空白垫层，保证最后一个分区也能定位到顶部。</p>
+    <p class="note" id="entry-note">当前入口：<b>顶栏「设置」</b> → 首屏焦点在最前面（更新）。</p>
+  </aside>
+</div>
+
+<script>
+'use strict'
+const $ = id => document.getElementById(id)
+const scroll = $('set-scroll')
+const menuButtons = Array.from(document.querySelectorAll('#set-menu button'))
+const SECTIONS = ['updates', 'connection', 'appearance', 'log']
+
+/* ── 主题卡（与 src/ui/settings.html 的 THEMES 一致） ───────────────── */
+
+const THEMES = [
+  { id: 'default', name: '默认', desc: '跟随系统，在液态玻璃浅 / 深之间自动切换', bg: 'linear-gradient(135deg,#6e6ae6 0%,#7a5cf0 45%,#ff5c5c 100%)', sidebar: 'rgba(255,255,255,0.42)', surface: 'rgba(255,255,255,0.6)', accent: '#0a84ff' },
+  { id: 'ios-flat', name: 'iOS 扁平', desc: '简洁扁平、高饱和系统色（浅）', bg: '#f2f2f7', sidebar: '#f7f7fa', surface: '#ffffff', accent: '#007aff' },
+  { id: 'ios-flat-dark', name: 'iOS 扁平深色', desc: 'iOS 深色模式、纯黑不透明表面', bg: '#000000', sidebar: '#1c1c1e', surface: '#1c1c1e', accent: '#0a84ff' },
+  { id: 'liquid-glass', name: '液态玻璃', desc: '半透明玻璃质感与折射光影（浅）', bg: 'linear-gradient(135deg,#6e6ae6 0%,#7a5cf0 45%,#ff5c5c 100%)', sidebar: 'rgba(255,255,255,0.42)', surface: 'rgba(255,255,255,0.6)', accent: '#0a84ff' },
+  { id: 'liquid-glass-dark', name: '液态玻璃深色', desc: '深色磨砂玻璃、低亮度折射背景', bg: 'linear-gradient(135deg,#23234a 0%,#3a2b5f 50%,#4a1f3a 100%)', sidebar: 'rgba(22,22,34,0.55)', surface: 'rgba(30,30,46,0.55)', accent: '#0a84ff' },
+]
+let activeTheme = 'liquid-glass-dark'
+
+function swatch(bg, cssText) {
+  const el = document.createElement('span')
+  el.style.cssText = 'position:absolute;' + cssText + ';background:' + bg + ';box-shadow:inset 0 1px 0 rgba(255,255,255,0.2)'
+  return el
+}
+function renderThemes() {
+  const grid = $('theme-grid')
+  grid.textContent = ''
+  for (const t of THEMES) {
+    const card = document.createElement('button')
+    card.type = 'button'
+    card.className = 'theme-card'
+    card.dataset.theme = t.id
+    card.setAttribute('role', 'radio')
+    card.setAttribute('aria-checked', t.id === activeTheme ? 'true' : 'false')
+    card.setAttribute('aria-pressed', t.id === activeTheme ? 'true' : 'false')
+    const preview = document.createElement('div')
+    preview.className = 'theme-preview'
+    preview.style.background = t.bg
+    preview.appendChild(swatch(t.sidebar, 'left:6px;top:6px;bottom:6px;width:26%;border-radius:5px'))
+    preview.appendChild(swatch(t.surface, 'left:calc(26% + 11px);top:6px;right:6px;height:42%;border-radius:5px'))
+    preview.appendChild(swatch(t.accent, 'left:calc(26% + 11px);top:calc(6px + 42% + 5px);width:38%;height:16%;border-radius:999px'))
+    const check = document.createElement('span')
+    check.className = 'theme-check'
+    check.textContent = '✓'
+    preview.appendChild(check)
+    const name = document.createElement('div')
+    name.className = 'theme-card-name'
+    name.textContent = t.name
+    const desc = document.createElement('div')
+    desc.className = 'theme-card-desc'
+    desc.textContent = t.desc
+    card.appendChild(preview); card.appendChild(name); card.appendChild(desc)
+    card.addEventListener('click', () => { activeTheme = t.id; renderThemes() })
+    grid.appendChild(card)
+  }
+}
+renderThemes()
+
+/* ── 菜单定位 + 滚动高亮 ──────────────────────────────────────────── */
+
+let spyLocked = false
+function setActive(section) {
+  for (const button of menuButtons) {
+    const on = button.dataset.sec === section
+    button.classList.toggle('active', on)
+    button.setAttribute('aria-current', on ? 'true' : 'false')
+  }
+}
+// Offset of one section inside the scroll container's scrollable content.
+// Measured from rects on purpose: `offsetTop` resolves against an outer
+// offsetParent here (the viewport), which overshoots by the titlebar height.
+function sectionScrollTop(section) {
+  const target = $('sec-' + section)
+  if (target === null) return 0
+  return Math.max(0, target.getBoundingClientRect().top - scroll.getBoundingClientRect().top + scroll.scrollTop - 20)
+}
+
+function goTo(section) {
+  spyLocked = true
+  setActive(section)
+  scroll.scrollTo({ top: sectionScrollTop(section), behavior: 'smooth' })
+  setTimeout(() => { spyLocked = false }, 420)
+}
+for (const button of menuButtons) button.addEventListener('click', () => goTo(button.dataset.sec))
+
+scroll.addEventListener('scroll', () => {
+  if (spyLocked) return
+  const line = scroll.scrollTop + 24
+  let current = SECTIONS[0]
+  for (const id of SECTIONS) {
+    if (sectionScrollTop(id) <= line) current = id
+  }
+  setActive(current)
+}, { passive: true })
+
+/* ── 入口模拟：焦点在最前面 vs 落在「连接」 ───────────────────────── */
+
+function enterFrom(entry) {
+  for (const button of document.querySelectorAll('[data-entry]')) {
+    button.classList.toggle('on', button.dataset.entry === entry)
+  }
+  const fromHarness = entry === 'harness'
+  // 入口决定首屏位置：harness 页进来定位到「连接」，顶栏进来停在最前面。
+  if (fromHarness) {
+    goTo('connection')
+    $('conn-focus').classList.add('on')
+    $('footer-note').textContent = '已定位到「连接」（来自 harness 页的入口）'
+    $('entry-note').innerHTML = '当前入口：<b>harness 页</b>（启动器／失败页「连接设置」／⌘,／终端徽标）→ 首屏焦点在<b>「连接」</b>。'
+  } else {
+    scroll.scrollTo({ top: 0, behavior: 'smooth' })
+    spyLocked = false
+    setActive('updates')
+    $('conn-focus').classList.remove('on')
+    $('footer-note').textContent = '已载入当前设置'
+    $('entry-note').innerHTML = '当前入口：<b>顶栏「设置」</b> → 首屏焦点在<b>最前面</b>（更新，不滚动）。'
+  }
+}
+for (const button of document.querySelectorAll('[data-entry]')) {
+  button.addEventListener('click', () => enterFrom(button.dataset.entry))
+}
+
+/* ── 其余交互（仅原型演示） ──────────────────────────────────────── */
+
+$('mode-switch').addEventListener('click', event => {
+  const button = event.target.closest('button[data-mode]')
+  if (button === null) return
+  const ssh = button.dataset.mode === 'ssh'
+  for (const other of $('mode-switch').querySelectorAll('button')) other.classList.toggle('active', other === button)
+  $('local-fields').hidden = ssh
+  $('ssh-fields').hidden = !ssh
+})
+$('terminal-chip').addEventListener('click', () => enterFrom('harness'))
+$('btn-close').addEventListener('click', () => {
+  for (const button of document.querySelectorAll('#nav button[data-view]')) {
+    button.classList.toggle('active', button.dataset.view === 'harness')
+  }
+  $('footer-note').textContent = '已关闭设置面板（原型仅示意）'
+})
+$('sw-auto').addEventListener('click', () => {
+  const next = $('sw-auto').getAttribute('aria-checked') !== 'true'
+  $('sw-auto').setAttribute('aria-checked', next ? 'true' : 'false')
+})
+$('opt-updates').addEventListener('change', () => {
+  const on = $('opt-updates').checked
+  const menuButton = document.querySelector('#set-menu button[data-sec="updates"]')
+  menuButton.dataset.hasDot = on ? '1' : '0'
+  $('comp-harness').dataset.available = on ? 'true' : 'false'
+  $('comp-dot').dataset.status = on ? 'available' : 'ready'
+  $('comp-summary').textContent = on ? '发现新版本 npm:0.9.6' : '已是最新'
+  $('comp-action').textContent = on ? '更新并重启' : '检查'
+  $('comp-action').className = 'button' + (on ? ' primary' : '')
+  $('btn-update').disabled = !on
+})
+$('opt-anno').addEventListener('change', () => {
+  for (const id of ['anno1', 'anno2', 'anno3']) $(id).classList.toggle('off', !$('opt-anno').checked)
+})
+$('btn-theme').addEventListener('click', () => {
+  const dark = document.documentElement.dataset.theme !== 'liquid-glass'
+  document.documentElement.dataset.theme = dark ? 'liquid-glass' : 'liquid-glass-dark'
+  activeTheme = dark ? 'liquid-glass' : 'liquid-glass-dark'
+  renderThemes()
+})
+
+// 默认状态：顶栏进入 → 焦点在最前面；无可用更新。
+$('btn-update').disabled = true
+enterFrom('settings')
+</script>
+</body>
+</html>
