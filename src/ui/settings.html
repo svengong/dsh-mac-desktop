@@ -222,7 +222,12 @@ function goToSection(section) {
   setActiveSection(section)
   if (scroll === null) return
   spyLocked = true
-  scroll.scrollTo({ top: Math.max(0, sectionOffset(section) - 20), behavior: 'smooth' })
+  // Aim for the section's top, but never past the last scrollable position.
+  // There is deliberately no bottom spacer (it showed as dead space under the
+  // log), so a trailing section simply cannot reach the top — clamping here
+  // puts it as high as the page allows, which still shows it in full.
+  const maxScroll = Math.max(0, scroll.scrollHeight - scroll.clientHeight)
+  scroll.scrollTo({ top: Math.min(maxScroll, Math.max(0, sectionOffset(section) - 20)), behavior: 'smooth' })
   setTimeout(() => { spyLocked = false }, 420)
 }
 
