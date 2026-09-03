@@ -196,6 +196,27 @@ npm 插件与 Git 预设的实际安装通过 `withComponentLock` 串行化（�
 更新管理面板内的 Harness 行更新走壳内管线（实时日志），菜单/初始化走 worker，
 两者共享同一 artifact 安装原语。
 
+### 6.5 始终跟踪最新发布（无通道选择）
+
+壳**没有**用户可选的更新通道，也不持久化任何通道偏好。每次检查都在 registry
+声明的**所有** dist-tag 里取 semver 最高的那个版本：
+
+- `artifact.js` 的 `resolveChannelVersion(tags)` 是纯函数（冒烟可测）：遍历
+  `TRACKED_DIST_TAGS`（`latest`、`next`、`alpha`、`beta`、`rc`），取最高版本。
+  未跟踪的 tag（`canary`、`dev`…）一律忽略。这正是「检测不到 alpha 版本」的
+  修复所在——官方包把 `0.1.2-alpha.3` 发在 `alpha` 上，而只读 `latest` 的壳
+  会一直停在 `0.1.1-rc.2`。
+- 因此预发布版**默认可见**：谁的版本高就装谁，不论它发在哪个 tag 上。
+- 通道只是**结果**而非输入：胜出的 tag 记在 `channel` 字段上，仅用于展示
+  （日志一行 note、Harness 行的 badge、菜单/托盘的「…（alpha）」后缀）。
+- 一个 tracked tag 都没有时才是唯一的硬性失败。
+
+由于预发布版会默认装上，**插件兼容性由用户负责**：插件装在 `<dshHome>/profiles/`
+下（跨 runtime 版本共享），而宿主 API 在 `runtime/<version>` 里（按版本隔离）。
+一次破坏性 API 变更会让旧插件在 import 阶段失败（典型报错 `does not provide an
+export named ...`），导致新产物启动失败并自动回滚。处理方式是卸载/升级不兼容的
+插件，而不是回退 runtime。
+
 ## 7. macOS UI 约定
 
 - 主窗口：`titleBarStyle: 'hiddenInset'`、`trafficLightPosition: {x:18,y:15}`，

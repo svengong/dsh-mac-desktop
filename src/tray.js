@@ -11,6 +11,12 @@ const path = require('node:path')
 const { Tray, Menu, nativeImage } = require('electron')
 const { terminalLabel } = require('./labels')
 
+/** Suffix naming the dist-tag a version came from, empty for stable/latest. */
+function channelSuffix(channel) {
+  const value = typeof channel === 'string' ? channel : ''
+  return value === '' || value === 'latest' ? '' : `（${value}）`
+}
+
 function createTray({ actions, getStatus, getSettings, getUpdateSummary, isBusy, isUpdating }) {
   const iconPath = path.join(__dirname, '..', 'build', 'trayTemplate.png')
   const image = nativeImage.createFromPath(iconPath)
@@ -29,7 +35,7 @@ function createTray({ actions, getStatus, getSettings, getUpdateSummary, isBusy,
       { label: `状态：${status.detail}`, enabled: false },
       summary.availableCount > 0
         ? { label: `有 ${summary.availableCount} 个更新可用`, enabled: false }
-        : { label: summary.lastCheckAt ? '所有组件均为最新' : '尚未检查更新', enabled: false },
+        : { label: summary.lastCheckAt ? `所有组件均为最新${channelSuffix(summary.channel)}` : '尚未检查更新', enabled: false },
       { type: 'separator' },
       { label: '打开 Harness', click: () => actions.openMain() },
       { label: '新建窗口', click: () => actions.newWindow() },

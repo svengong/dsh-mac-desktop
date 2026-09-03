@@ -118,6 +118,7 @@ BrowserWindow (shell.html 边框)
 2. **detached worker 执行**：菜单「更新并重启」与初始化在本地产物可用时由 `update-worker.js` 独立进程执行（`spawnDetached`，壳退出不杀）。壳轮询 `runtime/update-status.json` 推送阶段/日志；`done` 后由壳重启服务（或下次连接按版本不匹配自动重启）。
 3. **意图可恢复**：更新前写 `update-pending.json`，正常结束才清除；启动时 `resumePendingUpdate()` 检测残留——worker 还在跑则接管观察，已完成则提示，被打断则询问「继续/放弃」后重跑。
 4. **版本化运行时与回滚**：官方产物安装在 `<dshHome>/runtime/<version>`（远端 `~/.dsh/runtime/<version>`），成功后原子切换 `current`；新版本启动失败自动回滚 `previous`，更新菜单可手动「回滚 Harness」。
+5. **始终跟踪最新发布**：无用户可选通道。每次检查在 registry 声明的所有 dist-tag（`latest`/`next`/`alpha`/`beta`/`rc`）里取 semver 最高者，由 `resolveChannelVersion()` 纯函数解析；胜出的 tag 仅用于展示。版本比较保留预发布后缀（semver 优先级）。预发布版因此默认可见，插件兼容性由用户负责。详见 [development.md §6.5](./development.md)。
 
 ## 7. 数据与进程隔离
 

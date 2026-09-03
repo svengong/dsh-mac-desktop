@@ -168,7 +168,7 @@ const embedded = params.get('embedded') === '1'
 if (embedded) document.body.classList.add('embedded')
 let sshHostEntries = []
 let activeMode = 'local'
-let updateState = { busy: false, updating: false, autoCheckOnLaunch: true, lastCheckAt: '', components: [], available: [] }
+let updateState = { busy: false, updating: false, autoCheckOnLaunch: true, channel: 'latest', lastCheckAt: '', components: [], available: [] }
 // One-shot guard for the cancel button click state. Set while a cancel
 // request is in flight; renderUpdates() resets it once the update settles.
 let cancelClickPending = false
@@ -183,6 +183,24 @@ function status(text, ok) {
 }
 function switchOf(id) { return $(id).getAttribute('aria-checked') === 'true' }
 function setSwitch(id, value) { $(id).setAttribute('aria-checked', value ? 'true' : 'false') }
+
+// ── update channel display ─────────────────────────────────────────────────
+// There is deliberately NO channel picker: the shell always tracks the newest
+// published release across every dist-tag the registry declares. The tag that
+// won is only ever reported back for display, never chosen by the user.
+
+const CHANNELS = [
+  { id: 'latest', title: '稳定版' },
+  { id: 'next', title: 'Next' },
+  { id: 'alpha', title: 'Alpha' },
+  { id: 'beta', title: 'Beta' },
+  { id: 'rc', title: 'RC' },
+]
+
+function channelOf(id) {
+  const wanted = typeof id === 'string' ? id : ''
+  return CHANNELS.find(channel => channel.id === wanted) ?? CHANNELS[0]
+}
 
 // ── single-page layout: locating menu + entry-dependent focus ──────────────
 // The settings panel is ONE scrolling page (更新 → 连接 → 外观 → 日志). The
@@ -364,6 +382,12 @@ function renderUpdates() {
     titleRow.appendChild(runtimeDot(row))
     const title = document.createElement('span'); title.className = 'component-title'; title.textContent = row.title || row.name || row.id; titleRow.appendChild(title)
     titleRow.appendChild(badge(KIND_TEXT[row.kind] || row.kind, row.enabled ? 'info' : 'danger')); main.appendChild(titleRow)
+    // A pre-release install reads as 已最新 on its own channel, so the row
+    // names the channel it is tracking — otherwise the version alone looks
+    // like a stable build that failed to upgrade.
+    if (row.channel !== undefined && row.channel !== '' && row.channel !== 'latest') {
+      titleRow.appendChild(badge(channelOf(row.channel).title, 'warn'))
+    }
     const desc = document.createElement('p'); desc.className = 'component-desc'; desc.textContent = row.enabled ? row.description : `${row.description}（已停用）`; main.appendChild(desc)
     const meta = document.createElement('p'); meta.className = 'component-meta'; meta.textContent = runtimeMeta(row); meta.title = runtimeMeta(row); main.appendChild(meta)
     const summary = document.createElement('p'); summary.className = 'component-summary'; summary.textContent = row.error || row.summary

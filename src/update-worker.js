@@ -26,6 +26,8 @@
  *
  * Usage: node src/update-worker.js <task.json>
  * task.json: { dshHome, repoDir, repoUrl, toolPaths, version, registryUrl }
+ *
+ * `version` is already resolved by the shell to the newest published release.
  */
 
 const fs = require('node:fs')
@@ -34,6 +36,7 @@ const { normalizeSettings } = require('./settings')
 const { resolveTools } = require('./tools')
 const { installNpmArtifact } = require('./artifact')
 const { NPM_PACKAGE } = require('./runtime-layout')
+
 const runtimeStore = require('./runtime-store')
 
 async function main() {

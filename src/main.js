@@ -1832,13 +1832,14 @@ function activeSettingsView() {
 
 function activeUpdateSummary() {
   const session = activeSession()
-  if (session === null) return { availableCount: 0, lastCheckAt: '' }
+  if (session === null) return { availableCount: 0, lastCheckAt: '', channel: '' }
   const view = settingsViewFor(session.key)
   const snapshot = session.updateManager.snapshot()
   return {
     availableCount: snapshot.available.length,
     updating: snapshot.updating === true || session.workerPollTimer !== null,
     cancelling: session.cancelRequested === true,
+    channel: snapshot.channel ?? '',
     lastCheckAt: view.update?.lastCheckAt ?? '',
   }
 }
@@ -2612,6 +2613,7 @@ function registerIpc() {
           busy: false,
           updating: false,
           autoCheckOnLaunch: view.update?.autoCheckOnLaunch === false ? false : true,
+          channel: '',
           lastCheckAt: view.update?.lastCheckAt ?? '',
           components: [],
           available: [],

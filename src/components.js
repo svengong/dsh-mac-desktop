@@ -25,6 +25,17 @@ const HARNESS = Object.freeze({
 /** The fixed order for panels, menus, and "update all". */
 const DEFAULT_COMPONENTS = Object.freeze([HARNESS])
 
+/**
+ * There is no user-selectable channel. The shell always tracks the NEWEST
+ * published release across every dist-tag the registry declares — see
+ * `resolveChannelVersion` in `artifact.js`. A channel is therefore only ever
+ * a report of which tag won, never a persisted user preference.
+ *
+ * The registry is authoritative for which tags exist. `alpha` was invisible
+ * for as long as the shell only ever read `dist-tags.latest`, so a published
+ * `0.1.2-alpha.3` never surfaced while `latest` sat at `0.1.1-rc.2`.
+ */
+
 const text = value => (typeof value === 'string' ? value.trim() : '')
 const flag = (value, fallback) => (typeof value === 'boolean' ? value : fallback)
 
@@ -92,9 +103,44 @@ function versionOf(spec) {
 }
 
 /**
- * Compare two numeric versions. Prerelease tags sort below their release and
- * omitted segments equal zero, matching the small semver subset the shell
- * consumes. Returns -1 / 0 / 1.
+ * Compare two dot-separated prerelease identifiers by semver precedence:
+ * numeric identifiers compare numerically and rank BELOW alphanumeric ones,
+ * alphanumeric ones compare lexically, and a shorter identifier list sorts
+ * first when every shared identifier is equal. Returns -1 / 0 / 1.
+ *
+ * Numeric comparison is what makes `alpha.10` sort above `alpha.9` — a plain
+ * string compare would rank it below, hiding the newest alpha.
+ * @param {string} a - first prerelease tail (without the leading `-`).
+ * @param {string} b - second prerelease tail.
+ * @returns {number} comparison result.
+ */
+function comparePrerelease(a, b) {
+  const left = String(a).split('.')
+  const right = String(b).split('.')
+  for (let index = 0; index < Math.max(left.length, right.length); index += 1) {
+    const l = left[index]
+    const r = right[index]
+    if (l === undefined) return -1
+    if (r === undefined) return 1
+    const lNumeric = /^\d+$/.test(l)
+    const rNumeric = /^\d+$/.test(r)
+    if (lNumeric && rNumeric) {
+      if (Number(l) !== Number(r)) return Number(l) < Number(r) ? -1 : 1
+      continue
+    }
+    // A numeric identifier always has LOWER precedence than an alphanumeric one.
+    if (lNumeric) return -1
+    if (rNumeric) return 1
+    if (l < r) return -1
+    if (l > r) return 1
+  }
+  return 0
+}
+
+/**
+ * Compare two versions. Prerelease tags sort below their release and omitted
+ * segments equal zero, matching the small semver subset the shell consumes.
+ * Returns -1 / 0 / 1.
  * @param {string} a - first version.
  * @param {string} b - second version.
  * @returns {number} comparison result.
@@ -102,26 +148,47 @@ function versionOf(spec) {
 function compareVersions(a, b) {
   const left = String(a ?? '').trim()
   const right = String(b ?? '').trim()
-  const leftParts = left.split('-')
-  const rightParts = right.split('-')
-  const leftNums = leftParts[0].split('.').map(Number)
-  const rightNums = rightParts[0].split('.').map(Number)
+  const leftSplit = left.indexOf('-')
+  const rightSplit = right.indexOf('-')
+  const leftCore = leftSplit === -1 ? left : left.slice(0, leftSplit)
+  const rightCore = rightSplit === -1 ? right : right.slice(0, rightSplit)
+  const leftNums = leftCore.split('.').map(Number)
+  const rightNums = rightCore.split('.').map(Number)
   for (let index = 0; index < Math.max(leftNums.length, rightNums.length); index += 1) {
     const l = Number.isFinite(leftNums[index]) ? leftNums[index] : 0
     const r = Number.isFinite(rightNums[index]) ? rightNums[index] : 0
     if (l < r) return -1
     if (l > r) return 1
   }
-  if (leftParts.length === 1 && rightParts.length === 1) return 0
-  if (leftParts.length === 1) return 1
-  if (rightParts.length === 1) return -1
-  return leftParts[1] < rightParts[1] ? -1 : leftParts[1] > rightParts[1] ? 1 : 0
+  // A release outranks any of its prereleases.
+  if (leftSplit === -1 && rightSplit === -1) return 0
+  if (leftSplit === -1) return 1
+  if (rightSplit === -1) return -1
+  return comparePrerelease(left.slice(leftSplit + 1), right.slice(rightSplit + 1))
 }
 
-/** Whether `candidate` is a strictly newer numeric version than `installed`. */
+/**
+ * Strip a version token down to a prerelease-preserving comparable form
+ * (`v0.1.2-alpha.3` → `0.1.2-alpha.3`, `^0.12.1` → `0.12.1`). Returns '' when
+ * the input carries no version at all.
+ *
+ * The prerelease tail is KEPT on purpose: two alphas of one core version
+ * (`0.1.2-alpha.1` → `0.1.2-alpha.3`) differ only there, so dropping it would
+ * report the newer alpha as already installed.
+ * @param {string} spec - version, spec, or dist-tag.
+ * @returns {string} comparable version token or empty string.
+ */
+function versionToken(spec) {
+  const match = /v?(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:-([0-9A-Za-z.-]+))?/.exec(String(spec ?? '').trim())
+  if (match === null) return ''
+  const core = [match[1], match[2] ?? '0', match[3] ?? '0'].join('.')
+  return match[4] === undefined ? core : `${core}-${match[4]}`
+}
+
+/** Whether `candidate` is a strictly newer version than `installed`. */
 function isNewerVersion(candidate, installed) {
-  const c = versionOf(candidate)
-  const i = versionOf(installed)
+  const c = versionToken(candidate)
+  const i = versionToken(installed)
   if (c === '' || i === '') return false
   return compareVersions(c, i) > 0
 }
@@ -149,4 +216,5 @@ module.exports = {
   normalizeComponents,
   normalizeUpdate,
   versionOf,
+  versionToken,
 }

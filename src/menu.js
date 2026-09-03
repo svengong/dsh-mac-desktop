@@ -25,9 +25,13 @@ function buildMenu({ actions, getStatus, getSettings, isBusy, getUpdateSummary, 
   const summary = getUpdateSummary ? getUpdateSummary() : { availableCount: 0 }
   const terminal = settings.detached === true ? '待连接' : terminalLabel(settings)
   const available = summary.availableCount > 0
+  // The up-to-date line names the dist-tag the tracked release came from:
+  // 「已最新」 on a pre-release tag is not the same claim as stable-latest.
+  const channel = typeof summary.channel === 'string' ? summary.channel : ''
+  const channelSuffix = channel === '' || channel === 'latest' ? '' : `（${channel}）`
   const updateHeadline = available
     ? `有 ${summary.availableCount} 个更新可用`
-    : summary.lastCheckAt ? '所有组件均为最新' : '尚未检查更新'
+    : summary.lastCheckAt ? `所有组件均为最新${channelSuffix}` : '尚未检查更新'
 
   const template = [
     {

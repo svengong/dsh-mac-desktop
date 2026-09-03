@@ -16,7 +16,7 @@ const { runCommand } = require('./runner')
 const { remotePath, shellQuote, remoteToolchainPrefix } = require('./ssh')
 const { engineOk } = require('./tools')
 const { isNewerVersion } = require('./components')
-const { queryNpmArtifact, installNpmArtifact } = require('./artifact')
+const { DEFAULT_REGISTRY, queryNpmArtifact, installNpmArtifact } = require('./artifact')
 const { NPM_PACKAGE, npmArtifactVersion } = require('./runtime-layout')
 const { OFFICIAL_REPO_URL } = require('./settings')
 const runtimeStore = require('./runtime-store')
@@ -165,9 +165,18 @@ class Updater {
     return url === '' || url === OFFICIAL_REPO_URL
   }
 
+  /**
+   * The registry every artifact operation for this device must use: the
+   * configured one, or the official default when none is set. Preflight and
+   * install share it so a version one step resolves is resolvable by the next.
+   */
+  registryUrl(settings) {
+    return settings.update?.registryUrl ?? ''
+  }
+
   /** Registry preflight for the official npm artifact (never throws). */
   async queryArtifact(settings) {
-    return queryNpmArtifact({ registryUrl: settings.update?.registryUrl ?? '' })
+    return queryNpmArtifact({ registryUrl: this.registryUrl(settings) })
   }
 
   /**
@@ -238,14 +247,18 @@ class Updater {
     const legacy = hasRuntime && currentVersion === ''
     const updateAvailable = currentVersion === '' || isNewerVersion(artifact.version, currentVersion)
     const installedText = currentVersion !== '' ? `（当前 ${currentVersion}）` : legacy ? '（检测到旧版本，更新将迁移到官方产物）' : '（未安装）'
-    this.onLine(`官方产物：${NPM_PACKAGE}@${artifact.version}${installedText}${updateAvailable ? '，可更新。' : '，已最新。'}`)
+    const channelText = artifact.channel === 'latest' || artifact.channel === '' ? '' : `（${artifact.channel}）`
+    // A release that won on a non-stable tag is worth one visible line: the
+    // version alone does not say it came from a pre-release track.
+    if (artifact.note !== undefined && artifact.note !== '') this.onLine(artifact.note)
+    this.onLine(`官方产物：${NPM_PACKAGE}@${artifact.version}${channelText}${installedText}${updateAvailable ? '，可更新。' : '，已最新。'}`)
     return {
       artifact, currentNpm: currentVersion, updateAvailable,
       hasRuntime,
       legacy,
       summary: updateAvailable
-        ? `官方预构建版 v${artifact.version} 可用${legacy ? '（当前为旧版本）' : ''}`
-        : `官方预构建版 v${artifact.version}（已最新）`,
+        ? `官方预构建版 v${artifact.version} 可用${channelText}${legacy ? '（当前为旧版本）' : ''}`
+        : `官方预构建版 v${artifact.version}${channelText}（已最新）`,
     }
   }
 
@@ -384,6 +397,10 @@ class Updater {
         runtimeDir: buildDir,
         spec: `${NPM_PACKAGE}@${version}`,
         env: tools.env,
+        // Same registry the preflight resolved the version from — otherwise
+        // the install silently follows ~/.npmrc and can disagree with the
+        // metadata the preflight trusted.
+        registryUrl: this.registryUrl(settings),
         onLine: line => this.onLine(line),
         owner: this.owner(),
         shouldAbort: () => this.cancelled,
@@ -450,9 +467,13 @@ class Updater {
     }
     this.onLine(`远端下载官方预构建版 ${NPM_PACKAGE}@${version} → ${versionDir} …`)
     this.setPhase('downloading')
+    // Pin the registry here too: the remote npm would otherwise use the
+    // remote machine's ~/.npmrc, which need not be the registry whose
+    // dist-tags the preflight just read.
+    const registry = String(this.registryUrl(settings) || DEFAULT_REGISTRY).replace(/\/$/, '')
     const install = await remoteRun(
       settings.ssh.host,
-      `rm -rf ${versionDir} && mkdir -p ${versionDir} && ${remoteToolchainPrefix()} cd ${versionDir} && npm install --prefix ${versionDir} --no-audit --no-fund ${NPM_PACKAGE}@${version}`,
+      `rm -rf ${versionDir} && mkdir -p ${versionDir} && ${remoteToolchainPrefix()} cd ${versionDir} && npm install --prefix ${versionDir} --no-audit --no-fund --registry ${registry} ${NPM_PACKAGE}@${version}`,
       { timeoutMs: 20 * 60_000, onLine: line => this.onLine(line), shouldAbort: () => this.cancelled },
     )
     if (install.aborted === true) {
@@ -462,7 +483,13 @@ class Updater {
       this.throwCancelled()
     }
     if (install.code !== 0) {
-      throw new Error(`远端官方产物安装失败（退出码 ${install.code}）：${install.lines.slice(-8).join('\n')}`)
+      const tail = install.lines.slice(-8).join('\n')
+      // An ETARGET here is the same stale-metadata failure the local path
+      // retries: name it plainly instead of letting npm's raw wording stand.
+      const hint = /notarget|no matching version found|ETARGET/iu.test(tail)
+        ? `\n\n该 registry（${registry}）未报告依赖所需的版本，通常是镜像同步滞后或远端 npm 缓存过期，可在远端执行 npm cache clean --force 后重试。`
+        : ''
+      throw new Error(`远端官方产物安装失败（退出码 ${install.code}）：${tail}${hint}`)
     }
     // Cancelling the remote install only aborts at step boundaries (the ssh
     // child group is killed by cancelSessionTask; the remote command group
