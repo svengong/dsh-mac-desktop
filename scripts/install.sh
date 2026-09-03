@@ -22,11 +22,28 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-APP="$(find dist -maxdepth 3 -name 'DeepSeek Harness.app' -print -quit 2>/dev/null || true)"
+# Only look ONE level below dist/: electron-builder emits dist/mac-arm64/ and
+# dist/mac/. A deeper search also matches dist/.old/<timestamp>/… (stale builds
+# parked there to work around the safe-delete guard), and directory order puts
+# `.old` first — that silently installed a days-old bundle over a fresh build.
+APP="$(find dist -mindepth 2 -maxdepth 2 -name 'DeepSeek Harness.app' -print -quit 2>/dev/null || true)"
 if [ -z "$APP" ]; then
   echo "No app bundle found; running scripts/build.sh first..."
   bash scripts/build.sh
-  APP="$(find dist -maxdepth 3 -name 'DeepSeek Harness.app' -print -quit)"
+  APP="$(find dist -mindepth 2 -maxdepth 2 -name 'DeepSeek Harness.app' -print -quit)"
+fi
+if [ -z "$APP" ]; then
+  echo "error: no 'DeepSeek Harness.app' under dist/<target>/ after build." >&2
+  exit 1
+fi
+# Stale builds parked under dist/.old are a landmine: say which bundle is going
+# in, and refuse to install one that is not freshly built.
+APP_AGE_MIN=$(( ( $(date +%s) - $(stat -f %m "$APP") ) / 60 ))
+echo "Installing: $APP (built ${APP_AGE_MIN} min ago)"
+if [ "$APP_AGE_MIN" -gt 120 ]; then
+  echo "error: refusing to install a bundle built ${APP_AGE_MIN} min ago." >&2
+  echo "       Rebuild with 'npm run dist', or clear dist/.old if it is stale." >&2
+  exit 1
 fi
 
 if [ -d "/Applications/DeepSeek Harness.app" ]; then

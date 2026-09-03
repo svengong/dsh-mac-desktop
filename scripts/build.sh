@@ -16,5 +16,9 @@ export ELECTRON_BUILDER_BINARIES_MIRROR="${ELECTRON_BUILDER_BINARIES_MIRROR:-htt
 # Unsigned local build: never pick up a keychain identity by accident.
 CSC_IDENTITY_AUTO_DISCOVERY=false npx electron-builder --mac dir
 echo
-echo "Built: $(find dist -maxdepth 3 -name 'DeepSeek Harness.app' -print -quit)"
+# -mindepth 2 -maxdepth 2: match only dist/<target>/DeepSeek\ Harness.app.
+# A deeper search also hits dist/.old/<timestamp>/… (stale bundles parked there
+# to dodge the safe-delete guard) and `.old` sorts first, so the printed path
+# pointed at a days-old bundle — see scripts/install.sh.
+echo "Built: $(find dist -mindepth 2 -maxdepth 2 -name 'DeepSeek Harness.app' -print -quit)"
 echo "Versioned DMG/ZIP (GitHub Release artifacts): npm run dist:dmg"
