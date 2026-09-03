@@ -11,16 +11,18 @@ const assert = require('node:assert')
 const fs = require('node:fs')
 const os = require('node:os')
 const net = require('node:net')
+const http = require('node:http')
 const path = require('node:path')
 const { normalizeSettings } = require('../src/settings')
 const { terminalLabel, terminalPrefix } = require('../src/labels')
 const {
-  compareVersions, isNewerVersion, versionOf,
+  compareVersions, isNewerVersion, versionOf, versionToken,
 } = require('../src/components')
+const { resolveChannelVersion, notargetPackage } = require('../src/artifact')
 const { UpdateManager } = require('../src/update-manager')
 const { parseTarget, shellQuote, remotePath, tunnelArgs, parseSshConfig, listSshHosts } = require('../src/ssh')
 const { runCommand, spawnService, killActiveChildren, SERVICE_PID_PREFIX } = require('../src/runner')
-const { ConnectionManager } = require('../src/connection')
+const { ConnectionManager, rehostUrl, probeOnce } = require('../src/connection')
 const { findFreePort, releasePort, reservePort } = require('../src/ports')
 const runtimeStore = require('../src/runtime-store')
 const { WindowManager } = require('../src/window-manager')
@@ -106,6 +108,114 @@ async function main() {
   assert.strictEqual(isNewerVersion('1.2.2', '1.2.2'), false)
   assert.strictEqual(isNewerVersion('latest', '1.2.2'), false)
 
+  // prerelease ordering: the whole point of the alpha channel. A plain
+  // string compare ranks alpha.3 BELOW rc.2 and alpha.10 below alpha.9,
+  // which is what hid published alphas from the check.
+  assert.strictEqual(compareVersions('0.1.2-alpha.1', '0.1.1-rc.2'), 1)
+  assert.strictEqual(compareVersions('0.1.2', '0.1.2-alpha.3'), 1)
+  assert.strictEqual(compareVersions('0.1.2-alpha.10', '0.1.2-alpha.9'), 1)
+  assert.strictEqual(compareVersions('0.1.2-alpha.2', '0.1.2-alpha.10'), -1)
+  assert.strictEqual(compareVersions('0.1.2-alpha', '0.1.2-alpha.1'), -1)
+  assert.strictEqual(compareVersions('0.1.2-beta', '0.1.2-alpha'), 1)
+  assert.strictEqual(compareVersions('0.1.2-alpha.1', '0.1.2-alpha.1'), 0)
+  assert.strictEqual(compareVersions('v0.1.2-alpha.3', '0.1.2-alpha.3'), 0)
+  // The prerelease tail must survive normalization: two alphas of one core
+  // version differ ONLY there.
+  assert.strictEqual(versionToken('v0.1.2-alpha.3'), '0.1.2-alpha.3')
+  assert.strictEqual(versionToken('^0.12.1'), '0.12.1')
+  assert.strictEqual(versionToken('latest'), '')
+  assert.strictEqual(isNewerVersion('0.1.2-alpha.3', '0.1.2-alpha.2'), true)
+  assert.strictEqual(isNewerVersion('0.1.2-alpha.3', '0.1.2-alpha.3'), false)
+  assert.strictEqual(isNewerVersion('0.1.1-rc.2', '0.1.2-alpha.3'), false)
+
+  // There is no user-selectable channel: the update section must not carry
+  // one, and the shell always tracks the NEWEST release across all tags.
+  assert.strictEqual(normalizeSettings({ update: { channel: 'alpha' } }).update.channel, undefined)
+  assert.strictEqual(normalizeSettings(null).update.channel, undefined)
+
+  // newest-tag resolution: the registry publishes alpha AHEAD of latest, and
+  // the newest real release must win regardless of which tag carries it.
+  const tags = { latest: '0.1.1-rc.2', next: '0.1.1-rc.2', alpha: '0.1.2-alpha.3' }
+  const newest = resolveChannelVersion(tags)
+  assert.strictEqual(newest.version, '0.1.2-alpha.3')
+  assert.strictEqual(newest.channel, 'alpha')
+  assert.ok(newest.note.includes('alpha'))
+  // Only a stable tag: it wins, and reads as an ordinary version (no note).
+  const stable = resolveChannelVersion({ latest: '0.2.0' })
+  assert.strictEqual(stable.version, '0.2.0')
+  assert.strictEqual(stable.channel, 'latest')
+  assert.strictEqual(stable.note, '')
+  // The highest tag wins even when it is not `latest` and not `alpha`.
+  const beta = resolveChannelVersion({ latest: '0.1.0', beta: '0.3.0' })
+  assert.strictEqual(beta.version, '0.3.0')
+  assert.strictEqual(beta.channel, 'beta')
+  // Stable outranking a pre-release keeps the stable one.
+  const ahead = resolveChannelVersion({ latest: '0.2.0', alpha: '0.1.2-alpha.3' })
+  assert.strictEqual(ahead.version, '0.2.0')
+  assert.strictEqual(ahead.channel, 'latest')
+  assert.strictEqual(ahead.note, '')
+  // Untracked tags (canary/dev) are ignored, never followed.
+  const untracked = resolveChannelVersion({ latest: '0.1.0', canary: '9.9.9' })
+  assert.strictEqual(untracked.version, '0.1.0')
+  assert.strictEqual(untracked.channel, 'latest')
+  // No tracked tag at all is the one hard failure.
+  assert.strictEqual(resolveChannelVersion({}).ok, false)
+  assert.strictEqual(resolveChannelVersion({ canary: '9.9.9' }).ok, false)
+
+  // An npm ETARGET names the package whose version the registry failed to
+  // report; the retry purges exactly that package's cached packument.
+  assert.strictEqual(
+    notargetPackage('npm error notarget No matching version found for @deepseek-ai/dsh-base@^0.1.2-alpha.4.'),
+    '@deepseek-ai/dsh-base',
+  )
+  assert.strictEqual(
+    notargetPackage('No matching version found for @deepseek-ai/dsh-session-persistence-jsonl@^0.1.2-alpha.4'),
+    '@deepseek-ai/dsh-session-persistence-jsonl',
+  )
+  assert.strictEqual(notargetPackage('npm error notarget No matching version found for left-pad@1.2.3'), 'left-pad')
+  assert.strictEqual(notargetPackage('npm error code ECONNRESET'), '')
+  assert.strictEqual(notargetPackage(''), '')
+
+  // A `dsh web` token URL survives being re-hosted onto another loopback
+  // port — that is what lets an ssh device use the remote token on the local
+  // end of its tunnel.
+  assert.strictEqual(
+    rehostUrl('http://127.0.0.1:3080/?token=abc-123', 45711),
+    'http://127.0.0.1:45711/?token=abc-123',
+  )
+  // A remote host announcing itself on a non-loopback name still lands on
+  // loopback, since the browser only ever reaches the forwarded port.
+  assert.strictEqual(rehostUrl('http://localhost:3080/?token=z', 45711), 'http://127.0.0.1:45711/?token=z')
+  assert.strictEqual(rehostUrl('', 45711), '')
+  assert.strictEqual(rehostUrl('not a url', 45711), '')
+  assert.strictEqual(rehostUrl('http://127.0.0.1:3080/?token=z', 0), '')
+
+  // url() hands out the launch-token URL only while it belongs to the service
+  // actually serving: a restart moves the service to a new OS-chosen port, and
+  // a dead service's token must never be presented to whatever owns that port
+  // now.
+  const shellFor = mode => new ConnectionManager({
+    getSettings: () => (mode === 'ssh'
+      ? normalizeSettings({ mode: 'ssh', ssh: { host: 'h', localPort: 3080 } })
+      : normalizeSettings({ mode: 'local', local: { port: 3080 } })),
+  })
+  const localShell = shellFor('local')
+  localShell.localPort = null
+  assert.strictEqual(localShell.url(), 'http://127.0.0.1:3080')
+  localShell.localPort = 5000
+  assert.strictEqual(localShell.url(), 'http://127.0.0.1:5000')
+  localShell.localWebUrl = 'http://127.0.0.1:5000/?token=abc'
+  assert.strictEqual(localShell.url(), 'http://127.0.0.1:5000/?token=abc')
+  localShell.localPort = 5100
+  assert.strictEqual(localShell.url(), 'http://127.0.0.1:5100')
+
+  const sshShell = shellFor('ssh')
+  sshShell.localPort = 6000
+  sshShell.remoteWebUrl = 'http://127.0.0.1:6000/?token=remote-xyz'
+  assert.strictEqual(sshShell.url(), 'http://127.0.0.1:6000/?token=remote-xyz')
+  sshShell.localPort = 6100
+  assert.strictEqual(sshShell.url(), 'http://127.0.0.1:6100')
+
   // ssh
   assert.deepStrictEqual(parseTarget('u@h:2222'), { user: 'u', host: 'h', port: 2222 })
   assert.deepStrictEqual(parseTarget('h'), { user: '', host: 'h', port: 0 })
@@ -173,6 +283,53 @@ async function main() {
   assert.deepStrictEqual(extractPayload([B, '{"a":1}' + E], B, E), ['{"a":1}'])
   assert.deepStrictEqual(extractPayload([B + 'json' + E], B, E), ['json'])
   assert.deepStrictEqual(extractPayload(['a', 'b'], B, E), ['a', 'b'])
+
+  // probeOnce against a token-gated harness (the 0.1.2-alpha shape): a bare
+  // request is 401'd with the auth notice, and the token URL 303s to `/`
+  // while minting a session cookie. Both must read as dsh — treating either
+  // as "not dsh" is what made the reuse path reject a healthy service and
+  // respawn on every connect.
+  const authServer = http.createServer((req, res) => {
+    const url = new URL(req.url, 'http://127.0.0.1')
+    if (url.searchParams.has('token')) {
+      res.writeHead(303, { location: '/', 'set-cookie': 'dsh_session=abc; Path=/' })
+      res.end()
+      return
+    }
+    if (String(req.headers.cookie ?? '').includes('dsh_session=abc')) {
+      res.writeHead(200, { 'content-type': 'text/html' })
+      res.end('<html>__DSH_BOOT__</html>')
+      return
+    }
+    res.writeHead(401, { 'content-type': 'text/plain' })
+    res.end('dsh web authentication required; reopen the URL printed by dsh web.\n')
+  })
+  await new Promise(resolve => authServer.listen(0, '127.0.0.1', resolve))
+  const authBase = `http://127.0.0.1:${authServer.address().port}`
+  const bareProbe = await probeOnce(authBase)
+  assert.strictEqual(bareProbe.up, true)
+  assert.strictEqual(bareProbe.isDsh, true, 'an unauthenticated harness is still a harness')
+  // needsAuth is what lets a caller tell "up but unusable" from "up and
+  // serving": only the token-less probe may report it.
+  assert.strictEqual(bareProbe.needsAuth, true, 'a token-less probe must report that auth is required')
+  const tokenProbe = await probeOnce(`${authBase}/?token=xyz`)
+  assert.strictEqual(tokenProbe.up, true)
+  assert.strictEqual(tokenProbe.isDsh, true, 'the token redirect must be followed with its cookie')
+  assert.strictEqual(tokenProbe.needsAuth, false, 'a probe that got in must not report needsAuth')
+  authServer.close()
+
+  // A foreign service on the port is still NOT dsh — the relaxation above
+  // must stay specific to the harness auth notice.
+  const foreignServer = http.createServer((req, res) => {
+    res.writeHead(401, { 'content-type': 'text/plain' })
+    res.end('Unauthorized')
+  })
+  await new Promise(resolve => foreignServer.listen(0, '127.0.0.1', resolve))
+  const foreignProbe = await probeOnce(`http://127.0.0.1:${foreignServer.address().port}`)
+  assert.strictEqual(foreignProbe.up, true)
+  assert.strictEqual(foreignProbe.isDsh, false, 'a generic 401 must not count as dsh')
+  assert.strictEqual(foreignProbe.needsAuth, false, 'a generic 401 must not claim to be a harness auth gate')
+  foreignServer.close()
 
   // runner process registry: killActiveChildren must terminate every tracked
   // child (in-flight build, service, tunnel) so app quit never orphans one.
@@ -954,6 +1111,10 @@ async function main() {
   assert.strictEqual(m1.components.length, 1)
   assert.strictEqual(m1.components[0].id, 'harness')
   assert.strictEqual(m1.lastCheckAt, '2026-08-18T00:00:00Z')
+  // …and carries no channel: the newest release is resolved at every check,
+  // so a stale per-device channel preference must never be preserved.
+  assert.strictEqual(mergeUpdates({ channel: 'alpha' }, {}).channel, undefined)
+  assert.strictEqual(mergeUpdates({}, { channel: 'alpha' }).channel, undefined)
 
   console.log('smoke: all checks passed')
 }
