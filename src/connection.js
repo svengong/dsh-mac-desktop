@@ -102,21 +102,71 @@ function extractPayload(lines, beginMarker, endMarker) {
 }
 
 /** Probe a URL once; `isDsh` checks for the boot marker in the served HTML. */
-function probeOnce(url) {
+/**
+ * Probe a web URL once.
+ *
+ * Two details matter since `dsh web` started gating its index behind a
+ * launch-token cookie (0.1.2-alpha):
+ *
+ * - A redirect is FOLLOWED, carrying any `set-cookie` the previous hop minted.
+ *   The token URL answers 303 to a clean `/` and only serves index.html to a
+ *   request that presents the cookie, so a probe that stops at the redirect
+ *   sees an empty body and would call a healthy harness "not dsh".
+ * - A 401 whose body is the harness's own auth notice counts as dsh. The
+ *   service is up and answering; it simply has not been handed a token yet.
+ *   Treating that as "not dsh" made the reuse path reject its own service and
+ *   respawn on every connect.
+ * @param {string} url - target URL (may carry the one-shot `token` query).
+ * @param {object} options - headers to send, remaining redirect hops.
+ * @returns {Promise<{up: boolean, isDsh: boolean}>}
+ */
+function probeOnce(url, { headers = null, hops = 3 } = {}) {
   return new Promise(resolve => {
-    const request = http.get(url, { timeout: 2000 }, response => {
+    const options = { timeout: 2000 }
+    if (headers !== null && headers !== undefined) options.headers = headers
+    const request = http.get(url, options, response => {
       const chunks = []
       response.on('data', chunk => chunks.push(chunk))
       response.on('end', () => {
-        resolve({ up: true, isDsh: Buffer.concat(chunks).toString('utf8').includes('__DSH_BOOT__') })
+        const body = Buffer.concat(chunks).toString('utf8')
+        const status = response.statusCode ?? 0
+        const location = response.headers.location
+        if (hops > 0 && status >= 300 && status < 400 && typeof location === 'string' && location !== '') {
+          let next = ''
+          try {
+            next = new URL(location, url).href
+          } catch {
+            next = ''
+          }
+          const cookies = response.headers['set-cookie']
+          const carried = Array.isArray(cookies) && cookies.length > 0
+            ? { cookie: cookies.map(entry => String(entry).split(';')[0]).join('; ') }
+            : headers
+          if (next !== '') {
+            resolve(probeOnce(next, { headers: carried, hops: hops - 1 }))
+            return
+          }
+        }
+        resolve({
+          up: true,
+          isDsh: body.includes('__DSH_BOOT__')
+            || (status === 401 && body.includes('dsh web authentication required')),
+          // True when the service answered with the harness's own auth
+          // notice: it is up, but this caller holds neither a launch token
+          // nor a live session cookie, so a window pointed at it would
+          // render nothing but the 401 page. Callers that have a token URL
+          // to present can ignore this; those that do not must restart the
+          // service to obtain one.
+          needsAuth: status === 401 && body.includes('dsh web authentication required'),
+        })
       })
-      response.on('error', () => resolve({ up: false, isDsh: false }))
+      response.on('error', () => resolve({ up: false, isDsh: false, needsAuth: false }))
     })
     request.on('timeout', () => {
       request.destroy()
-      resolve({ up: false, isDsh: false })
+      resolve({ up: false, isDsh: false, needsAuth: false })
     })
-    request.on('error', () => resolve({ up: false, isDsh: false }))
+    request.on('error', () => resolve({ up: false, isDsh: false, needsAuth: false }))
   })
 }
 
@@ -145,6 +195,33 @@ function urlPort(url) {
     return Number.isInteger(port) && port > 0 ? port : 0
   } catch {
     return 0
+  }
+}
+
+/**
+ * Move a `dsh web` URL onto another loopback port, keeping everything that
+ * makes it authenticated (its `token` query).
+ *
+ * An ssh device reaches the remote service through a local forward, so the
+ * URL the remote CLI printed (`127.0.0.1:<remotePort>/?token=…`) names an
+ * authority the browser never talks to. The token itself is port-agnostic —
+ * the service mints a cookie bound to the authority of the request that
+ * presents it — so re-hosting it on the forward port yields a URL that
+ * authenticates against the local end of the tunnel.
+ * @param {string} url - the announced URL (may be '').
+ * @param {number} port - the port the browser actually reaches.
+ * @returns {string} the re-hosted URL, or '' when url is unusable.
+ */
+function rehostUrl(url, port) {
+  if (typeof url !== 'string' || url === '' || !Number.isInteger(port) || port <= 0) return ''
+  try {
+    const parsed = new URL(url)
+    parsed.protocol = 'http:'
+    parsed.hostname = '127.0.0.1'
+    parsed.port = String(port)
+    return parsed.href
+  } catch {
+    return ''
   }
 }
 
@@ -386,6 +463,19 @@ class ConnectionManager extends EventEmitter {
     this.remotePort = null
     this.localVersion = null
     this.reservedLocalPort = null
+    // The URL `dsh web` announced for the service we are serving RIGHT NOW,
+    // launch token included. Since 0.1.2-alpha the index is behind a token-
+    // minted cookie, so a bare `http://127.0.0.1:<port>` answers 401 with
+    // "dsh web authentication required; reopen the URL printed by dsh web" —
+    // exactly what the shell used to hand its windows. Empty until a spawn
+    // (or an adopted service's state file) supplies one; url() falls back to
+    // the bare form when it is.
+    this.localWebUrl = ''
+    this.remoteWebUrl = ''
+    // The URL the remote CLI printed verbatim (authority = the REMOTE port),
+    // kept so it can be re-hosted onto whichever local port the ssh tunnel
+    // ends up using. The token survives the move; the authority must change.
+    this.remoteAnnouncedUrl = ''
     // Bumped by connect()/stop()/resetService(); stale close watchers and
     // retry timers from a previous connect generation must never spawn a
     // second service or clobber the current child reference.
@@ -405,8 +495,17 @@ class ConnectionManager extends EventEmitter {
     const settings = this.getSettings()
     // The window always follows the port that actually serves: the fallback
     // port for a local instance, or the fallback forward port for a tunnel.
-    if (settings.mode === 'ssh') return `http://127.0.0.1:${this.localPort ?? settings.ssh.localPort}`
-    return `http://127.0.0.1:${this.localPort ?? settings.local.port}`
+    const port = settings.mode === 'ssh'
+      ? this.localPort ?? settings.ssh.localPort
+      : this.localPort ?? settings.local.port
+    const fallback = `http://127.0.0.1:${port}`
+    const announced = settings.mode === 'ssh' ? this.remoteWebUrl : this.localWebUrl
+    if (announced === '') return fallback
+    // The token belongs to the service that printed it. A restart moves the
+    // service to a new OS-chosen port, and presenting a dead service's token
+    // to whatever now owns that port would only earn a 401 — so the announced
+    // URL is honored only while it names the port that is actually serving.
+    return urlPort(announced) === urlPort(fallback) ? announced : fallback
   }
 
   /**
@@ -772,6 +871,9 @@ class ConnectionManager extends EventEmitter {
     this.localPort = null
     this.remotePort = null
     this.localVersion = null
+    this.localWebUrl = ''
+    this.remoteWebUrl = ''
+    this.remoteAnnouncedUrl = ''
     this.machineId = null
     this.stopOwnedChildren()
     this.releaseReservedPorts()
@@ -848,6 +950,10 @@ class ConnectionManager extends EventEmitter {
     this.localPort = null
     this.remotePort = null
     this.localVersion = null
+    // The service these tokens belong to is going away with the reset.
+    this.localWebUrl = ''
+    this.remoteWebUrl = ''
+    this.remoteAnnouncedUrl = ''
     this.releaseReservedPorts()
     this.stopped = false
     this.setStatus({ state: 'idle', detail: '后端服务已重置', serviceOwner: 'none' })
@@ -999,21 +1105,46 @@ class ConnectionManager extends EventEmitter {
     // repo — it just resolves the active runtime and serves it.
     const version = await this.serviceVersion(settings)
     const state = this.readLocalState(settings)
+    // Every branch below re-derives the served URL; a token left over from a
+    // service that is no longer running must never reach a window.
+    this.localWebUrl = ''
 
     // Reuse a previously owned service when it still matches this build: same
     // version fingerprint AND a dsh service still answering on its port.
     if (state !== null && state.version === version) {
-      const url = `http://127.0.0.1:${state.port}`
+      // Prefer the URL this service announced when we spawned it — it carries
+      // the launch token that mints the browser cookie. It is only trustworthy
+      // while the recorded pid is still the live owner: another process that
+      // inherited this port minted its own token, and the state file's copy
+      // would then be stale (harmless — it just 401s — but the bare URL with
+      // a still-valid cookie is the better bet).
+      const recorded = typeof state.url === 'string' && state.url !== ''
+        && pidAlive(state.pid) && urlPort(state.url) === state.port
+        ? state.url
+        : ''
+      const url = recorded !== '' ? recorded : `http://127.0.0.1:${state.port}`
       const probe = await probeOnce(url)
-      if (probe.up && probe.isDsh) {
+      // A service we cannot authenticate against is no better than no
+      // service. Without a token URL to present (and with no live browser
+      // cookie for this authority — guaranteed when the port just changed,
+      // since the cookie is bound to it) the window would only ever render
+      // the 401 notice. Fall through and restart to obtain a fresh token
+      // instead of reporting a "successful" connect that shows nothing.
+      const authenticated = !(probe.needsAuth === true && recorded === '')
+      if (probe.needsAuth === true && recorded === '') {
+        this.log(`已运行的 dsh web（端口 ${state.port}）要求启动令牌且本地无可用票据，重启以获取新的认证 URL…`)
+        this.localWebUrl = ''
+      }
+      if (probe.up && probe.isDsh && authenticated) {
         this.localPort = state.port
         this.localVersion = version
+        this.localWebUrl = recorded
         this.log(`复用已运行的 dsh web（端口 ${state.port}，版本 ${version.slice(0, 8)}）`)
         // Sweep strays before declaring ready, same reasoning as the remote
         // twin: the reuse path is the only one a healthy device ever takes, so
         // a second host over this home would otherwise never be evicted.
         await this.reapLocalHosts(settings, state.pid).catch(() => 0)
-        this.setStatus({ state: 'ready', url, detail: '已连接（复用已运行服务）', serviceOwner: 'external' })
+        this.setStatus({ state: 'ready', url: this.url(), detail: '已连接（复用已运行服务）', serviceOwner: 'external' })
         return
       }
     }
@@ -1045,13 +1176,30 @@ class ConnectionManager extends EventEmitter {
       },
     })
     if (peer !== null) {
-      this.localPort = peer.port
-      this.localVersion = version
-      const url = `http://127.0.0.1:${peer.port}`
-      this.log(`跟随其他终端已启动的 dsh web（端口 ${peer.port}）`)
-      await this.reapLocalHosts(settings, peer.pid).catch(() => 0)
-      this.setStatus({ state: 'ready', url, detail: `已连接（跟随其他终端，端口 ${peer.port}）`, serviceOwner: 'external' })
-      return
+      // The peer shell recorded the token URL its own spawn announced in the
+      // same state file we just read, so this service is reachable with a
+      // token — adopt it instead of falling back to the bare port.
+      const peerState = this.readLocalState(settings)
+      const peerToken = peerState !== null && typeof peerState.url === 'string'
+        && urlPort(peerState.url) === peer.port
+        ? peerState.url
+        : ''
+      // Following a peer we cannot authenticate against would park the
+      // window on the 401 page. Take over with our own spawn instead.
+      const peerProbe = await probeOnce(peerToken !== '' ? peerToken : `http://127.0.0.1:${peer.port}`)
+      const peerUsable = peerProbe.up && peerProbe.isDsh
+        && !(peerProbe.needsAuth === true && peerToken === '')
+      if (!peerUsable) {
+        this.log(`其他终端的 dsh web（端口 ${peer.port}）无法完成认证，改为自行启动…`)
+      } else {
+        this.localPort = peer.port
+        this.localVersion = version
+        this.localWebUrl = peerToken
+        this.log(`跟随其他终端已启动的 dsh web（端口 ${peer.port}）`)
+        await this.reapLocalHosts(settings, peer.pid).catch(() => 0)
+        this.setStatus({ state: 'ready', url: this.url(), detail: `已连接（跟随其他终端，端口 ${peer.port}）`, serviceOwner: 'external' })
+        return
+      }
     }
 
     // So: clear every host over this dsh home and start a known-good one. The
@@ -1147,6 +1295,10 @@ class ConnectionManager extends EventEmitter {
     // that line arrives so url() never returns port 0.
     this.localVersion = serveVersion
     this.localPort = port === 0 ? null : port
+    // Drop the previous spawn's token URL before this one announces its own:
+    // a token minted for the service being replaced must never be handed to
+    // the window while this spawn is still booting.
+    this.localWebUrl = ''
     // Serve from the atomically-activated runtime when one exists; otherwise
     // fall back to the source checkout (first run / dirty-worktree builds).
     const runtimeDir = runtimeStore.localActiveRuntimeDir(settings) ?? settings.local.repoDir
@@ -1198,7 +1350,13 @@ class ConnectionManager extends EventEmitter {
         }
         this.log(`[web] ${line}`)
         const parsed = runtimeStore.parseDshWebUrl(line)
-        if (parsed !== null && parsed.port > 0) resolvePort(parsed.port)
+        if (parsed !== null && parsed.port > 0) {
+          // Keep the ANNOUNCED url, not just its port: it carries the launch
+          // token that mints the browser cookie. Logging the bare port keeps
+          // the token out of the service log.
+          this.localWebUrl = parsed.url
+          resolvePort(parsed.port)
+        }
       },
     })
     this.localChild = service.child
@@ -1293,6 +1451,9 @@ class ConnectionManager extends EventEmitter {
         pid: servicePid ?? service.child.pid,
         port: actualPort,
         version: serveVersion,
+        // Persisted so a later connect that adopts this very service (same
+        // pid, still alive) can present its token instead of a bare port.
+        url: this.localWebUrl,
       })
       this.log(`dsh web 已监听端口 ${actualPort}。`)
     } catch (error) {
@@ -1393,6 +1554,10 @@ class ConnectionManager extends EventEmitter {
     // a remote git repo — it just resolves the active runtime and serves it.
     const version = await this.serviceVersion(settings)
     const state = await this.readRemoteState(settings)
+    // Re-derived by whichever branch below adopts a service; a token minted
+    // for a remote service that has since died must never reach a window.
+    this.remoteWebUrl = ''
+    this.remoteAnnouncedUrl = ''
 
     // Deliberately NOT serialized under a remote lock. A lock here buys
     // nothing that matters and costs a failure mode we have already been
@@ -1428,8 +1593,21 @@ class ConnectionManager extends EventEmitter {
       if (await this.remoteProbePort(settings, fresh.port)) {
         this.remotePort = fresh.port
         await this.startTunnelOnFreePort(settings, fresh.port)
+        // Re-host the token this service announced onto the LOCAL end of the
+        // tunnel: that is the authority the browser presents, and therefore
+        // the one the service binds the session cookie to.
+        this.remoteWebUrl = rehostUrl(fresh.url ?? '', this.localPort)
+        const token = this.remoteWebUrl
         const probe = await probeOnce(this.url())
-        if (probe.up && probe.isDsh) {
+        // Same rule as the local twin: a remote service we cannot
+        // authenticate against is not reusable — restart it for a fresh
+        // token rather than reporting a connect that renders the 401 page.
+        const authenticated = !(probe.needsAuth === true && token === '')
+        if (probe.needsAuth === true && token === '') {
+          this.log(`远端 dsh web（端口 ${fresh.port}）要求启动令牌且本地无可用票据，重启以获取新的认证 URL…`)
+          this.remoteWebUrl = ''
+        }
+        if (probe.up && probe.isDsh && authenticated) {
           this.log(`复用远端 dsh web（端口 ${fresh.port}，版本 ${version.slice(0, 8)}）`)
           // Sweep strays BEFORE declaring ready. This is the only path that
           // runs on every healthy connect, so it is the only place a second
@@ -1475,6 +1653,10 @@ class ConnectionManager extends EventEmitter {
       this.log(`跟随其他终端已启动的远端 dsh web（端口 ${peer.port}）`)
       this.remotePort = peer.port
       await this.startTunnelOnFreePort(settings, peer.port)
+      // The peer shell recorded the URL its own spawn announced; adopt it on
+      // this shell's forward port.
+      const peerState = await this.readRemoteState(settings)
+      this.remoteWebUrl = rehostUrl(peerState?.url ?? '', this.localPort)
       const url = this.url()
       const ready = await waitReady(url)
       await this.reapStrayRemoteHosts(settings, peer.pid).catch(() => 0)
@@ -1498,6 +1680,9 @@ class ConnectionManager extends EventEmitter {
 
     this.remotePort = remotePort
     await this.startTunnelOnFreePort(settings, remotePort)
+    // Move the freshly announced token URL onto the local forward port so the
+    // window opens an authenticated URL instead of a bare one.
+    this.remoteWebUrl = rehostUrl(this.remoteAnnouncedUrl, this.localPort)
     const url = this.url()
     const ready = await waitReady(url)
     this.setStatus({
@@ -1950,10 +2135,13 @@ class ConnectionManager extends EventEmitter {
     const pid = Number((pidResult.lines[0] ?? '0').trim())
     if (!Number.isInteger(pid) || pid <= 0) throw new Error('远程服务 pid 读取失败。')
     this.remotePort = announced.port
+    // Kept verbatim (remote authority) so a later shell can re-host it onto
+    // its own forward port — see `rehostUrl`.
+    this.remoteAnnouncedUrl = announced.url
     // writeRemoteState now surfaces a failed remote write instead of
     // silently leaving the stale state file behind (the cause of "port in
     // state never updates" reports).
-    const written = await this.writeRemoteState(settings, { pid, port: announced.port, version })
+    const written = await this.writeRemoteState(settings, { pid, port: announced.port, version, url: announced.url })
     if (written !== true) throw new Error('远程服务状态写入失败：远端 state 文件不可写。')
     this.log(`远程 dsh web 已监听端口 ${announced.port}。`)
     return announced.port
@@ -1988,6 +2176,7 @@ module.exports = {
   ConnectionManager,
   probeOnce,
   waitReady,
+  rehostUrl,
   dshWebProcesses,
   listeningLoopbackPorts,
   processUsesHome,
