@@ -120,5 +120,5 @@ jobs:
           tag_name: ${{ steps.tag.outputs.ref }}
           draft: ${{ inputs.draft }}
           generate_release_notes: true
-          fail_on_unmatched_globs: true
+          fail_on_unmatched_files: true
           files: release-assets/*
