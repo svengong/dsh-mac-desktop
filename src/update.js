@@ -654,11 +654,47 @@ class Updater {
       )
       if (pnpmInstall.code !== 0) throw new Error(`远程 pnpm 安装失败：${pnpmInstall.lines.join('\n')}`)
     }
+    await this.publishRemotePnpm(settings)
     const verify = await this.connection.remoteRun(target, `${REMOTE_PREFIX} node --version && pnpm --version`, { timeoutMs: 60_000 })
     if (verify.code !== 0 || firstLineMatching(verify.lines, engineOk) === '') {
       throw new Error(`远程自包含工具链安装后仍不可用：${verify.lines.join('\n')}`)
     }
     this.onLine(`远程自包含工具链就绪：${verify.lines.map(line => line.trim()).filter(Boolean).join('，')}`)
+  }
+
+  /**
+   * Publish the remote pnpm into the portable node's own bin directory.
+   *
+   * `npm install --prefix ~/.dsh-tools` puts the shim in
+   * `~/.dsh-tools/node_modules/.bin`, which only a host whose launch PATH was
+   * built by a shell generation that exports that directory can see — and a
+   * PATH is baked into a running process, so no later fix reaches a host that
+   * is already up. That is exactly how the plugin market reported "pnpm not
+   * found on PATH" for a pnpm that had been installed all along: the market's
+   * probe searches `~/.dsh-tools/node/bin` (first on every generation's PATH,
+   * and its own `nodeBinDir`) but not `node_modules/.bin`, and the live host
+   * predated that export. Linking here heals such a host without a restart,
+   * because the directory is already on its PATH.
+   *
+   * The link is relative so the whole ~/.dsh-tools tree stays movable, and it
+   * points at npm's own `.bin` shim rather than a versioned entry file
+   * (`pnpm.mjs` today, `pnpm.cjs` before) so the layout survives a pnpm bump.
+   * A remote with a compatible system node and no portable one is left alone:
+   * it has no `node/bin` to publish into, and its launch PATH carries
+   * `node_modules/.bin` directly.
+   */
+  async publishRemotePnpm(settings) {
+    const target = settings.ssh.host
+    const result = await this.connection.remoteRun(target, [
+      'D="$HOME"/.dsh-tools;',
+      'if [ ! -d "$D"/node/bin ] || [ -e "$D"/node/bin/pnpm ] || [ ! -e "$D"/node_modules/.bin/pnpm ]; then exit 0; fi;',
+      'ln -s ../../node_modules/.bin/pnpm "$D"/node/bin/pnpm;',
+      'echo linked;',
+    ].join(' '), { timeoutMs: 20_000 })
+    if (result.code !== 0) throw new Error(`远程 pnpm 入口发布失败：${result.lines.join('\n')}`)
+    if (result.lines.some(line => line.trim() === 'linked')) {
+      this.onLine('已把 pnpm 链接到远端 ~/.dsh-tools/node/bin（供已在运行的 dsh 进程直接解析）。')
+    }
   }
 
   /** The pnpm version pinned in the repo's package.json `packageManager` field. */
