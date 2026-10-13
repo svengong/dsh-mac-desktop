@@ -331,6 +331,63 @@ async function main() {
   assert.strictEqual(foreignProbe.needsAuth, false, 'a generic 401 must not claim to be a harness auth gate')
   foreignServer.close()
 
+  // The remote update flow's visible failure: restarting the service mints a
+  // NEW launch token, so the one the previous service printed is dead — and
+  // the ready status is what every window navigates to. This server accepts
+  // only the token it minted, the way the real 0.2.1 harness does (303 to its
+  // own token, 401 with the auth notice to anything else).
+  const liveToken = 'fresh-token'
+  const restartServer = http.createServer((req, res) => {
+    const url = new URL(req.url, 'http://127.0.0.1')
+    if (url.searchParams.get('token') === liveToken) {
+      res.writeHead(303, { location: '/', 'set-cookie': 'dsh_session=live; Path=/' })
+      res.end()
+      return
+    }
+    if (String(req.headers.cookie ?? '').includes('dsh_session=live')) {
+      res.writeHead(200, { 'content-type': 'text/html' })
+      res.end('<html>__DSH_BOOT__</html>')
+      return
+    }
+    res.writeHead(401, { 'content-type': 'text/plain' })
+    res.end('dsh web authentication required; reopen the URL printed by dsh web.\n')
+  })
+  await new Promise(resolve => restartServer.listen(0, '127.0.0.1', resolve))
+  const forwardPort = restartServer.address().port
+  const restartShell = shellFor('ssh')
+  // The forward the restart rebuilds, and the service it replaces: the
+  // pre-restart URL carries a token the PREVIOUS harness minted.
+  restartShell.localPort = forwardPort
+  restartShell.remotePort = 41888
+  restartShell.remoteWebUrl = `http://127.0.0.1:${forwardPort}/?token=dead-token`
+  restartShell.restartRemoteService = async () => {
+    restartShell.remotePort = 36067
+    restartShell.remoteAnnouncedUrl = `http://127.0.0.1:36067/?token=${liveToken}`
+  }
+  restartShell.startTunnelOnFreePort = async () => { restartShell.localPort = forwardPort }
+  const restartStatuses = []
+  restartShell.on('status', status => restartStatuses.push(status))
+  await restartShell.restartService()
+  restartShell.stopHealthMonitor()
+  const readyAfterRestart = restartStatuses.filter(status => status.state === 'ready').pop()
+  assert.ok(readyAfterRestart !== undefined, 'a service restart must report ready')
+  assert.strictEqual(
+    readyAfterRestart.url,
+    `http://127.0.0.1:${forwardPort}/?token=${liveToken}`,
+    'a restart must re-host the token the NEW service announced, never the replaced one',
+  )
+  // The assertion that actually protects the window: the URL handed out has to
+  // authenticate. One carrying the replaced service's token lands on the 401
+  // notice instead — the exact page this test exists to keep off the screen.
+  const postRestartProbe = await probeOnce(readyAfterRestart.url)
+  assert.strictEqual(postRestartProbe.isDsh, true, 'the post-restart URL must reach the harness')
+  assert.strictEqual(postRestartProbe.needsAuth, false, 'the post-restart URL must authenticate, not show the 401 notice')
+  // …and the replaced service's token really is refused here, so the assertion
+  // above cannot pass by accident.
+  const deadTokenProbe = await probeOnce(`http://127.0.0.1:${forwardPort}/?token=dead-token`)
+  assert.strictEqual(deadTokenProbe.needsAuth, true, 'a token the live service did not mint must be rejected')
+  restartServer.close()
+
   // runner process registry: killActiveChildren must terminate every tracked
   // child (in-flight build, service, tunnel) so app quit never orphans one.
   const sleeper = spawnService({ cmd: '/bin/sleep', args: ['30'] })
@@ -526,19 +583,56 @@ async function main() {
   // writeRemoteState contract: a successful remote write round-trips the
   // exact state back and returns true; a failed remote command returns
   // false instead of silently leaving a stale state file behind.
+  //
+  // The echo below reproduces what the remote `printf` would have produced
+  // rather than returning a canned string, because the field this contract
+  // now has to get right IS the announced URL: it carries the launch token a
+  // later shell needs to adopt the service, and it is the one field that
+  // travels through a double-quoted shell argument.
+  let lastStateJson = ''
   const stateEchoRun = async (_host, command) => {
-    if (command.includes('desktop-web.state.json') && command.includes('cat')) {
-      return { code: 0, lines: ['{"pid":12345,"port":23456,"version":"npm0.1.1-rc.2"}'] }
-    }
-    if (command.includes('desktop-web.state.json')) {
-      return { code: 0, lines: [] }
-    }
-    return { code: 0, lines: [] }
+    if (!command.includes('desktop-web.state.json')) return { code: 0, lines: [] }
+    if (!command.includes('printf')) return { code: 0, lines: [] }
+    const match = /printf '([^']*)'\s+([\s\S]*?)\s+>/.exec(command)
+    if (match === null) return { code: 0, lines: [] }
+    const values = [...match[2].matchAll(/"([^"]*)"/g)].map(entry => entry[1])
+    lastStateJson = match[1].replace(/\\n$/, '').replace(/%s/g, () => values.shift() ?? '')
+    return { code: 0, lines: [lastStateJson] }
   }
   assert.strictEqual(
-    await runtimeStore.writeRemoteState(remoteSettings, stateEchoRun, { pid: 12345, port: 23456, version: 'npm0.1.1-rc.2' }),
+    await runtimeStore.writeRemoteState(remoteSettings, stateEchoRun, {
+      pid: 12345,
+      port: 23456,
+      version: 'npm0.1.1-rc.2',
+      url: 'http://127.0.0.1:36067/?token=abc-123',
+    }),
     true,
   )
+  // The token URL must survive the trip into the state file verbatim: it is
+  // what lets the next shell reuse this service instead of restarting it.
+  assert.strictEqual(JSON.parse(lastStateJson).url, 'http://127.0.0.1:36067/?token=abc-123')
+  // …and nothing that could end the shell argument or start an expansion may
+  // reach it: the URL is interpolated into the remote command unquoted.
+  assert.strictEqual(
+    await runtimeStore.writeRemoteState(remoteSettings, stateEchoRun, {
+      pid: 12345,
+      port: 23456,
+      version: 'npm0.1.1-rc.2',
+      url: 'http://127.0.0.1:1/?token=x"; touch /tmp/pwned; echo "`id`$HOME',
+    }),
+    true,
+  )
+  const sanitizedUrl = JSON.parse(lastStateJson).url
+  // The URL lands inside a double-quoted printf argument, so exactly the
+  // characters that would end that argument (`"` and `\`), expand inside it
+  // (`$` and a backtick), or break the JSON literal around it (whitespace and
+  // control characters) have to be gone. `;` and `&` are literal inside double
+  // quotes, so the alphabet stays faithful to URLs that contain them.
+  assert.ok(
+    !/["`$\\\s\u0000-\u001f]/.test(sanitizedUrl),
+    `the written URL must be shell- and JSON-inert: ${sanitizedUrl}`,
+  )
+  assert.ok(sanitizedUrl.startsWith('http://127.0.0.1:1/?token=x'), 'the token itself must survive the sanitizer')
   const stateFailRun = async () => ({ code: 1, lines: ['disk full'] })
   assert.strictEqual(
     await runtimeStore.writeRemoteState(remoteSettings, stateFailRun, { pid: 1, port: 2, version: 'v' }),

@@ -211,25 +211,54 @@ async function readRemoteState(settings, remoteRun) {
   }
 }
 
+/**
+ * Sanitize an announced URL for the remote `printf`.
+ *
+ * Every other field is a number or a version, which only needs the quote
+ * stripping `safeVersion` does. A URL is arbitrary shell text, and it travels
+ * inside a double-quoted printf argument, where `$`, a backtick or a `"` would
+ * be expanded or would end the argument. Keep exactly the character set a
+ * launch URL is built from — scheme, host, port, path, and a query whose token
+ * is base64url — and drop everything else. The result is also JSON-safe, which
+ * is what lets it sit inside the state literal written below.
+ * @param {unknown} value - the URL to write, if any.
+ * @returns {string} the sanitized URL, or '' when there is nothing to write.
+ */
+function safeUrl(value) {
+  if (typeof value !== 'string') return ''
+  return value.replace(/[^A-Za-z0-9._~:/?#@!&*+,;=%-]/g, '').slice(0, 512)
+}
+
 async function writeRemoteState(settings, remoteRun, state) {
   if (!isValidState(state)) return false
   const safeVersion = String(state.version).replace(/[^a-zA-Z0-9._-]/g, '').slice(0, 64) || 'unknown'
   // Trailing \n is load-bearing: remoteRun wraps commands in payload
   // markers and matches them per line; a newline-less file would fuse the
   // state JSON with the END marker on one line and break payload parsing.
+  //
+  // The announced URL is recorded alongside pid/port so a LATER shell can
+  // adopt the running service AND its launch token, exactly as the local twin
+  // does: without it, every reconnect to a healthy remote service had to
+  // restart it to obtain a token, and a second shell following a peer landed
+  // on the 401 page. Recording it adds no exposure that the launch did not
+  // already create — the same URL is redirected into `desktop-web.port` on the
+  // same host — and the reuse path verifies the token against the live service
+  // before handing it to a window (see `tokenAccepted` in connection.js).
   const result = await remoteRun(
     settings.ssh.host,
-    `printf '{\"pid\":%s,\"port\":%s,\"version\":\"%s\"}\n' "${state.pid}" "${state.port}" "${safeVersion}" > ${REMOTE_STATE_FILE} && cat ${REMOTE_STATE_FILE}`,
+    `printf '{\"pid\":%s,\"port\":%s,\"version\":\"%s\",\"url\":\"%s\"}\n' "${state.pid}" "${state.port}" "${safeVersion}" "${safeUrl(state.url)}" > ${REMOTE_STATE_FILE} && cat ${REMOTE_STATE_FILE}`,
     { timeoutMs: 15_000 },
   )
   if (result.code !== 0) return false
   // Verify the round trip: the file must contain exactly what we wrote.
   // A write that silently fails leaves a stale state whose port no longer
   // matches the running service — the exact "port in state never updates"
-  // symptom.
+  // symptom. The URL is checked too: a mangled token would survive as a state
+  // whose recorded service can never be authenticated against again.
   try {
     const written = JSON.parse(result.lines.join('\n'))
     return isValidState(written) && written.pid === state.pid && written.port === state.port
+      && written.url === safeUrl(state.url)
   } catch {
     return false
   }

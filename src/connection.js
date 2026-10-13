@@ -226,6 +226,38 @@ function rehostUrl(url, port) {
 }
 
 /**
+ * Whether a LIVE service still accepts a recorded launch token.
+ *
+ * `probeOnce` cannot answer this question: it presents no cookie, so a token
+ * this service minted and one a replacement no longer honours end on the same
+ * 401 notice. The token is checkable in a single hop — the service answers 303
+ * to a token it minted and 401 to anything else — so a caller holding a token
+ * it read off disk asks that instead of trusting the string.
+ *
+ * Only a decision the service actually made counts: any other status (or no
+ * answer at all) returns null, and callers treat null as "leave it alone".
+ * Guessing "stale" there would restart a healthy service for nothing.
+ * @param {string} url - the re-hosted token URL to test.
+ * @returns {Promise<boolean|null>} true/false when the service decided, null when it did not.
+ */
+function tokenAccepted(url) {
+  return new Promise(resolve => {
+    const request = http.get(url, { timeout: 2000 }, response => {
+      const status = response.statusCode ?? 0
+      response.resume()
+      if (status >= 300 && status < 400) resolve(true)
+      else if (status === 401 || status === 403) resolve(false)
+      else resolve(null)
+    })
+    request.on('timeout', () => {
+      request.destroy()
+      resolve(null)
+    })
+    request.on('error', () => resolve(null))
+  })
+}
+
+/**
  * Resolve the real PID listening on a local loopback port, falling back to
  * `lsof` when the state file's recorded pid has gone stale (e.g. an
  * externally-started service the shell adopted but whose state was never
@@ -1005,6 +1037,15 @@ class ConnectionManager extends EventEmitter {
         // then rebuild the local forward to that exact port.
         await this.restartRemoteService(settings)
         await this.startTunnelOnFreePort(settings, this.remotePort)
+        // A restart mints a NEW launch token, so the one the previous service
+        // printed is dead the moment its replacement takes over — and the
+        // ready status below is exactly what every window navigates to. Re-host
+        // the URL THIS launch announced onto the rebuilt forward before the
+        // readiness probe, so the probe authenticates (303 → 200) and the
+        // window opens a live token instead of the harness's "dsh web
+        // authentication required" notice. Leaving the pre-restart URL in place
+        // here is what made the remote update flow end on that page.
+        this.remoteWebUrl = rehostUrl(this.remoteAnnouncedUrl, this.localPort)
         await waitReady(this.url())
         // Emit the new URL: windows follow the port that actually serves, and
         // a stale title/URL after a restart is a dead page for every window.
@@ -1599,12 +1640,27 @@ class ConnectionManager extends EventEmitter {
         this.remoteWebUrl = rehostUrl(fresh.url ?? '', this.localPort)
         const token = this.remoteWebUrl
         const probe = await probeOnce(this.url())
-        // Same rule as the local twin: a remote service we cannot
-        // authenticate against is not reusable — restart it for a fresh
-        // token rather than reporting a connect that renders the 401 page.
-        const authenticated = !(probe.needsAuth === true && token === '')
-        if (probe.needsAuth === true && token === '') {
-          this.log(`远端 dsh web（端口 ${fresh.port}）要求启动令牌且本地无可用票据，重启以获取新的认证 URL…`)
+        // Same rule as the local twin: a remote service we cannot authenticate
+        // against is not reusable — restart it for a fresh token rather than
+        // reporting a connect that renders the 401 page.
+        //
+        // A recorded token is only good while the service that minted it is
+        // still the one answering: dsh-market restarts the host by itself and
+        // leaves our state naming the previous launch, and the cookie-less
+        // probe cannot tell the two apart. Ask the service directly — and
+        // restart when it answers "not mine", which is what this path did
+        // unconditionally back when the token could not survive in the state
+        // at all. Nothing here can fall back on a browser cookie the way the
+        // local twin can: the forward port changes with every restart, so the
+        // cookie that authenticated the previous service is bound to an
+        // authority that no longer exists.
+        const replaced = token !== '' && (await tokenAccepted(token)) === false
+        const unauthenticated = replaced || (probe.needsAuth === true && token === '')
+        const authenticated = !unauthenticated
+        if (unauthenticated) {
+          this.log(replaced
+            ? `复用远端 dsh web（端口 ${fresh.port}）的启动令牌已随重启失效，重启以获取新的认证 URL…`
+            : `远端 dsh web（端口 ${fresh.port}）要求启动令牌且本地无可用票据，重启以获取新的认证 URL…`)
           this.remoteWebUrl = ''
         }
         if (probe.up && probe.isDsh && authenticated) {
