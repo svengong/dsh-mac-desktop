@@ -417,12 +417,14 @@ async function cancelSessionTask(session) {
     new Promise(resolve => setTimeout(resolve, TASK_CANCEL_TIMEOUT_MS)),
   ])
 
-  // Local-mode update intents are now settled: any leftover pending file
-  // would be resumable garbage. This is deliberately idempotent — the
-  // pipeline's finally also clears it, and worker/cleanup paths clear it too.
+  // Update intents are now settled: any leftover pending file would be
+  // resumable garbage. This is deliberately idempotent — the pipeline's
+  // finally also clears it, and worker/cleanup paths clear it too. An ssh
+  // update records its intent in this local dshHome as well, so this is not
+  // local-mode-only.
   try {
     const view = settingsViewFor(session.key)
-    if (view.mode === 'local') runtimeStore.clearPendingUpdate(view)
+    runtimeStore.clearPendingUpdate(view)
     runtimeStore.clearCancelToken(view)
   } catch {
     // Best-effort.
@@ -691,6 +693,15 @@ function resumePendingUpdate() {
   const view = settingsViewFor('local')
   const pending = runtimeStore.readPendingUpdate(view)
   const status = runtimeStore.readUpdateStatus(view)
+  // An intent written by an SSH-driven install lives in this same local
+  // dshHome, but its target was a REMOTE host and its worker records a remote
+  // pid. Resuming it here would silently install that version on this Mac, so
+  // drop it instead. A missing mode is a legacy/local file: keep resuming.
+  if (pending !== null && pending.mode !== '' && pending.mode !== 'local') {
+    runtimeStore.clearPendingUpdate(view)
+    runtimeStore.clearUpdateStatus(view)
+    return
+  }
   if (pending === null && status === null) return
   const session = sessionFor('local')
   const liveWorker = status !== null && Number.isInteger(status.pid) && pidAliveLocal(status.pid)
@@ -2435,10 +2446,12 @@ const actions = {
     }
 
     // 5) Clear the persistent update intent so a later launch never offers
-    //    to resume a cancelled update. The cancel token is NOT cleared here
-    //    when a worker is running: the worker still needs it (it is its
-    //    cooperative cancel signal) and clears it itself when it settles.
-    if (view.mode === 'local') runtimeStore.clearPendingUpdate(view)
+    //    to resume a cancelled update. An ssh update writes the intent into
+    //    this local dshHome too, so this is NOT local-mode-only. The cancel
+    //    token is NOT cleared here when a worker is running: the worker still
+    //    needs it (it is its cooperative cancel signal) and clears it itself
+    //    when it settles.
+    runtimeStore.clearPendingUpdate(view)
     if (session.workerPollTimer === null) runtimeStore.clearCancelToken(view)
 
     // 6) Wait for the pipeline to settle (bounded by the task timeout), then

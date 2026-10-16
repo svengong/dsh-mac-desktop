@@ -1798,23 +1798,37 @@ class ConnectionManager extends EventEmitter {
   }
 
   /**
-   * Whether a remote port answers with the dsh boot page. Runs ON the remote
+   * Whether a remote port is serving a live dsh service. Runs ON the remote
    * host: the port is not reachable from here until a tunnel is built, which
    * is exactly what we are trying to decide.
+   *
+   * Since 0.1.2-alpha the index sits behind launch-token auth, so a bare
+   * `GET /` does NOT return the boot page: it answers 401 with the harness's
+   * own "dsh web authentication required" notice, and a token URL answers a
+   * 303 with an EMPTY body. A probe that only looked for `__DSH_BOOT__` in
+   * the un-followed body therefore reported a perfectly healthy service as
+   * dead, and every connect reaped and respawned it — the "update/restart
+   * flashes and nothing happens" symptom. Both shapes count as live here;
+   * deciding whether OUR token is still accepted is `tokenAccepted`'s job,
+   * not this probe's.
    *
    * `curl`, not `node -e fetch(...)`: a remote box may ship an ancient node
    * (v12 has no global `fetch`), and the old probe silently answered "no"
    * there — a healthy service was reported dead and reaped on every connect.
+   *
+   * `case` on the body rather than `grep -c`: the remote commands run through
+   * the LOGIN shell, which is `zsh` on many hosts, and this must not depend on
+   * a pipeline's exit status.
    */
   async remoteProbePort(settings, port) {
     if (!Number.isInteger(port) || port <= 0) return false
     const result = await this.remoteRun(
       settings.ssh.host,
-      `curl -s --max-time 5 http://127.0.0.1:${port}/ | grep -c "__DSH_BOOT__"`,
+      `body=$(curl -sL --max-time 5 http://127.0.0.1:${port}/ 2>/dev/null); case "$body" in *__DSH_BOOT__*|*"dsh web authentication required"*) echo 1 ;; *) echo 0 ;; esac`,
       { timeoutMs: 20_000 },
     ).catch(() => null)
     if (result === null || result.code !== 0) return false
-    return result.lines.some(line => /^[1-9]/u.test(line.trim()))
+    return result.lines.some(line => line.trim() === '1')
   }
 
   /**
@@ -1908,9 +1922,20 @@ class ConnectionManager extends EventEmitter {
   async killRemotePids(target, pids) {
     const list = pids.filter(pid => Number.isInteger(pid) && pid > 0).join(' ')
     if (list === '') return []
+    // Every kill loop iterates the LITERAL pid list and matches membership
+    // against `$alive` with `case`. It must NOT iterate `$alive` directly:
+    // these commands run through the remote LOGIN shell, which is `zsh` on
+    // many hosts (and this shell probes zsh first), and zsh does not
+    // word-split an unquoted variable expansion. `for p in $alive` therefore
+    // ran ONCE with the whole list as a single argument, so `kill` saw one
+    // bogus pid and every sweep silently no-opped while still reporting
+    // success — the leaked-orphan bug. Literal interpolation splits in both
+    // shells, and `case` needs no splitting at all; killing is restricted to
+    // pids that were alive up front so a recycled pid is never signalled.
+    const killSnippet = signal => `for p in ${list}; do case " $alive " in *" $p "*) ${signal} ;; esac; done`
     const result = await this.remoteRun(
       target,
-      `alive=""; for p in ${list}; do if kill -0 $p 2>/dev/null; then alive="$alive $p"; fi; done; echo "ALIVE$alive"; if [ -n "$alive" ]; then for p in $alive; do kill $p 2>/dev/null; done; for i in 1 2 3 4 5 6 7 8 9 10; do left=0; for p in $alive; do if kill -0 $p 2>/dev/null; then left=1; fi; done; if [ $left -eq 0 ]; then break; fi; sleep 0.5; done; for p in $alive; do kill -9 $p 2>/dev/null; done; sleep 0.5; fi`,
+      `alive=""; for p in ${list}; do if kill -0 $p 2>/dev/null; then alive="$alive $p"; fi; done; echo "ALIVE$alive"; ${killSnippet('kill $p 2>/dev/null')}; for i in 1 2 3 4 5 6 7 8 9 10; do left=0; for p in ${list}; do case " $alive " in *" $p "*) if kill -0 $p 2>/dev/null; then left=1; fi ;; esac; done; if [ $left -eq 0 ]; then break; fi; sleep 0.5; done; ${killSnippet('kill -9 $p 2>/dev/null')}; sleep 0.5`,
       { timeoutMs: 30_000 },
     ).catch(() => null)
     if (result === null || result.code !== 0) return []

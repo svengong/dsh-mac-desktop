@@ -832,6 +832,11 @@ function readPendingUpdate(settings) {
       intent: pending.intent,
       version: typeof pending.version === 'string' ? pending.version : '',
       startedAt: typeof pending.startedAt === 'string' ? pending.startedAt : '',
+      // The device the intent belongs to. The file always lives in the LOCAL
+      // dshHome, but an ssh-driven install writes it too, and only the local
+      // device can ever be resumed (the remote has no local worker). Legacy
+      // files carry no mode; `''` keeps their historical local treatment.
+      mode: typeof pending.mode === 'string' ? pending.mode : '',
     }
   } catch {
     return null
@@ -846,6 +851,7 @@ function writePendingUpdate(settings, pending) {
       intent: pending.intent,
       version: pending.version ?? '',
       startedAt: pending.startedAt ?? new Date().toISOString(),
+      mode: pending.mode ?? settings.mode ?? '',
     }, null, 2))
     return true
   } catch {

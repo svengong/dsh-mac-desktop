@@ -339,7 +339,13 @@ class Updater {
       // has to wait for its npm child to exit before it can be reaped.
       try {
         const current = this.getSettings()
-        if (current.mode === 'local') {
+        // Clear whenever THIS pipeline wrote the intent — not only in local
+        // mode. The file lives in the local dshHome even for an ssh update
+        // (see `remoteArtifactPipeline`), but `resumePendingUpdate` only ever
+        // resumes the LOCAL device, so a leftover ssh record made the next
+        // launch offer to install that version locally. The old
+        // `mode === 'local'` guard leaked exactly that file.
+        if (this.pendingWritten) {
           runtimeStore.clearPendingUpdate(current)
           runtimeStore.clearCancelToken(current)
         }

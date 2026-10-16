@@ -331,6 +331,65 @@ async function main() {
   assert.strictEqual(foreignProbe.needsAuth, false, 'a generic 401 must not claim to be a harness auth gate')
   foreignServer.close()
 
+  // The remote liveness probe, executed for real. `remoteProbePort` runs ON the
+  // remote host, so its command is reproduced here and run through the local
+  // shell against the same token-gated shape the 0.2.1 harness serves. The old
+  // command (`curl -s ... | grep -c "__DSH_BOOT__"`) counted ZERO against a
+  // healthy service in BOTH shapes — a bare probe answers 401 with the auth
+  // notice, and a token URL answers 303 with an EMPTY body because curl does
+  // not follow redirects by default. Every connect therefore declared a live
+  // service dead, reaped it and respawned: the "restart flashes and nothing
+  // happens" symptom. This asserts the fixed command, including that it does
+  // not depend on word-splitting (it runs under zsh on many hosts).
+  {
+    const authForProbe = http.createServer((req, res) => {
+      const url = new URL(req.url, 'http://127.0.0.1')
+      if (url.searchParams.has('token')) {
+        res.writeHead(303, { location: './', 'set-cookie': 'dsh_session=p; Path=/' })
+        res.end()
+        return
+      }
+      if (String(req.headers.cookie ?? '').includes('dsh_session=p')) {
+        res.writeHead(200, { 'content-type': 'text/html' })
+        res.end('<html>__DSH_BOOT__</html>')
+        return
+      }
+      res.writeHead(401, { 'content-type': 'text/plain' })
+      res.end('dsh web authentication required; reopen the URL printed by dsh web.\n')
+    })
+    await new Promise(resolve => authForProbe.listen(0, '127.0.0.1', resolve))
+    const probePort = authForProbe.address().port
+    // Reproduce the exact remote command builder.
+    let captured = ''
+    const prober = Object.create(ConnectionManager.prototype)
+    prober.remoteRun = async (_target, inner) => {
+      captured = inner
+      const run = await runCommand({ cmd: '/bin/sh', args: ['-c', inner], timeoutMs: 10_000 })
+      return { ...run, lines: run.lines }
+    }
+    assert.strictEqual(await prober.remoteProbePort({ ssh: { host: 'stub' } }, probePort), true,
+      'a token-gated harness must read as LIVE (bare and token shapes alike)')
+    assert.ok(/curl -sL\b/u.test(captured), 'the probe must follow the token redirect (curl -L)')
+    assert.ok(/authentication required/u.test(captured), 'the 401 auth notice must count as live too')
+    assert.ok(!captured.includes("'"), 'the probe command must not use single quotes')
+    authForProbe.close()
+
+    // A dead port and a foreign listener still read as not-dsh, so the fix
+    // cannot resurrect the "reap a healthy service" failure in reverse.
+    assert.strictEqual(await prober.remoteProbePort({ ssh: { host: 'stub' } }, 1), false, 'a dead port is not live')
+    const foreignForProbe = http.createServer((req, res) => {
+      res.writeHead(200, { 'content-type': 'text/html' })
+      res.end('<html>hello</html>')
+    })
+    await new Promise(resolve => foreignForProbe.listen(0, '127.0.0.1', resolve))
+    assert.strictEqual(
+      await prober.remoteProbePort({ ssh: { host: 'stub' } }, foreignForProbe.address().port),
+      false,
+      'an unrelated web server must not be adopted as dsh',
+    )
+    foreignForProbe.close()
+  }
+
   // The remote update flow's visible failure: restarting the service mints a
   // NEW launch token, so the one the previous service printed is dead — and
   // the ready status is what every window navigates to. This server accepts
@@ -825,6 +884,46 @@ async function main() {
     fs.rmSync(emptyHome, { recursive: true, force: true })
   }
 
+  // The kill command itself is the silent-failure surface: the remote commands
+  // run through the remote LOGIN shell, and `remoteLoginShell` probes zsh
+  // FIRST. zsh does NOT word-split an unquoted variable, so the old
+  // `for p in $alive` iterated ONCE with the whole list as one argument —
+  // `kill " 10 20"` failed with rc=1 and every sweep no-opped while still
+  // reporting success. That is the leaked-orphan bug: the log said "cleaned up
+  // pids 1,2,3" while all of them kept running.
+  {
+    let captured = ''
+    const killer = Object.create(ConnectionManager.prototype)
+    killer.log = () => {}
+    killer.remoteRun = async (_target, inner) => {
+      captured = inner
+      return { code: 0, lines: ['ALIVE 10 20'], signal: null }
+    }
+    const killed = await killer.killRemotePids('stub', [10, 20])
+    assert.deepStrictEqual(killed, [10, 20], 'both live pids are reported')
+    // Iterating the LITERAL list splits in every shell; only membership is
+    // tested against the accumulated `$alive`.
+    assert.ok(!/\bin \$alive\b/u.test(captured), 'never iterate $alive directly: zsh will not split it')
+    assert.ok(/\bfor p in 10 20\b/u.test(captured), 'the pid list is interpolated literally')
+    assert.ok(captured.includes('case " $alive " in *" $p "*)'), 'membership is matched with case, not word-splitting')
+    assert.ok(captured.includes('kill $p'), 'a TERM pass runs')
+    assert.ok(captured.includes('kill -9 $p'), 'a KILL pass follows')
+    // No single quotes: `shellQuote` wraps the whole remote command in them.
+    assert.ok(!captured.includes("'"), 'the kill command must not use single quotes')
+  }
+  // Nothing to kill must not cost a round-trip.
+  {
+    let called = false
+    const killer = Object.create(ConnectionManager.prototype)
+    killer.log = () => {}
+    killer.remoteRun = async () => {
+      called = true
+      return { code: 0, lines: [], signal: null }
+    }
+    assert.deepStrictEqual(await killer.killRemotePids('stub', [0, -1, NaN, 'x']), [], 'no valid pid means no call')
+    assert.strictEqual(called, false, 'an empty pid list costs no ssh round-trip')
+  }
+
   // ── local watchParent family: guard wrapper + real service, one group ──
   // Regression (local twin of the reapStrayRemoteHosts bug): spawnLocalService
   // launches dsh web through a watchParent guard shell, so the state file used
@@ -1099,6 +1198,13 @@ async function main() {
   const pending = runtimeStore.readPendingUpdate(homeSettings)
   assert.strictEqual(pending.intent, 'artifact')
   assert.strictEqual(pending.version, '0.1.0-rc.7')
+  // The intent records the device it belongs to. An ssh update writes the
+  // file into this LOCAL dshHome, and only the local device is ever resumed —
+  // so a missing mode has to read as legacy/local, never as "resume anyway".
+  assert.strictEqual(pending.mode, 'local')
+  runtimeStore.writePendingUpdate({ ...homeSettings, mode: 'ssh' }, { intent: 'artifact', version: '0.1.0-rc.8' })
+  assert.strictEqual(runtimeStore.readPendingUpdate(homeSettings).mode, 'ssh', 'an ssh intent is marked as such')
+  runtimeStore.writePendingUpdate(homeSettings, { intent: 'artifact', version: '0.1.0-rc.7' })
   runtimeStore.writeUpdateStatus(homeSettings, { phase: 'downloading', version: '0.1.0-rc.7', logTail: ['line one'] })
   runtimeStore.writeUpdateStatus(homeSettings, { phase: 'installing', logTail: ['line two'] })
   const status = runtimeStore.readUpdateStatus(homeSettings)
