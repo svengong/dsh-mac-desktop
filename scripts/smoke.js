@@ -807,6 +807,48 @@ async function main() {
   assert.ok(!REMOTE_HOST_SCAN.includes("'"), 'the remote scan must not use single quotes')
   assert.ok(REMOTE_HOST_SCAN.includes('$HOME/.dsh/'), 'the remote scan must confine itself to the remote dsh home')
 
+  // The login shell must be the account's REAL one (what sshd runs), not the
+  // most capable shell that merely exists. The old probe walked `zsh, bash,
+  // sh` and took the first hit, so a bash-login box that had zsh installed ran
+  // every remote command under zsh — which never reads ~/.bashrc. PATH then
+  // lost the portable node, `node` fell through to a pre-24.2 build where
+  // `import.meta.main` is undefined, and the dsh CLI became a silent no-op
+  // (rc=0, no output): "闪一下就没".
+  {
+    const { parseRemoteLoginShell, REMOTE_LOGIN_SHELL_PROBE } = require('../src/connection')
+    // The authoritative answer wins even when zsh exists.
+    assert.strictEqual(parseRemoteLoginShell(['/bin/bash']), '/bin/bash', 'the real login shell must win over zsh')
+    assert.strictEqual(parseRemoteLoginShell('/bin/bash\n'), '/bin/bash', 'a raw string is accepted too')
+    assert.strictEqual(parseRemoteLoginShell(['', '  ', '/bin/zsh']), '/bin/zsh', 'blank lines are skipped')
+    // Unusable answers never become the shell: nologin/false and relative or
+    // non-shell paths fall back to the POSIX baseline.
+    for (const bad of [['/usr/sbin/nologin'], ['/bin/false'], ['bash'], ['/usr/bin/python3'], [], [''], ['garbage']]) {
+      assert.strictEqual(parseRemoteLoginShell(bad), '/bin/sh', `${JSON.stringify(bad)} must fall back to /bin/sh`)
+    }
+    assert.strictEqual(parseRemoteLoginShell(undefined), '/bin/sh', 'a missing probe result falls back')
+    // `shellQuote` wraps the whole remote command in single quotes, so an
+    // unescaped one inside the probe would break the ssh invocation.
+    assert.ok(!REMOTE_LOGIN_SHELL_PROBE.includes("'"), 'the login-shell probe must not use single quotes')
+    assert.ok(/getent passwd/u.test(REMOTE_LOGIN_SHELL_PROBE), 'the probe must consult the passwd entry sshd uses')
+  }
+  // Executed for real: the probe must resolve THIS machine's login shell. On
+  // macOS there is no `getent`, so this also covers the $SHELL fallback.
+  {
+    const { parseRemoteLoginShell, REMOTE_LOGIN_SHELL_PROBE } = require('../src/connection')
+    const probed = await runCommand({ cmd: '/bin/sh', args: ['-c', REMOTE_LOGIN_SHELL_PROBE], timeoutMs: 15_000 })
+    assert.strictEqual(probed.code, 0, 'the login-shell probe must succeed')
+    const resolved = parseRemoteLoginShell(probed.lines)
+    assert.ok(resolved.startsWith('/'), `the probe must resolve an absolute shell path, got ${resolved}`)
+    assert.ok(fs.existsSync(resolved), `the resolved shell ${resolved} must exist`)
+    // Only an ENV-provided $SHELL is a fair comparison: `getent` does not exist
+    // on macOS, so the probe legitimately falls back to /bin/bash when $SHELL
+    // is unset (as it can be on a CI runner).
+    const envShell = process.env.SHELL ?? ''
+    if (envShell.startsWith('/')) {
+      assert.strictEqual(resolved, envShell, 'the probe must agree with the account login shell')
+    }
+  }
+
   // The stray sweep answers exactly one question, and it is the one that rots
   // silently: WHICH hosts to signal. It runs on every HEALTHY connect (the
   // reuse fast path returns before the slow path's full sweep), so a wrong

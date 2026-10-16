@@ -409,6 +409,47 @@ async function processGroupOf(pid) {
 const REMOTE_HOST_SCAN = 'ps ax -o pid=,command= 2>/dev/null | grep -E "bin\\.js +web" | grep -v grep | grep -E "^[[:space:]]*[0-9]+[[:space:]]+([^[:space:]]*/)?node([0-9.]*)?[[:space:]]" | sed -E "s/^[[:space:]]*([0-9]+).*/\\1/" | while read p; do uses=$(lsof -Fn -p $p 2>/dev/null | grep -c "^n$HOME/.dsh/"); ports=$(lsof -nP -a -p $p -iTCP -sTCP:LISTEN 2>/dev/null | grep -oE "(127\\.0\\.0\\.1|\\[::1\\]):[0-9]+" | sed -E "s/.*:([0-9]+)$/\\1/" | tr "\\n" "," | sed "s/,$//"); echo "$p|$uses|$ports"; done'
 
 /**
+ * Resolve the shell `sshd` itself would use for this account, on the remote.
+ *
+ * The authoritative source is the passwd entry's login shell (`getent`), which
+ * is what `sshd` executes for a non-interactive command — falling back to
+ * `$SHELL` and then to well-known POSIX shells. Only shells we can safely
+ * drive with `-l -c` are accepted.
+ *
+ * Why this exists: the harness used to hardcode a `zsh → bash → sh` preference
+ * and take the first that merely EXISTED. On a box whose real login shell is
+ * bash but which happens to have zsh installed, every remote command therefore
+ * ran under zsh — and zsh never reads `~/.bashrc`, where PATH is normally set.
+ * `node` then resolved to a system v22.11.0 that predates `import.meta.main`,
+ * so the dsh CLI's `if (import.meta.main)` gate made it exit 0 with NO output:
+ * a silent no-op that reads as "the service flashes and dies".
+ *
+ * Runs as a SINGLE round-trip (each ssh handshake is expensive): the shell
+ * names are tried in one command and the first usable absolute path wins.
+ * No single quotes — `shellQuote` wraps the whole command in them.
+ */
+const REMOTE_LOGIN_SHELL_PROBE = 'c=$(getent passwd "$(id -un)" 2>/dev/null | cut -d: -f7); [ -n "$c" ] || c=${SHELL:-}; for s in "$c" /bin/bash /usr/bin/bash /bin/zsh /usr/bin/zsh /bin/sh; do case "$s" in ""|*/nologin|*/false) continue ;; esac; [ -x "$s" ] || continue; case "${s##*/}" in bash|zsh|sh|dash|ksh|ksh93|mksh|ash) printf "%s\\n" "$s"; exit 0 ;; esac; done; printf "%s\\n" /bin/sh'
+
+/**
+ * Pick the login-shell path out of `REMOTE_LOGIN_SHELL_PROBE` output. Pure, so
+ * the acceptance rules are testable without an ssh connection: only an
+ * absolute path to a shell we can drive with `-l -c` is usable, and anything
+ * else falls back to `/bin/sh`.
+ * @param {string[]|string} lines
+ * @returns {string}
+ */
+function parseRemoteLoginShell(lines) {
+  const list = typeof lines === 'string' ? lines.split('\n') : lines ?? []
+  for (const line of list) {
+    const value = String(line).trim()
+    if (!value.startsWith('/')) continue
+    const base = value.slice(value.lastIndexOf('/') + 1)
+    if (['bash', 'zsh', 'sh', 'dash', 'ksh', 'ksh93', 'mksh', 'ash'].includes(base)) return value
+  }
+  return '/bin/sh'
+}
+
+/**
  * Parse `REMOTE_HOST_SCAN` output into host records. Pure so the parsing —
  * the easiest part to get wrong — is testable without an ssh connection.
  * @param {string[]} lines
@@ -847,23 +888,36 @@ class ConnectionManager extends EventEmitter {
     return { ...result, lines }
   }
 
+  /**
+   * The shell to run remote commands through: the account's REAL login shell,
+   * i.e. the one `sshd` itself uses, not merely the most capable shell that
+   * happens to be installed. See {@link REMOTE_LOGIN_SHELL_PROBE}.
+   *
+   * Resolved once per connect and cached. A failed probe falls back to
+   * `/bin/sh` rather than guessing, so a transient ssh hiccup can never pin the
+   * device to a shell we did not verify.
+   * @param {string} target - the ssh host/alias.
+   * @returns {Promise<string>} an absolute shell path.
+   */
   async remoteLoginShell(target) {
     if (this.cachedRemoteShell !== '') return this.cachedRemoteShell
     const tools = this.resolvedTools()
-    for (const candidate of ['zsh', 'bash', 'sh']) {
+    let found = ''
+    try {
       const result = await runCommand({
         cmd: tools.ssh,
-        args: sshCommandArgs(target, `command -v ${candidate}`),
+        args: sshCommandArgs(target, REMOTE_LOGIN_SHELL_PROBE),
         timeoutMs: 15_000,
         owner: this.owner(),
       })
-      const found = result.code === 0 ? result.lines.map(line => line.trim()).find(line => line.startsWith('/')) : ''
-      if (found) {
-        this.cachedRemoteShell = found
-        return found
-      }
+      if (result.code === 0) found = parseRemoteLoginShell(result.lines)
+    } catch {
+      // Fall through to /bin/sh: a shell we could not confirm is worse than the
+      // POSIX baseline.
     }
-    return '/bin/sh'
+    const shell = found === '' ? '/bin/sh' : found
+    this.cachedRemoteShell = shell
+    return shell
   }
 
   /** Whether the repo the settings point at is built (`apps/cli/lib/bin.js` exists). */
@@ -2263,7 +2317,9 @@ module.exports = {
   processUsesHome,
   parseRemoteHostScan,
   parseRemoteProbe,
+  parseRemoteLoginShell,
   REMOTE_HOST_SCAN,
+  REMOTE_LOGIN_SHELL_PROBE,
   PEER_WAIT_ATTEMPTS,
   PEER_WAIT_INTERVAL_MS,
 }

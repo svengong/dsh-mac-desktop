@@ -129,26 +129,35 @@ BrowserWindow (shell.html 边框)
 
 ### 5.1 远端 shell 与 node 解析（易踩的坑）
 
-远端命令都经 `remoteLoginShell()` 包一层登录 shell 执行，这里有两个独立的陷阱：
+远端命令都经 `remoteLoginShell()` 取到的 shell 包一层登录 shell 执行。这里曾有一个
+致命组合，现已修复，但改动前它同时踩了两个坑：
 
-1. **壳探测的 shell 可能不是用户的登录 shell。** `remoteLoginShell()` 按
-   `zsh → bash → sh` 顺序探测，**取第一个存在者**，并不读取 `getent passwd` 里
-   用户真实的登录 shell。装了 zsh 的机器因此一律走 zsh。
+1. **壳曾按 `zsh → bash → sh` 取第一个存在者**，而不读 `getent passwd` 里用户真实的
+   登录 shell（也就是 `sshd` 实际使用的那个）。装了 zsh 的 bash 机器因此一律走 zsh。
 2. **zsh 不读 `~/.bashrc`。** `zsh -l -c` 只读 `~/.zshenv`/`.zprofile`/`.zlogin`，
-   `~/.bashrc` 完全被忽略；而 `~/.bashrc` 恰恰是 PATH 配置通常所在。于是远端
-   `node` 解析到 `/usr/local/bin/node`（可能是老版本），而不是 `.dsh-tools` 里
-   的便携版。
+   而 `~/.bashrc` 恰恰是 PATH 配置通常所在。于是远端 `node` 解析到
+   `/usr/local/bin/node`，而不是 `.dsh-tools` 里的便携版。
 
 为什么这会致命：dsh CLI 的入口是 `if (import.meta.main) await runCli()`，而
 `import.meta.main` 直到 **Node 22.18 / 24.2** 才存在。在更老的 node 上它是
 `undefined`，整个 CLI **什么都不做、`rc=0`、零输出** —— 看起来就是"一闪而过"。
-注意外层还有一道：harness 的 node 引擎下限是 `^22.19 || >=24`（`tools.js#engineOk`），
+外层还有一道：harness 的 node 引擎下限是 `^22.19 || >=24`（`tools.js#engineOk`），
 低于它的 node 本来就不是合法运行时。
 
-**远端要求**：让登录 shell 中的 `node` 解析到 `^22.19 || >=24`（实测
-`~/.dsh-tools/node/bin/node`）。壳自己启动服务时会显式注入
-`remoteToolchainPrefix()`（把 `.dsh-tools/node/bin` 前置），所以那条路径本来是安全的；
-脆弱的是**任何不带该前缀**的裸 `node` 调用。推荐在远端写一份幂等的 `~/.zshenv`：
+**现行机制**：`remoteLoginShell()` 用一条 `REMOTE_LOGIN_SHELL_PROBE` 命令解析**用户真实
+的登录 shell**（`getent passwd` → `$SHELL` → 已知 POSIX shell 依次兜底），并且只接受
+能用 `-l -c` 驱动的 shell（`bash|zsh|sh|dash|ksh|…`）；`/usr/sbin/nologin`、`/bin/false`
+这类会被跳过。解析失败一律回落 `/bin/sh`，绝不在未确认的 shell 上"猜"。纯函数
+`parseRemoteLoginShell()` 让这套接受规则可离线测试。
+
+这样 bash 登录的机器就走 `/bin/bash`，与 `ssh` 直连行为一致，`~/.bashrc` 里的
+PATH（含便携 node）自然生效。
+
+**远端要求**：登录 shell 下的 `node` 应解析到 `^22.19 || >=24`（实测
+`~/.dsh-tools/node/bin/node`）。壳启动服务时会显式注入 `remoteToolchainPrefix()`
+（把 `.dsh-tools/node/bin` 前置），所以那条路径本来就安全；脆弱的是**任何不带该前缀**
+的裸 `node` 调用。若某台机器的登录 shell 属于 zsh 且 PATH 只写在 `~/.bashrc`，可在远端
+补一份幂等的 `~/.zshenv`（下列写法用 `case` 守卫，嵌套登录不会重复叠加 PATH）：
 
 ```sh
 # 远端 ~/.zshenv —— 让 zsh 登录/非登录 shell 都看到便携 node
@@ -157,9 +166,6 @@ case ":$PATH:" in
   *) export PATH="$HOME/.dsh-tools/node/bin:$HOME/.dsh-tools/node_modules/.bin:$HOME/.npm-global/bin:$PATH" ;;
 esac
 ```
-
-`case` 守卫保证嵌套登录不重复叠加 PATH。只写 `~/.zshenv` 即可覆盖
-`zsh -l -c`（登录）与 `zsh -c`（非登录）两种形态。
 
 ## 6. 更新管理
 
