@@ -127,6 +127,40 @@ BrowserWindow (shell.html 边框)
 - **无感自动重连**：harness 因外部因素重启（插件安装、进程内重载、外部托管换端口、远端崩溃）时，壳自动恢复不打断用户——
   自管本地服务退出由 `spawnLocalService` 的 close watcher 转 `restarting` 后重启并发布新端口 `ready`；其余场景由健康看门狗（`startHealthMonitor`/`healthTick`）在 `ready` 态每 4s 探测、连续 2 次失败自动 `connect()`。见 `architecture.md`「无感自动重连」。
 
+### 5.1 远端 shell 与 node 解析（易踩的坑）
+
+远端命令都经 `remoteLoginShell()` 包一层登录 shell 执行，这里有两个独立的陷阱：
+
+1. **壳探测的 shell 可能不是用户的登录 shell。** `remoteLoginShell()` 按
+   `zsh → bash → sh` 顺序探测，**取第一个存在者**，并不读取 `getent passwd` 里
+   用户真实的登录 shell。装了 zsh 的机器因此一律走 zsh。
+2. **zsh 不读 `~/.bashrc`。** `zsh -l -c` 只读 `~/.zshenv`/`.zprofile`/`.zlogin`，
+   `~/.bashrc` 完全被忽略；而 `~/.bashrc` 恰恰是 PATH 配置通常所在。于是远端
+   `node` 解析到 `/usr/local/bin/node`（可能是老版本），而不是 `.dsh-tools` 里
+   的便携版。
+
+为什么这会致命：dsh CLI 的入口是 `if (import.meta.main) await runCli()`，而
+`import.meta.main` 直到 **Node 22.18 / 24.2** 才存在。在更老的 node 上它是
+`undefined`，整个 CLI **什么都不做、`rc=0`、零输出** —— 看起来就是"一闪而过"。
+注意外层还有一道：harness 的 node 引擎下限是 `^22.19 || >=24`（`tools.js#engineOk`），
+低于它的 node 本来就不是合法运行时。
+
+**远端要求**：让登录 shell 中的 `node` 解析到 `^22.19 || >=24`（实测
+`~/.dsh-tools/node/bin/node`）。壳自己启动服务时会显式注入
+`remoteToolchainPrefix()`（把 `.dsh-tools/node/bin` 前置），所以那条路径本来是安全的；
+脆弱的是**任何不带该前缀**的裸 `node` 调用。推荐在远端写一份幂等的 `~/.zshenv`：
+
+```sh
+# 远端 ~/.zshenv —— 让 zsh 登录/非登录 shell 都看到便携 node
+case ":$PATH:" in
+  *":$HOME/.dsh-tools/node/bin:"*) ;;
+  *) export PATH="$HOME/.dsh-tools/node/bin:$HOME/.dsh-tools/node_modules/.bin:$HOME/.npm-global/bin:$PATH" ;;
+esac
+```
+
+`case` 守卫保证嵌套登录不重复叠加 PATH。只写 `~/.zshenv` 即可覆盖
+`zsh -l -c`（登录）与 `zsh -c`（非登录）两种形态。
+
 ## 6. 更新管理
 
 ### 6.1 组件模型
