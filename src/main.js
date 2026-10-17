@@ -45,6 +45,7 @@ const { createTray } = require('./tray')
 const { presentWindow } = require('./windows')
 const { WindowManager } = require('./window-manager')
 const { isExternalUrl, isExternalSubFrameUrl } = require('./external-open')
+const { BOOT_FAILURE_PROBE, shouldReloadAfterBootFailure } = require('./boot-watch')
 
 const BUILD_DIR = path.join(__dirname, '..', 'build')
 // Single source of truth: the shell version always follows package.json (and
@@ -1144,11 +1145,98 @@ function restoreHarnessAfterBlockedNav(workspace) {
   updateHarnessVisibility(workspace)
 }
 
+// How long after `did-finish-load` a boot is still expected to be running.
+// The frontend loads its plugin graph, then mounts the app; a boot that is
+// still on the card after this grace has FAILED, not merely been slow.
+const BOOT_PROBE_DELAY_MS = 12 * 1000
+// Give up after this many automatic reloads for one committed URL. A page
+// that cannot boot stays broken no matter how often it is re-fetched; the
+// cap keeps a genuinely broken profile from reloading in a loop forever.
+const BOOT_RELOAD_LIMIT = 2
+
+/**
+ * Detect a harness whose PAGE loaded but whose BOOT failed, and reload it.
+ *
+ * `did-finish-load` only proves the HTML arrived. The harness then boots its
+ * client plugin graph, and that boot can fail on its own — most visibly after
+ * a harness upgrade, when a window commits the outgoing page while the
+ * service is replaced underneath it: the page renders the frontend's
+ * "Failed to load plugins" card and no DOM lifecycle event ever reaches the
+ * shell again. Measured symptom: the window sat on that card indefinitely,
+ * long after the service behind it had come back healthy.
+ *
+ * The failure card is only distinguishable from the boot spinner by what it
+ * renders — the boot overlay stays mounted in both cases — so the probe
+ * matches the card's rendered text and, when it is found, reloads the service
+ * URL once the boot has had time to finish. The probe is cancelled when the
+ * window goes away or the URL changes.
+ * @param {object} workspace - the workspace owning the harness view.
+ */
+function scheduleBootWatch(workspace) {
+  cancelBootWatch(workspace)
+  const url = workspace.loadedUrl
+  if (url === '') return
+  const seq = ++bootWatchSeq
+  workspace.bootWatchSeq = seq
+  workspace.bootReloads = workspace.bootReloadedUrl === url ? workspace.bootReloads ?? 0 : 0
+  const timer = setTimeout(() => {
+    workspace.bootWatchTimer = null
+    if (workspace.bootWatchSeq !== seq) return
+    if (workspace.loadedUrl !== url) return
+    const view = workspace.harnessView
+    if (view === null || view === undefined || view.webContents.isDestroyed()) return
+    view.webContents.executeJavaScript(BOOT_FAILURE_PROBE, true).then(failed => {
+      if (workspace.bootWatchSeq !== seq) return
+      if (workspace.loadedUrl !== url || failed !== true) return
+      const reloads = workspace.bootReloads ?? 0
+      if (workspace.session !== null) {
+        workspace.session.connection.log(
+          `[window] harness boot failed (plugins did not load) on ${url}`
+            + ` (reload ${reloads + 1}/${BOOT_RELOAD_LIMIT})`,
+        )
+      }
+      const reload = shouldReloadAfterBootFailure({
+        probeSeq: seq,
+        currentSeq: workspace.bootWatchSeq,
+        probedUrl: url,
+        loadedUrl: workspace.loadedUrl,
+        reloads,
+        limit: BOOT_RELOAD_LIMIT,
+      })
+      if (!reload) return
+      workspace.bootReloads = reloads + 1
+      workspace.bootReloadedUrl = url
+      // Reload the CURRENT service URL: an upgraded service may have moved to
+      // a new port since this page was committed.
+      const target = workspace.session === null ? url : workspace.session.connection.url()
+      loadHarnessUrl(workspace, target === '' ? url : target)
+    }).catch(() => {})
+  }, BOOT_PROBE_DELAY_MS)
+  timer.unref?.()
+  workspace.bootWatchTimer = timer
+}
+
+/** Cancel a pending boot probe; safe to call when none is scheduled. */
+function cancelBootWatch(workspace) {
+  if (workspace.bootWatchTimer !== null && workspace.bootWatchTimer !== undefined) {
+    clearTimeout(workspace.bootWatchTimer)
+  }
+  workspace.bootWatchTimer = null
+  workspace.bootWatchSeq = ++bootWatchSeq
+}
+
+// The in-page failure probe and the reload policy live in ./boot-watch so the
+// plain-node smoke test can cover them without booting Electron.
+
+/** Monotonic sequence so a superseded probe can recognise itself and stop. */
+let bootWatchSeq = 0
+
 /**
  * Point the harness view at a URL and keep it hidden until the page loads:
  * did-finish-load sets harnessReady and updateHarnessVisibility shows it.
  */
 function loadHarnessUrl(workspace, url) {
+  cancelBootWatch(workspace)
   if (workspace.session === null) {
     workspace.loadedUrl = ''
     workspace.harnessReady = false
@@ -1627,6 +1715,13 @@ function createWorkspace(deviceKey = null, options = {}) {
     loadedUrl: '',
     harnessReady: false,
     loadError: '',
+    // Boot-watch bookkeeping (see scheduleBootWatch): the pending probe, the
+    // sequence that identifies it, and how many automatic reloads this URL has
+    // already used up.
+    bootWatchTimer: null,
+    bootWatchSeq: 0,
+    bootReloads: 0,
+    bootReloadedUrl: '',
     progress: session === null ? null : session.progress,
     // True while the user closed this window with the red button. Closed
     // windows remain alive for Dock restore, but must NOT count as the
@@ -1726,6 +1821,13 @@ function createWorkspace(deviceKey = null, options = {}) {
     // unrelated blocked navigation cannot reuse a stale answer.
     workspace.blockedNavRestore = undefined
     updateHarnessVisibility(workspace)
+    // A finished HTTP load is not a finished BOOT: the harness frontend boots
+    // its plugin graph after `did-finish-load` and can fail there ("Failed to
+    // load plugins"). Nothing in the DOM lifecycle reports that to the shell,
+    // so without this probe the shell would keep showing the dead boot card
+    // forever — measured after a harness upgrade, where the window had
+    // committed the old page while the service was being replaced.
+    scheduleBootWatch(workspace)
   })
   harnessView.webContents.on('did-fail-load', (_event, code, description) => {
     if (code === -3) return
@@ -1743,6 +1845,7 @@ function createWorkspace(deviceKey = null, options = {}) {
 
 function disposeWorkspace(workspace) {
   const session = workspace.session
+  cancelBootWatch(workspace)
   if (windowManager !== null) windowManager.touch(workspace)
   if (session !== null) session.windows.delete(workspace)
   workspace.setupDialog.close()
@@ -2985,6 +3088,14 @@ async function runSmoke() {
     if (calls[1] !== DOCK_ICON) throw new Error(`normal icon not restored: ${JSON.stringify(calls)}`)
   })
 
+  await check('boot failure reload policy', () => {
+    const base = { probeSeq: 1, currentSeq: 1, probedUrl: 'http://127.0.0.1:3080/', loadedUrl: 'http://127.0.0.1:3080/', reloads: 0, limit: BOOT_RELOAD_LIMIT }
+    if (shouldReloadAfterBootFailure(base) !== true) throw new Error('fresh boot failure must reload')
+    if (shouldReloadAfterBootFailure({ ...base, currentSeq: 2 }) !== false) throw new Error('superseded probe must not reload')
+    if (shouldReloadAfterBootFailure({ ...base, loadedUrl: 'http://127.0.0.1:3081/' }) !== false) throw new Error('changed URL must not reload')
+    if (shouldReloadAfterBootFailure({ ...base, reloads: BOOT_RELOAD_LIMIT }) !== false) throw new Error('cap must stop reloading')
+    if (!BOOT_FAILURE_PROBE.includes('Failed to load plugins')) throw new Error('probe must match the failure card text')
+  })
   await check('action surface complete', () => {
     for (const name of ['newWindow', 'openMain', 'openSettings', 'openUpdates', 'checkUpdates', 'updateAll', 'updateAndRestart', 'resetBackend', 'rollbackHarness', 'quit']) {
       if (typeof actions[name] !== 'function') throw new Error(`actions.${name} missing`)

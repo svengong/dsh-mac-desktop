@@ -30,6 +30,7 @@ const { mergeUpdates } = require('../src/device-merge')
 const { resolveTools, engineOk } = require('../src/tools')
 const { presentWindow } = require('../src/windows')
 const { isExternalUrl, isExternalSubFrameUrl } = require('../src/external-open')
+const { BOOT_FAILURE_PROBE, shouldReloadAfterBootFailure } = require('../src/boot-watch')
 
 async function main() {
   // settings: flat active-device view plus the per-device map. A legacy
@@ -529,6 +530,30 @@ async function main() {
   assert.strictEqual(isExternalSubFrameUrl('about:blank'), false)
   assert.strictEqual(isExternalSubFrameUrl(''), false)
   assert.strictEqual(isExternalSubFrameUrl('not a url'), false)
+
+  // A loaded page is not a booted harness: the frontend can fail to activate
+  // its plugin graph and leave a "Failed to load plugins" card on screen with
+  // no further DOM event to follow. The shell reloads the service URL when
+  // that card is there — but only for the URL it is actually showing, and only
+  // a bounded number of times, so a genuinely broken profile cannot reload
+  // forever.
+  const bootOk = { probeSeq: 1, currentSeq: 1, probedUrl: 'http://127.0.0.1:3080/', loadedUrl: 'http://127.0.0.1:3080/', reloads: 0, limit: 2 }
+  assert.strictEqual(shouldReloadAfterBootFailure(bootOk), true)
+  // A superseded probe describes a page that is no longer on screen.
+  assert.strictEqual(shouldReloadAfterBootFailure({ ...bootOk, currentSeq: 2 }), false)
+  // The view moved on (a restarted service picking a new port).
+  assert.strictEqual(shouldReloadAfterBootFailure({ ...bootOk, loadedUrl: 'http://127.0.0.1:3081/' }), false)
+  // No committed URL: nothing has booted yet.
+  assert.strictEqual(shouldReloadAfterBootFailure({ ...bootOk, probedUrl: '', loadedUrl: '' }), false)
+  // The cap: a failure that already spent its attempts is not retried again.
+  assert.strictEqual(shouldReloadAfterBootFailure({ ...bootOk, reloads: 1 }), true)
+  assert.strictEqual(shouldReloadAfterBootFailure({ ...bootOk, reloads: 2 }), false)
+  assert.strictEqual(shouldReloadAfterBootFailure({ ...bootOk, limit: 0 }), false)
+  // The probe must match the failure card's own text, not the overlay itself:
+  // the overlay is mounted during a SUCCESSFUL boot too, so its presence alone
+  // would reload healthy pages.
+  assert.ok(BOOT_FAILURE_PROBE.includes('data-dsh-boot'))
+  assert.ok(BOOT_FAILURE_PROBE.includes('Failed to load plugins'))
 
   // `dsh web --no-open` is version-gated: the flag landed at 0.1.1-rc.1 and
   // older artifacts abort the boot on the unknown option, so the shell must
