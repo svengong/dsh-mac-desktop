@@ -693,14 +693,15 @@ body.shell-workspace {
 
 /* Settings panel embedded in the workspace frame: the frame already owns
    section navigation, so the old settings-window sidebar is hidden. The
-   locating rail is part of the page itself and stays. */
+   locating rail is part of the page itself and stays — it is what tells the
+   reader where they are in the single scrolling page. */
 body.embedded .settings-shell .settings-sidebar { display: none; }
 body.embedded .settings-shell {
   height: 100%;
 }
 
 body.embedded .settings-titlebar {
-  padding-left: 14px;
+  padding-left: var(--ds-space-5);
 }
 
 .titlebar-terminal {
@@ -820,37 +821,61 @@ body.embedded .settings-titlebar .titlebar-actions {
 
 /* Two columns on one page: a left rail that LOCATES sections (nothing
    collapses — every section stays on the single scrolling page) and the
-   content, centred as a whole so a wide window does not stretch the copy. */
+   content beside it.
+
+   The rail is a real surface anchored to the window edge, and the titlebar /
+   footer rules run the full width of the content pane. Capping the whole
+   assembly at 940px and centring it left the chrome's borders stopping in
+   mid-air with dead space either side — the panel read as a narrow strip
+   floating in the window. Only the COLUMN of text is capped now; the frame
+   around it always fills the pane. */
 .settings-shell {
   display: flex;
   width: 100%;
   height: 100vh;
   min-height: 0;
   overflow: hidden;
-  justify-content: center;
 }
 
 .settings-inner {
   display: flex;
   width: 100%;
-  max-width: 940px;
   min-height: 0;
-  padding: var(--ds-space-5) var(--ds-space-5) 0;
-  gap: var(--ds-space-5);
+  padding: 0;
+  gap: 0;
 }
 
 .settings-menu {
   flex: none;
-  width: 176px;
+  width: 208px;
   display: flex;
   flex-direction: column;
   gap: 2px;
-  align-self: flex-start;
-  padding-top: 2px;
+  align-self: stretch;
+  padding: var(--ds-space-4) 10px var(--ds-space-4);
+  background: var(--ds-sidebar-bg);
+  border-right: var(--ds-border-width) solid var(--ds-border);
+  backdrop-filter: blur(var(--ds-blur)) saturate(var(--ds-saturate));
+  -webkit-backdrop-filter: blur(var(--ds-blur)) saturate(var(--ds-saturate));
+}
+
+/* Pins the rail's identity to the bottom so the column is anchored at both
+   ends instead of trailing off into empty space below the four entries. */
+.settings-menu-foot {
+  margin-top: auto;
+  padding: var(--ds-space-3) 10px 0;
+  border-top: var(--ds-border-width) solid color-mix(in srgb, var(--ds-border) 55%, transparent);
+  color: var(--ds-text-muted);
+  font-family: var(--ds-mono);
+  font-size: var(--ds-font-size-xs);
+  line-height: 1.6;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .settings-menu-title {
-  padding: 0 10px var(--ds-space-2);
+  padding: 0 10px var(--ds-space-3);
   color: var(--ds-text-muted);
   font-family: var(--ds-mono);
   font-size: var(--ds-font-size-xs);
@@ -914,12 +939,17 @@ body.embedded .settings-titlebar .titlebar-actions {
 .settings-menu button[data-dot="1"] .nav-dot { display: block; }
 .settings-menu button.active .nav-dot { background: #fff; box-shadow: none; }
 
-/* Content is centred inside the right column too, so the measure stays
-   readable regardless of window width. */
+/* The reading column is CAPPED so long-form copy keeps a comfortable measure,
+   while the pane's own chrome (titlebar rule, footer, section dividers) always
+   spans the full width. Left-anchored rather than centred: the column then
+   shares one left edge with the titlebar above it and the footer below, so the
+   whole panel reads as one surface instead of a strip floating mid-window.
+   940px is wide enough that the connection card's paired fields no longer
+   crowd each other. */
 .settings-content {
   width: 100%;
-  max-width: 660px;
-  margin: 0 auto;
+  max-width: 940px;
+  margin: 0;
 }
 
 .settings-sidebar {
@@ -1046,7 +1076,9 @@ body.embedded .settings-titlebar .titlebar-actions {
   display: flex;
   align-items: center;
   gap: var(--ds-space-3);
-  padding: 0 var(--ds-space-4) 0 var(--ds-space-5);
+  /* Same inline padding as .settings-scroll, so the title sits on the exact
+     left edge of the reading column instead of drifting from it. */
+  padding: 0 var(--ds-space-6);
   border-bottom: var(--ds-border-width) solid var(--ds-border);
   background: color-mix(in srgb, var(--ds-sidebar-bg) 72%, var(--ds-bg));
   backdrop-filter: blur(var(--ds-blur)) saturate(var(--ds-saturate));
@@ -1071,6 +1103,11 @@ body.embedded .settings-titlebar .titlebar-actions {
   letter-spacing: 0;
 }
 
+/* The titlebar is a window-level strip, so its text is nudged to the same
+   optical edge as the reading column below it rather than to its own padding
+   box — otherwise the heading looks 1–2px out of line with the content. */
+.settings-title-group { padding-left: 1px; }
+
 .settings-titlebar .titlebar-subtitle {
   color: var(--ds-text-muted);
   font-size: var(--ds-font-size-sm);
@@ -1094,7 +1131,7 @@ body.embedded .settings-titlebar .titlebar-actions {
   /* No bottom spacer: scrolling to the end must land on the last section,
      not on empty space below it. Locating a section therefore clamps to the
      furthest scrollable position — see goToSection in settings.html. */
-  padding: var(--ds-space-5) var(--ds-space-4) var(--ds-space-5);
+  padding: var(--ds-space-6) var(--ds-space-6) var(--ds-space-5);
 }
 
 .settings-section {
@@ -1126,7 +1163,7 @@ body.embedded .settings-titlebar .titlebar-actions {
   align-items: center;
   justify-content: space-between;
   gap: var(--ds-space-3);
-  padding: var(--ds-space-2) 18px;
+  padding: var(--ds-space-2) var(--ds-space-6);
   border-top: var(--ds-border-width) solid var(--ds-border);
   background: color-mix(in srgb, var(--ds-surface) 70%, transparent);
   backdrop-filter: blur(var(--ds-blur)) saturate(var(--ds-saturate));
@@ -1617,8 +1654,13 @@ body.embedded .settings-titlebar .titlebar-actions {
   gap: var(--ds-space-3);
 }
 
+/* A flex COLUMN so a card fills its grid cell: without it the <button> sizes
+   to its own content, leaving a card with a one-line description visibly
+   shorter than a neighbour whose description wraps to two lines. */
 .theme-card {
   position: relative;
+  display: flex;
+  flex-direction: column;
   padding: var(--ds-space-3);
   border: var(--ds-border-width) solid var(--ds-border);
   border-radius: var(--ds-radius);

@@ -33,6 +33,7 @@
       <button type="button" data-sec="connection"><span class="nav-icon">⇄</span><span class="nav-label">连接</span><span class="nav-dot"></span></button>
       <button type="button" data-sec="appearance"><span class="nav-icon">◐</span><span class="nav-label">外观</span><span class="nav-dot"></span></button>
       <button type="button" data-sec="log"><span class="nav-icon">≡</span><span class="nav-label">日志</span><span class="nav-dot"></span></button>
+      <div class="settings-menu-foot" id="menu-foot">DSH-[本地]</div>
     </nav>
 
     <main class="settings-main">
@@ -245,8 +246,17 @@ function goToSection(section) {
   // log), so a trailing section simply cannot reach the top — clamping here
   // puts it as high as the page allows, which still shows it in full.
   const maxScroll = Math.max(0, scroll.scrollHeight - scroll.clientHeight)
-  scroll.scrollTo({ top: Math.min(maxScroll, Math.max(0, sectionOffset(section) - 20)), behavior: 'smooth' })
-  setTimeout(() => { spyLocked = false }, 420)
+  const target = Math.min(maxScroll, Math.max(0, sectionOffset(section) - 20))
+  scroll.scrollTo({ top: target, behavior: 'smooth' })
+  // The highlight was already set above; hold the spy until the smooth scroll
+  // has actually arrived. Releasing on a fixed timer let the scroll handler
+  // win the race on a long jump (it resolves every frame, so the moment the
+  // timer fired mid-flight the spy re-picked whatever passed the probe line —
+  // jumping from 外观 to 日志). Only unlock once the movement has settled, and
+  // fall back to the timer in case 'scrollend' never fires.
+  const unlock = () => { spyLocked = false }
+  if ('onscrollend' in scroll) scroll.addEventListener('scrollend', unlock, { once: true })
+  setTimeout(unlock, 700)
 }
 
 for (const button of menuButtons) button.addEventListener('click', () => goToSection(button.dataset.sec))
@@ -256,8 +266,17 @@ if (scroll !== null) {
     if (spyLocked) return
     // At the very bottom the LAST section is what the user is looking at,
     // even though its offset never crosses the probe line on a short window.
+    // Keep the section that is actually pinned under the top edge when it is
+    // still on screen: scrolling as far as the page allows is NOT the same as
+    // having reached the last section (on a short window 外观 can be the
+    // furthest one visible while 日志 sits just below it).
     if (scroll.scrollTop + scroll.clientHeight >= scroll.scrollHeight - 2) {
-      setActiveSection(SECTIONS[SECTIONS.length - 1])
+      const line = scroll.scrollTop + 24
+      let pinned = SECTIONS[0]
+      for (const id of SECTIONS) {
+        if (sectionOffset(id) <= line) pinned = id
+      }
+      setActiveSection(pinned)
       return
     }
     const line = scroll.scrollTop + 24
@@ -628,6 +647,7 @@ api.getState().then(state => {
   activeMode = s.mode === 'ssh' ? 'ssh' : 'local'
   deviceTerminal = state.terminal || (activeMode === 'ssh' ? 'SSH' : '本地')
   $('titlebar-terminal').textContent = `DSH-[${deviceTerminal}]`
+  const foot = $('menu-foot'); if (foot) foot.textContent = `DSH-[${deviceTerminal}]`
   sshHostEntries = state.sshHosts
   const select = $('ssh-host'); const current = s.ssh?.host ?? ''; select.textContent = ''
   for (const entry of state.sshHosts) {
