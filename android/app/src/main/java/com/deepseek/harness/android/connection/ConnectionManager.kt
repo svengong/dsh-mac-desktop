@@ -40,6 +40,8 @@ import kotlinx.coroutines.launch
 class ConnectionManager(
     private val scope: CoroutineScope,
     private val store: DeviceStore,
+    /** Only used to read res/raw assets (the remote sweep script). */
+    private val context: android.content.Context,
 ) {
     private val _state = MutableStateFlow<ConnectionState>(ConnectionState.Idle)
     val state: StateFlow<ConnectionState> = _state.asStateFlow()
@@ -156,6 +158,7 @@ class ConnectionManager(
             // still answering; a rejected token means restart for a fresh one.
             if (verdict != false) {
                 emit("复用远端 dsh web（端口 ${existing.port}）")
+                reapStrays(target, service, existing.pid)
                 return
             }
             emit("启动令牌已失效，重启远端服务以获取新的认证 URL…")
@@ -166,20 +169,74 @@ class ConnectionManager(
             emit("远端服务已退出（端口 ${existing.port}），自动重启…")
         }
 
-        _state.value = ConnectionState.Connecting("正在清理残留服务…")
-        val swept = service.sweepHosts(keepPid = 0)
-        if (swept > 0) {
-            emit("清理残留远端 dsh web（$swept 个）")
-            delay(2000)
+        // Nobody is serving. Before spawning, give a PEER client a few seconds to
+        // finish what it may have just started: two clients arriving here at the
+        // same time would both sweep each other's half-built host and end up with
+        // two hosts over one dsh home and one session store. Waiting for the peer
+        // to publish is the only thing that closes that window — see
+        // RemoteService.awaitPeerService for why a lock does not.
+        _state.value = ConnectionState.Connecting("正在确认其他终端是否在启动…")
+        val peer = service.awaitPeerService(activeVersion)
+        if (peer != null) {
+            emit("跟随其他终端已启动的远端 dsh web（端口 ${peer.port}）")
+            val verdict = openTunnel(target, shell, peer.port, peer.url, myEpoch)
+            if (verdict != false) {
+                reapStrays(target, service, peer.pid)
+                return
+            }
+            // The peer's token was already stale (it restarted underneath us).
+            emit("对端令牌已失效，改为自行启动…")
+            teardownQuietly()
         }
+
+        _state.value = ConnectionState.Connecting("正在清理残留服务…")
+        // keepPid = 0: nothing is worth sparing here, because the adopt and peer
+        // paths above both failed. A leftover host would only crash-loop us
+        // against the task-board ledger it still holds.
+        val swept = service.sweepHosts(context, keepPid = 0)
+        reportSweep(swept, prefix = "清理残留远端 dsh web")
+        if (swept.killed > 0) delay(2000)
 
         _state.value = ConnectionState.Connecting("正在启动远端服务…")
         val launched = service.launch()
         emit("远端 dsh web 已监听端口 ${launched.port}")
         if (epoch != myEpoch) return
         openTunnel(target, shell, launched.port, launched.url, myEpoch)
+        // Sweep AFTER a successful launch too: if a peer lost the race it may have
+        // left a host behind, and this is the last point in the connect that can
+        // still evict it. keepPid protects the one we just started.
+        reapStrays(target, service, launched.pid)
     }
 
+    /**
+     * Evict hosts that share our dsh home but are NOT the one the state file
+     * names, and say so when the host cannot be scanned at all.
+     *
+     * This is the only place a stray can be removed on the healthy path, because
+     * the adopt fast path returns before the clear-everything sweep is ever
+     * reached. `keepPid` is the state file's pid, so two clients sweeping at the
+     * same time agree on who to spare and cannot ping-pong.
+     */
+    private suspend fun reapStrays(target: Device, service: RemoteService, keepPid: Int) {
+        if (keepPid <= 0) return
+        val result = runCatching { service.sweepHosts(context, keepPid) }.getOrNull() ?: return
+        reportSweep(result, prefix = "清理多余远端 dsh web")
+    }
+
+    /**
+     * Surface what a sweep did — including "the scan itself is unavailable".
+     *
+     * A sweep that silently finds nothing is indistinguishable from a sweep that
+     * cannot look, and treating the second as success is how two hosts sharing
+     * one session store stay invisible until something corrupts.
+     */
+    private fun reportSweep(result: RemoteService.SweepResult, prefix: String) {
+        when {
+            result.killed > 0 -> emit("$prefix（${result.killed} 个）")
+            result.note != null -> emit("跳过清理：${result.note}")
+            result.candidates > 1 -> emit("检测到 ${result.candidates} 个实例，但未能清理")
+        }
+    }
     /**
      * Open the local forward and declare ready.
      *

@@ -28,7 +28,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         val app = application as DshApp
-        manager = ConnectionManager(lifecycleScope, app.devices)
+        manager = ConnectionManager(lifecycleScope, app.devices, applicationContext)
 
         setContent {
             val settings by app.settings.flow.collectAsStateWithLifecycle(initialValue = null)

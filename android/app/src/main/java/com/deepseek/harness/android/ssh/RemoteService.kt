@@ -1,5 +1,6 @@
 package com.deepseek.harness.android.ssh
 
+import com.deepseek.harness.android.R
 import org.json.JSONObject
 
 /**
@@ -13,6 +14,14 @@ import org.json.JSONObject
  * original reason is preserved — those bugs are easy to reintroduce.
  */
 class RemoteService(private val shell: RemoteShell, private val homeExpression: String) {
+
+    private companion object {
+        /** Mirrors connection.js PEER_WAIT_ATTEMPTS (6 tries). */
+        const val PEER_WAIT_ATTEMPTS = 6
+
+        /** Mirrors connection.js PEER_WAIT_INTERVAL_MS (1s between tries). */
+        const val PEER_WAIT_INTERVAL_MS = 1000L
+    }
 
     data class State(val pid: Int, val port: Int, val version: String, val url: String)
     data class LaunchResult(val port: Int, val pid: Int, val url: String)
@@ -111,31 +120,125 @@ class RemoteService(private val shell: RemoteShell, private val homeExpression: 
     }
 
     /**
+     * What a sweep actually did. A bare count cannot distinguish "there was
+     * nothing to kill" from "the scan is broken on this host", and those need
+     * completely different reactions from a user.
+     */
+    data class SweepResult(
+        val killed: Int,
+        val candidates: Int,
+        val scanAvailable: Boolean,
+        val note: String? = null,
+    )
+
+    /**
      * Kill every `dsh web` host over THIS dsh home except [keepPid].
+     *
+     * `keepPid > 0` SPARES that pid: it is the host the state file names, i.e. the
+     * one the caller is about to connect through. That turns this from "clear
+     * everything" into "clear everything ELSE", which is what lets the adopt path
+     * enforce one-host-per-home without dropping the service it just validated.
      *
      * Confined by `usesHome` so a colleague's instance on a shared box is never
      * touched, and restricted to processes whose command starts with `node` — a
      * `bash -c "… bin.js web …"` wrapper shares the command line but killing it
      * takes down a launcher, not a host.
+     *
+     * Scan and kill are ONE round trip: every remote command costs a full ssh
+     * handshake, and a failed adopt attempt is the worst moment to spend four.
+     *
+     * Everything avoids word splitting on purpose. The remote login shell is zsh
+     * on many hosts, where an unquoted `$list` expands to ONE argument, so
+     * `for p in $list` would run once with the whole list and silently no-op.
+     * Iteration always goes through `read` in a pipeline; only stdout crosses a
+     * subshell boundary, which is all the report needs.
      */
-    suspend fun sweepHosts(keepPid: Int = 0): Int {
-        val scan = "ps ax -o pid=,command= 2>/dev/null | grep -E \"bin\\.js +web\" | grep -v grep | " +
-            "grep -E \"^[[:space:]]*[0-9]+[[:space:]]+([^[:space:]]*/)?node([0-9.]*)?[[:space:]]\" | " +
-            "sed -E \"s/^[[:space:]]*([0-9]+).*/\\1/\" | while read p; do " +
-            "uses=\$(lsof -Fn -p \$p 2>/dev/null | grep -c \"^n${homeExpression}/\"); " +
-            "echo \"\$p|\$uses\"; done"
-        val result = shell.run(scan, timeoutMs = 30_000)
-        val pids = result.lines.mapNotNull { line ->
-            val parts = line.trim().split("|")
-            if (parts.size != 2) return@mapNotNull null
-            val pid = parts[0].toIntOrNull() ?: return@mapNotNull null
-            val usesHome = parts[1].toIntOrNull() ?: 0
-            if (usesHome > 0 && pid != keepPid && pid > 0) pid else null
+    suspend fun sweepHosts(context: android.content.Context, keepPid: Int = 0): SweepResult {
+        val result = shell.run(sweepScript(context, keepPid), timeoutMs = 45_000)
+        fun field(name: String): String? =
+            result.lines.firstOrNull { it.trim().startsWith("$name=") }
+                ?.trim()?.removePrefix("$name=")
+
+        val psOk = field("PSOK") == "1"
+        val lsofOk = field("LSOFOK") == "1"
+        val candidates = field("CANDIDATES")?.toIntOrNull() ?: 0
+        val alive = field("ALIVE")
+            ?.split(Regex("\\s+"))
+            ?.mapNotNull { it.toIntOrNull() }
+            ?.filter { it > 0 }
+            .orEmpty()
+        val note = when {
+            !psOk && !lsofOk -> "该主机上 ps 与 lsof 都不可用，无法发现多余实例"
+            !psOk -> "该主机上 ps 不可用，无法发现多余实例"
+            !lsofOk -> "该主机上 lsof 不可用，无法判断实例属于哪个 dsh home"
+            else -> null
         }
-        if (pids.isEmpty()) return 0
-        return killPids(pids)
+        return SweepResult(alive.size, candidates, psOk && lsofOk, note)
     }
 
+    /**
+     * The sweep as one shell program, kept separate so the layering — probe
+     * tools, scan, decide, signal, verify — stays readable.
+     *
+     * `ps` availability is proven by RUNNING it, not by `command -v`: a host can
+     * have the binary yet deny it (restricted shells, sandboxes), and that is
+     * exactly the case where a silent empty scan would lie.
+     */
+    /**
+     * The sweep as one shell program, loaded from res/raw so no Kotlin string
+     * escaping can mangle the shell quoting.
+     *
+     * `ps` availability is proven by RUNNING it, not by `command -v`: a host can
+     * have the binary yet deny it (restricted shells, sandboxes), and that is
+     * exactly the case where a silent empty scan would lie.
+     */
+    private fun sweepScript(context: android.content.Context, keepPid: Int): String {
+        val body = context.resources.openRawResource(R.raw.remote_sweep)
+            .bufferedReader()
+            .use { it.readText() }
+        return body
+            .replace("__HOME__", homeExpression)
+            .replace("__KEEP__", keepPid.toString())
+    }
+
+    /**
+     * Wait for a PEER client to finish starting a service, then return its state.
+     *
+     * Two clients that both saw the recorded port die would otherwise race: each
+     * concludes nothing is serving, sweeps every host over the dsh home, and
+     * spawns its own — so each kills what the other just built and the pair
+     * thrashes without ever connecting. Measured on a real host: without this,
+     * BOTH clients spawn and two hosts end up sharing one dsh home and one
+     * session store, fighting over the same ledger.
+     *
+     * A mutual-exclusion lock does NOT close this window, and is deliberately not
+     * used. It re-reads the state on entry, which is right, but a peer that is
+     * still waiting for its port has not written a state yet — so a locker still
+     * sees nothing and still sweeps the peer's half-built host. Worse, a lock goes
+     * stale only after its timeout and a client that dies between acquire and
+     * release makes every other client wait until that timeout and then FAIL,
+     * reintroducing the "reconnect does nothing" outage the desktop shell already
+     * removed. Only waiting helps, because what is being waited for is the peer's
+     * write.
+     *
+     * Following is safe by construction: only a host whose recorded version equals
+     * ours is followed — the same condition the adopt path already requires.
+     */
+    suspend fun awaitPeerService(
+        expectedVersion: String,
+        attempts: Int = PEER_WAIT_ATTEMPTS,
+        intervalMs: Long = PEER_WAIT_INTERVAL_MS,
+    ): State? {
+        repeat(attempts) {
+            kotlinx.coroutines.delay(intervalMs)
+            val fresh = runCatching { readState() }.getOrNull() ?: return@repeat
+            if (fresh.version != expectedVersion) return@repeat
+            if (fresh.port !in 1..65535) return@repeat
+            if (!runCatching { probePort(fresh.port) }.getOrDefault(false)) return@repeat
+            return fresh
+        }
+        return null
+    }
     /**
      * Signal pids and wait for them to go: sample liveness, TERM, poll up to ~5s
      * for the task-board ledger to be released, then KILL stragglers.
