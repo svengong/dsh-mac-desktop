@@ -136,6 +136,29 @@ of a blank page (`WebViewSupport`).
 | 连接日志（右侧栏内，可选中复制） |
 |---|
 | ![连接日志](screenshots/real-tablet-log.png) |
+## 接上自己的机器（示例：局域网两台 Ubuntu）
+
+SSH 模式只需要四件事：地址、端口、用户名、私钥。手机上不需要 OpenSSH 客户端——
+连接由 JSch 直接建立；桌面 `~/.ssh/config` 里只有 `ProxyCommand` 这类**本机才有**的
+逻辑才需要在手机上绕过。
+
+以局域网两台机器为例：
+
+| 终端 | 地址 | 远端运行时 | 客户端行为 |
+|---|---|---|---|
+| ubuntu22 | `sven@192.168.31.5:22` | `npm0.1.1-rc.2` | 复用已运行的服务（无令牌，走裸回环） |
+| ubuntu26 | `sven@192.168.31.151:22` | `npm0.2.1-rc.2` | 复用已运行的服务（带启动令牌） |
+
+| ubuntu22 | ubuntu26 |
+|---|---|
+| ![ubuntu22](screenshots/real-tablet-ubuntu22.png) | ![ubuntu26](screenshots/real-tablet-ubuntu26.png) |
+
+两台都是**复用**而非重启：日志里能看到 `复用远端 dsh web（端口 …）`，远端进程 pid
+没变，已有会话不中断。
+
+> 远端不需要预装 node：缺 node 时客户端会用 `~/.dsh-tools` 的便携工具链启动服务
+> （ubuntu26 的 `PATH` 里就没有 node）。前提是 `~/.dsh/runtime/current` 下已有可用的
+> `dsh` 运行时；没有的话先用桌面版连一次完成安装。
 ## Build
 
 ```sh
