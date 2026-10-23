@@ -28,7 +28,7 @@ const runtimeStore = require('../src/runtime-store')
 const { WindowManager } = require('../src/window-manager')
 const { mergeUpdates } = require('../src/device-merge')
 const { resolveTools, engineOk } = require('../src/tools')
-const { presentWindow } = require('../src/windows')
+const { presentWindow, focusViewInKeyWindow } = require('../src/windows')
 const { isExternalUrl, isExternalSubFrameUrl } = require('../src/external-open')
 const { BOOT_FAILURE_PROBE, shouldReloadAfterBootFailure } = require('../src/boot-watch')
 
@@ -491,6 +491,36 @@ async function main() {
   }
   assert.strictEqual(presentWindow(hidden), hidden)
   assert.deepStrictEqual(calls, ['show', 'focus'])
+
+  // View focus must never activate a window. Measured on Electron 35: focusing
+  // a WebContentsView's webContents ACTIVATES its owner window, even when that
+  // window is in the background — so an unguarded call in a session-wide
+  // broadcast (every window of one terminal) made two windows trade front-most
+  // status, which on two displays reads as the window and the menu bar
+  // flickering between screens. focusViewInKeyWindow must only ever hand
+  // focus to the view of the window that is ALREADY key.
+  const focusCalls = []
+  const fakeWindow = focused => ({
+    isFocused: () => focused,
+    isDestroyed: () => false,
+  })
+  const fakeContents = () => ({
+    focus: () => focusCalls.push('focus'),
+    isDestroyed: () => false,
+  })
+  assert.strictEqual(focusViewInKeyWindow(fakeWindow(false), fakeContents()), false)
+  assert.deepStrictEqual(focusCalls, [], 'a background window must never be activated')
+  assert.strictEqual(focusViewInKeyWindow(fakeWindow(true), fakeContents()), true)
+  assert.deepStrictEqual(focusCalls, ['focus'], 'the key window still gets its view focused')
+  focusCalls.length = 0
+  assert.strictEqual(focusViewInKeyWindow(null, fakeContents()), false)
+  assert.strictEqual(focusViewInKeyWindow(fakeWindow(true), null), false)
+  assert.strictEqual(focusViewInKeyWindow({ isFocused: () => true, isDestroyed: () => true }, fakeContents()), false)
+  assert.strictEqual(
+    focusViewInKeyWindow(fakeWindow(true), { focus: () => focusCalls.push('focus'), isDestroyed: () => true }),
+    false,
+  )
+  assert.deepStrictEqual(focusCalls, [], 'destroyed surfaces are never focused')
 
   // harness navigation classification: the shell renders only the ROOT of the
   // loopback harness service; public web pages (search citations, web-search

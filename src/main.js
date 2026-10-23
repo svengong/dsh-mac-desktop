@@ -42,7 +42,7 @@ const { UpdateManager } = require('./update-manager')
 const { SetupDialog, registerDialogIpc } = require('./dialogs')
 const { buildMenu } = require('./menu')
 const { createTray } = require('./tray')
-const { presentWindow } = require('./windows')
+const { presentWindow, focusViewInKeyWindow } = require('./windows')
 const { WindowManager } = require('./window-manager')
 const { isExternalUrl, isExternalSubFrameUrl } = require('./external-open')
 const { BOOT_FAILURE_PROBE, shouldReloadAfterBootFailure } = require('./boot-watch')
@@ -1017,7 +1017,11 @@ function updateHarnessVisibility(workspace) {
   workspace.harnessView.setVisible(show)
   if (show) {
     workspace.setupDialog.close()
-    workspace.harnessView.webContents.focus()
+    // Only the KEY window may take focus: this function runs for every window
+    // of a session (status/opacity broadcasts), so an unguarded focus() here
+    // activated a background window and pulled the user away from the window —
+    // or the app — they were working in.
+    focusViewInKeyWindow(workspace.window, workspace.harnessView.webContents)
   } else if (workspace.activeView === 'harness') {
     // Busy / error / loading: the shell loading panel owns the stage; when
     // nothing is running the shell renders the terminal launcher natively
@@ -1755,11 +1759,8 @@ function createWorkspace(deviceKey = null, options = {}) {
   win.on('focus', () => {
     if (windowManager !== null) windowManager.markActive(workspace)
     refreshTrayAndMenu()
-    if (workspace.session !== null
-      && workspace.activeView === 'harness'
-      && workspace.harnessView !== null
-      && !workspace.harnessView.webContents.isDestroyed()) {
-      workspace.harnessView.webContents.focus()
+    if (workspace.session !== null && workspace.activeView === 'harness') {
+      focusViewInKeyWindow(win, workspace.harnessView === null ? null : workspace.harnessView.webContents)
     }
   })
   win.on('show', () => {

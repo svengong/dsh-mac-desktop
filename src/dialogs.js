@@ -10,6 +10,7 @@
 
 const path = require('node:path')
 const { WebContentsView, dialog } = require('electron')
+const { focusViewInKeyWindow } = require('./windows')
 
 const PRELOAD = path.join(__dirname, 'dialog-preload.js')
 const SETTINGS_HTML = path.join(__dirname, 'ui', 'settings.html')
@@ -133,7 +134,10 @@ class SetupDialog {
         this.pendingShow = false
         if (this.attached) {
           view.setVisible(true)
-          view.webContents.focus()
+          // A panel that finishes loading while its window is in the BACKGROUND
+          // must not steal focus — the reveal itself is what the user asked
+          // for, activation is not.
+          focusViewInKeyWindow(this.ownerWindow, view.webContents)
         }
       }
       if (this.pendingSection !== null) {
@@ -169,7 +173,7 @@ class SetupDialog {
       // Anchoring is optional: a null section means "stay at the top", which
       // is the correct focus for a plain 设置 entry.
       if (this.activeSection !== null) this.showSection(this.activeSection)
-      view.webContents.focus()
+      focusViewInKeyWindow(this.ownerWindow, view.webContents)
     }
   }
 
