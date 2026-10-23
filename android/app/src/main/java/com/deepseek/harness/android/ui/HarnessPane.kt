@@ -61,9 +61,11 @@ import com.deepseek.harness.android.data.Device
  */
 @Composable
 fun HarnessPane(
+    manager: ConnectionManager,
     selected: Device?,
     connection: ConnectionState,
     showLog: Boolean,
+    onShowLog: (Boolean) -> Unit,
     onReconnect: () -> Unit,
     onAdd: () -> Unit,
     onConnectionChanged: (Boolean) -> Unit,
@@ -73,11 +75,13 @@ fun HarnessPane(
     topBar: (@Composable () -> Unit)? = null,
 ) {
     if (showLog) {
-        // The tablet rail owns the log route; the pane shows a placeholder so the
-        // two-pane layout never loses its right half.
-        Box(modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            Text("日志在左侧导航中查看", color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
+        // The log belongs HERE, in the right pane. It used to render a placeholder
+        // saying the log lived in the left rail — but the rail only ever holds the
+        // toggle, so on a tablet the log was unreachable: tapping "日志" replaced
+        // the harness with a sentence pointing at nothing. The phone route stack
+        // has always rendered it in place; the two-pane layout now does too.
+        LogScreen(manager = manager, onBack = { onShowLog(false) })
+        // Returning from the log must land back on the harness, not on a blank pane.
         return
     }
     when (connection) {
@@ -243,10 +247,15 @@ private fun ReadyPane(
  */
 @Composable
 private fun IncompatibleWebViewPanel(support: WebViewSupport.Verdict) {
-    Box(
-        Modifier.fillMaxSize().padding(28.dp),
-        contentAlignment = Alignment.Center,
+    Surface(
+        modifier = Modifier.fillMaxSize(),
+        color = MaterialTheme.colorScheme.background,
+        contentColor = MaterialTheme.colorScheme.onBackground,
     ) {
+        Box(
+            Modifier.fillMaxSize().padding(28.dp),
+            contentAlignment = Alignment.Center,
+        ) {
         Column(
             Modifier.widthIn(max = 460.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
@@ -266,6 +275,7 @@ private fun IncompatibleWebViewPanel(support: WebViewSupport.Verdict) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center,
             )
+            }
         }
     }
 }
@@ -279,26 +289,37 @@ private fun ShellPanel(
     subtitle: String?,
     content: @Composable () -> Unit,
 ) {
-    Column(modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
-        topBar?.invoke()
-        Box(Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
-            Column(
-                Modifier.widthIn(max = 460.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-            ) {
-                Text(title, style = MaterialTheme.typography.titleLarge, textAlign = TextAlign.Center)
-                subtitle?.let {
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        it,
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
+    // Surface, not a `background()` modifier: a bare background paints a colour but
+    // leaves the CONTENT colour at the LocalContentColor default (black), so every
+    // Text without an explicit colour rendered black-on-black in dark theme. That
+    // is invisible on a phone screenshot and obvious on a tablet, which is how it
+    // was found.
+    Surface(
+        modifier = modifier.fillMaxSize(),
+        color = MaterialTheme.colorScheme.background,
+        contentColor = MaterialTheme.colorScheme.onBackground,
+    ) {
+        Column(Modifier.fillMaxSize()) {
+            topBar?.invoke()
+            Box(Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
+                Column(
+                    Modifier.widthIn(max = 460.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    Text(title, style = MaterialTheme.typography.titleLarge, textAlign = TextAlign.Center)
+                    subtitle?.let {
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            it,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    Spacer(Modifier.height(24.dp))
+                    content()
                 }
-                Spacer(Modifier.height(24.dp))
-                content()
             }
         }
     }

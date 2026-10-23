@@ -227,9 +227,11 @@ private fun TwoPaneLayout(
         )
         Box(Modifier.weight(1f).fillMaxHeight()) {
             HarnessPane(
+                manager = manager,
                 selected = selected,
                 connection = connection,
                 showLog = showLog,
+                onShowLog = onShowLog,
                 onReconnect = onReconnect,
                 onAdd = onAdd,
                 onConnectionChanged = onConnectionChanged,
@@ -304,7 +306,7 @@ private fun RailFooter(
             selected = showLog,
             onClick = { onShowLog(!showLog) },
             label = { Text(if (showLog) "返回连接" else "日志") },
-            icon = { Icon(Icons.Filled.Article, contentDescription = null) },
+            icon = { Icon(if (showLog) Icons.Filled.Computer else Icons.Filled.Article, contentDescription = null) },
         )
         NavigationDrawerItem(
             selected = false,
@@ -376,9 +378,11 @@ private fun OnePaneLayout(
                 onThemeChange = onThemeChange,
             )
             Route.Harness -> HarnessPane(
+                manager = manager,
                 selected = selected,
                 connection = connection,
                 showLog = false,
+                onShowLog = onShowLog,
                 onReconnect = onReconnect,
                 onAdd = onAdd,
                 onConnectionChanged = onConnectionChanged,

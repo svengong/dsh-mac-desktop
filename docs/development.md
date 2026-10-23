@@ -29,6 +29,35 @@ npm run dist:win:arm64    # Windows on ARM
 > **两条打包链路完全不同**（dmg/zip vs nsis/portable）。改了 `package.json#build`
 > 或壳里任何与平台有关的东西，两个平台都要跑一次；CI 已经这样配置。
 
+> **Windows 打包必须走 `node scripts/build-win.js`（即 `npm run dist:win*`），
+> 不要直接调 `electron-builder`。** 它会固定 `ELECTRON_BUILDER_7Z_FILTER=BCJ`，
+> 并在构建完事后校验安装包的 payload 压缩方法。
+>
+> 原因（已实测复现）：electron-builder 26.15.x 用 7za 的自动滤镜打 NSIS 的
+> `app-*.7z` 时，x64/arm64 上会选到 **BCJ2**；而安装器内置的 Nsis7z 解码器读不了
+> 多流 BCJ2，于是**静默跳过 payload 里的每一个 PE 文件** —— 主程序 `DeepSeek
+> Harness.exe`、所有 `.dll`、以及随包的可执行文件全都不落地。安装器退出码仍是
+> **0**，装出来的目录里 `locales/`、`*.pak`、`resources/` 一应俱全，看着像装好了，
+> 但那个能启动应用的可执行文件不在。
+>
+> **受影响的产物是 `-setup.exe` 和 `-portable.exe` 两种**：portable 也是 NSIS
+> 自解压包，解压走的是同一个 Nsis7z 解码器（解到 `%TEMP%` 再启动），所以它和
+> 安装器一样会丢文件 —— 而且更容易被误判成"架构不支持"，因为它双击后什么都不发生。
+> `.zip` 不受影响（用户自己的解压工具解，不经过 Nsis7z），但仍由同一条命令产出，
+> 保证三个渠道产物一致。
+>
+> Windows 11 ARM64 实测对比（同一个包，只改滤镜）：
+>
+> | | 文件数 | 体积 | DLL | 主程序 | 启动 |
+> |---|---|---|---|---|---|
+> | BCJ2（错） | 68 | 71.3 MB | 0 | 缺失 | — |
+> | BCJ（对） | 75 | 287.7 MB | 6 | `PE 0xAA64` | ALIVE |
+>
+> 这正是上游在 electron-builder 26.16+ 修掉的问题（PR「reliably install the main
+> executable and native binaries on x64 and arm64」）；26.15 也认这个环境变量，
+> 所以不强制升级也能修。**验证方式只有一种：在真 Windows 上装一遍，确认
+> `DeepSeek Harness.exe` 存在且能启动** —— 只看安装器退出码会漏掉这个 bug。
+
 ### 1.1 开发态数据隔离
 
 - 开发态（`app.isPackaged === false`）自动执行
@@ -464,4 +493,19 @@ debug 签名用仓库内 `android/.keystore/`（已 gitignore），不依赖 `~/
 | 形态 | 设备 | 结果 |
 |---|---|---|
 | 手机竖屏 | Pixel 7 / API 33 / WebView 103 | SSH 连接、复用远端服务、隧道、WebView 加载真实 Harness |
-| 平板横屏 | 10.1" / API 34 / 2560×1600 | 双栏布局 + 右侧真实 Harness UI |
+| 平板横屏 | 10.1" / API 34 / 2560×1600（模拟器） | 双栏布局 + 右侧真实 Harness UI |
+| **真机横屏** | **小米平板 23073RPBFC / Android 15 / 1920×1200 / WebView 131** | **双栏 + 真实 Harness；SSH 认证、启动远端服务（state 落盘）、JSch 隧道、日志页** |
+| **真机竖屏** | 同上（旋转） | 自动切单栏，页面与滚动位置不丢 |
+| **断线自愈** | 同上 | `kill -9` 远端服务后，看门狗自动清理并重启，state 换新 pid/端口/令牌，页面恢复 |
+
+真机暴露并修复的两个缺陷（模拟器上不可见或未触发）：
+
+1. **壳面板文字黑底黑字**：`HarnessPane` 的 `ShellPanel` 用 `background()` 修饰符而不是
+   `Surface`，只上底色不设内容色，深色主题下所有未显式指定颜色的 `Text` 都是黑色。
+   手机截图里恰好没截到那个面板，平板上「选择一个终端」直接看不见。
+2. **双栏下日志不可达**：点「日志」后右侧只渲染一句「日志在左侧导航中查看」，
+   但左栏只有开关、没有日志本体 —— 平板上日志等于打不开。现在右侧直接渲染 `LogScreen`。
+
+另有 URL 直连模式的诊断改进：`dsh web` 默认只监听 127.0.0.1，直连局域网地址会得到
+「连接超时」，原提示只说「检查网络」。现在区分「有响应但不是 dsh」与「端口无响应」，
+后者直接指出 `--host 0.0.0.0` 与 SSH 隧道两条出路。

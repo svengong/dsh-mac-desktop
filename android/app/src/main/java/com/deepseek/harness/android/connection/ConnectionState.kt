@@ -14,6 +14,16 @@ sealed interface ConnectionState {
     data object Stopped : ConnectionState
 }
 
+/**
+ * A connection failure that already knows what the user should check.
+ *
+ * Throwing this instead of a bare `IllegalStateException` keeps the diagnosis next
+ * to the code that made it. A generic hint that only string-matches the message
+ * cannot tell "the address is wrong" from "nothing listens on that port" from
+ * "the harness refused this authority" — and those need different actions.
+ */
+class ConnectionFailure(message: String, val hint: String? = null) : Exception(message)
+
 /** One line of the in-app log, mirrored to the log screen. */
 data class LogLine(val at: Long, val text: String)
 

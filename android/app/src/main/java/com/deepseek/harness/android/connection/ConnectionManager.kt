@@ -79,7 +79,8 @@ class ConnectionManager(
                 teardownQuietly()
                 val message = error.message ?: error.toString()
                 emit("连接失败：$message")
-                _state.value = ConnectionState.Failed(message, hintFor(error))
+                val hint = (error as? ConnectionFailure)?.hint ?: hintFor(error)
+                _state.value = ConnectionState.Failed(message, hint)
             }
         }
     }
@@ -228,9 +229,20 @@ class ConnectionManager(
         val url = target.url.trim().let { if (it.endsWith("/")) it else "$it/" }
         val probe = HttpProbe.probe(url)
         if (!probe.isDsh) {
-            throw IllegalStateException(
-                if (probe.up) "该地址有响应，但它不是 DeepSeek Harness。"
-                else "无法连接到 ${target.url}。请检查地址、网络或反向代理。"
+            if (probe.up) {
+                throw ConnectionFailure(
+                    "该地址有响应，但它不是 DeepSeek Harness。",
+                    "确认地址指向 harness 的根路径，而不是反向代理的登录页或另一个服务。",
+                )
+            }
+            // A `dsh web` started without --host binds 127.0.0.1 only, so a LAN or
+            // tailnet address answers nothing at all. Saying "check the network"
+            // sends people to the wrong place; the common cause is the bind address.
+            throw ConnectionFailure(
+                "无法连接到 ${target.url}。",
+                "该端口没有响应。若地址是另一台机器的局域网 IP，注意 dsh web 默认只监听" +
+                    " 127.0.0.1：需要在远端用 --host 0.0.0.0 启动，或先建 SSH 隧道；" +
+                    "也可以改用 SSH 模式由本应用自动完成隧道。",
             )
         }
         emit("已连接 ${target.url}")

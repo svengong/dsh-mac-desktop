@@ -5,8 +5,9 @@
 
 ## 1. 项目一句话
 
-Electron macOS 薄壳：主窗口顶部 46px 壳边框，下面是 harness WebContentsView；
-每个窗口绑定一个设备 session；更新/构建全部走官方 git/pnpm/`dsh plugin` 命令。
+Electron 薄壳（macOS / Windows / Linux）：主窗口顶部 46px 壳边框，下面是
+harness WebContentsView；每个窗口绑定一个设备 session；更新/安装全部走官方 npm
+产物渠道（`@deepseek-ai/dsh`）与 `dsh plugin` 命令。
 
 ## 2. 最近一次实现清单
 
@@ -33,6 +34,11 @@ Electron macOS 薄壳：主窗口顶部 46px 壳边框，下面是 harness WebCo
 | 多屏焦点抖动 | `src/windows.js#focusViewInKeyWindow`、`src/main.js#updateHarnessVisibility`、`src/dialogs.js` | 聚焦 `WebContentsView.webContents` 会**激活其宿主窗口**（实测 Electron 35）：会话级广播会给同终端所有窗口重设视图焦点，后台窗口因此抢走前窗；双屏下表现为窗口与顶部菜单在两个屏幕间来回闪。所有视图聚焦统一走「仅当窗口已是 key window 才聚焦」 |
 | harness 导航护栏 | `src/external-open.js`、`src/main.js#installHarnessNavigationGuard` | 主框架 `isExternalUrl` 只保留 harness 根路径，其余交系统浏览器；子框架 `isExternalSubFrameUrl` 只驱逐跨源内容（插件 iframe 归插件）。拦截后 `restoreHarnessAfterBlockedNav()` 恢复就绪态；`did-start-navigation`(isMainFrame) 才代表文档被替换 |
 | `--no-open` 门控 | `src/connection.js` | `dsh web --no-open` 只在运行时 ≥ `NO_OPEN_MIN_VERSION` 时传（旧产物遇未知选项启动即失败）；`unknown` 版本按旧处理 |
+| 平台抽象 | `src/platform.js` | **唯一**平台差异层：`killTree`（POSIX 进程组 / Windows `taskkill /T`）、可执行文件命名、PATH 键与分隔符、node 分发归档、`current` 指针（symlink / junction）、ssh 配置路径。业务模块禁止出现 `process.platform` 分支 |
+| 进程/端口发现 | `src/process-scan.js` | **唯一**发现层：`lsof`+`ps`（POSIX，`ps` 被拒回退 `pgrep -fl`）/ `netstat -ano`+CIM（Windows）。`processUsesHome` 用于**杀进程决策**，Windows 走命令行路径前缀，判定不出来必须是 false |
+| 跨平台父进程监护 | `src/service-guard.js`、`src/runner.js#spawnService` | 原 `sh` watchParent 包装脚本由 node 监护进程取代：宣告真实服务 pid、父进程消失时结束服务树、服务自行退出时透传退出码。监护进程以 `ELECTRON_RUN_AS_NODE=1` 运行，且**不得**把该变量泄漏给被监护服务 |
+| Windows 窗口外壳 | `src/main.js#createBrowserWindow`、`src/ui/shell.css` | macOS 用 `hiddenInset`+`trafficLightPosition`（左侧留 84px）；Windows 用 `hidden`+`titleBarOverlay`（右侧留 152px，overlay 高度 = 46px）。平台信息经 query param 传给 shell.html / settings.html，落到 `:root[data-platform]` |
+| 菜单/托盘按平台 | `src/menu.js`、`src/tray.js`、`src/main.js#refreshMenu` | macOS 装应用菜单 + Dock 菜单；Windows/Linux 装窗口菜单但 `setMenuBarVisibility(false)`（保留 `CmdOrCtrl` 加速键），操作入口靠托盘。托盘图标 macOS 用模板图、其它平台用彩色图标缩到 16px |
 
 ## 3. 必须遵守的不变量
 
@@ -96,13 +102,47 @@ Electron macOS 薄壳：主窗口顶部 46px 壳边框，下面是 harness WebCo
     空白），所以末尾分区物理上到不了顶部；`goToSection` 用
     `Math.min(maxScroll, …)` 夹取，保证它完整可见即可。
 
+24. **平台差异只准出现在 `platform.js` / `process-scan.js`。** 业务模块里出现
+    `process.platform` 分支、`/bin/...`、`kill(-pid)`、`lsof`、`ps` 都是缺陷：
+    先在这两个模块里加能力，再调用。三个平台是同等的支持目标，不是「顺带能跑」。
+25. **杀进程一律走 `platform.killTree`。** POSIX 用它结束整个**进程组**（pnpm/git
+    的孙进程），Windows 用它递归结束**进程树**。直接 `process.kill(-pid)` 在 Windows
+    上抛 ESRCH 而不是「结束进程」，直接 `child.kill()` 会漏掉孙进程。
+26. **驻留服务的父进程监护不能依赖 shell。** Windows 没有 `sh`，也没有 PDEATHSIG；
+    用 `service-guard.js`。它输出的 `SERVICE_PID_PREFIX` 行是 state 文件记录**真实服务
+    pid** 的唯一来源——记录成监护进程的 pid，会让 keepPid 清扫杀掉本想保护的服务。
+27. **`ELECTRON_RUN_AS_NODE` 只进不出。** 用 `process.execPath` 跑辅助脚本时必须置该
+    变量（否则会启动一个完整 Electron 主进程）；但监护进程 spawn 真实服务前必须删掉它，
+    否则服务工具链里任何 Electron 二进制都会退化成 node。
+28. **Windows 不能 symlink `current`。** 符号链接需要管理员或开发者模式；用目录联接
+    （junction）。它不能用 rename 覆盖，所以 `swapCurrentLink` 的交换顺序是
+    「旧指针先改名→新指针就位→删旧」，并且中途失败要恢复旧指针。
+29. **程序头（`spawn options`）走 `platform.spawnOptions()`。** 它同时保证 POSIX 的
+    `detached` 进程组与 Windows 的 `windowsHide`（否则每次 git/npm 都闪一个控制台窗）。
+30. **Windows 上没有 `/bin/sh` 可借。** 需要「找某个工具」时用 `findOnPath`（Windows
+    走 `where`）与 `findViaLoginShell`（Windows 走 PowerShell `Get-Command`），不要拼
+    `spawnSync('/bin/sh', …)`。
+31. **跨平台的冒烟测试不能写死 POSIX 路径。** 子进程测试用
+    `node -e '<script>'`（见 `scripts/smoke.js` 的 `nodeChild` / `sleepCommand` /
+    `echoCommand`）。宿主拒绝进程枚举时（沙箱/无 Full Disk Access），依赖枚举的断言
+    必须**显式跳过**并打一行提示，不能当成失败——那不是壳的缺陷。
+32. **Windows 托盘不能沿用 macOS 模板图。** 模板图是黑 + alpha、由系统着色；直接放到
+    深色任务栏就是一块看不见的黑。非 macOS 一律用彩色图标缩到 16px。
+33. **`titleBarOverlay` 的高度必须等于 `SHELL_FRAME_HEIGHT`。** 46px 是壳边框、也是原生
+    窗口控件的高度；两者不一致会让控件条与壳边框错位。平台留白（左 84px / 右 152px）
+    写在 `:root[data-platform]` 规则里，不要写进 JS。
 ## 4. 验收命令
 
 ```sh
-node scripts/smoke.js
-DSH_DESKTOP_SMOKE=1 npx electron .
+node scripts/smoke.js                 # 全平台；含平台原语断言
+DSH_DESKTOP_SMOKE=1 npx electron .    # macOS/Linux
+$env:DSH_DESKTOP_SMOKE=1; npx electron .   # Windows PowerShell
 node --check <改动的 .js>
 ```
+
+改了 `platform.js` / `process-scan.js` / `runner.js` / `connection.js` 的进程相关逻辑后，
+**必须在 macOS 与 Windows 上都跑一次 `npm run smoke`**：这两个平台的杀进程与进程发现
+走的是完全不同实现，只在一个平台上绿等于没验证。
 
 UI 改动额外检查：
 
@@ -131,6 +171,14 @@ for f in /tmp/settings.html.js /tmp/shell.html.js; do node --check "$f"; done
   `isExternalSubFrameUrl` 子框架）+ `main.js#installHarnessNavigationGuard`。
 - 想改设置面板布局/入口焦点 → `settings.html`、`shell.css`、`dialogs.js`、
   `main.js#setWorkspaceView`（锚点语义）。
+- 想用平台特有 API（杀进程/找工具/路径/归档/链接）→ 先看 `platform.js` 有没有；
+  没有就加在那里，**不要**在业务模块里写 `process.platform` 分支。
+- 想用平台特有的进程/端口发现 → `process-scan.js`。
+- 想改窗口外壳的原生控件留白 → `main.js#createBrowserWindow`（`titleBarOverlay` /
+  `trafficLightPosition`）+ `shell.css` 的 `:root[data-platform]` 规则。
+- 想加 Windows/Linux 专属入口 → 托盘菜单（`tray.js`），因为那些平台没有应用菜单栏。
+- 想加构建目标/架构 → `package.json#build.{mac,win}.target` + `.github/workflows/*.yml`
+  的矩阵；两边必须同步，否则会出现「本地能打、CI 不产」的空洞。
 
 ## 6. 常见坑
 
@@ -194,6 +242,46 @@ for f in /tmp/settings.html.js /tmp/shell.html.js; do node --check "$f"; done
     （菜单栏）在两块屏幕间来回闪。`isFocused()` 在窗口自身 `focus` 事件里已为 true，
     所以正常的窗口切换重新聚焦不受影响。新增任何视图聚焦都走该守卫。
 
+25. **Windows 的 `spawn` 不会替你找 `.cmd`。** `spawn('pnpm', …)` 在 Windows 上抛
+    ENOENT——真正的可执行文件是 `pnpm.cmd`，而且 node 不能直接 exec 它，必须
+    `shell: true`。`platform.executableNames()` 负责找对文件，`tools.js` 的 pnpm 探测与
+    `service-guard.js` 负责在它是 `.cmd/.bat` 时开 shell。
+26. **`taskkill` 退出码 128 表示「进程已经没了」。** 那不是失败，别把它当错误上报；
+    `killTree()` 因此把 0 和 128 都视为成功。
+27. **junction 的 `lstat().isSymbolicLink()` 为 true，但 `fs.realpathSync` 会解开它。**
+    任何「这个目录是链接吗」的判断都要先想清楚是要判链接本身还是目标。删 junction 用
+    `fs.unlinkSync`（`platform.removeLink` 已处理），用 `rm -rf` 反而会删掉**目标目录内容**。
+    （POSIX 的 `rm -rf` 对符号链接是安全的，Windows 的 junction 不是——这是本仓库里最容易
+    造成数据丢失的一处平台差异。）
+28. **Windows 上 `path.delimiter` 是 `;`，环境变量键名是 `Path` 不是 `PATH`。**
+    `childEnv()` 两个都写且写同一个值；只写 `PATH` 时 cmd.exe 可能读不到。
+29. **PowerShell 的单引号字符串里单引号要写两遍。** 传路径给 `-Command` 时用
+    `process-scan.psQuote()`，别手拼。`-NoProfile -NonInteractive` 必须带上：用户 profile
+    可能打印自己的输出，把逐行解析的行序冲掉。
+30. **`-NoProfile` 之外还要 `-ExecutionPolicy Bypass`。** 企业机器常用 AllSigned，
+    默认策略会直接拒绝 `-Command` 内联脚本。
+31. **`netstat -ano` 的 LAN-only 监听不是证据。** 只认 loopback 与通配绑定（`0.0.0.0`/`::`），
+    并且只认 `LISTENING` 行；把 `192.168.x.x:445` 当成本机服务会让「端口→pid」全程错位。
+32. **`ps` 被拒绝不等于「没有进程」。** 空数组意味着「清扫没发现任何东西」——行为上
+    安全（不杀），但会让残留 host 一直占着 session store，下次 spawn 就崩溃循环。
+    沙箱 / 容器 / 无 Full Disk Access 的 macOS 都可能拒绝 `ps`，而 `pgrep`（走 sysctl）
+    仍然可用 ⇒ `posixProcessLines()` 先 `ps` 后 `pgrep -fl`。
+33. **Windows 安装包必须用 `ELECTRON_BUILDER_7Z_FILTER=BCJ` 打，安装器退出码 0
+    不代表装成功了。** electron-builder 26.15.x 在 x64/arm64 上会自动选 BCJ2 打
+    `app-*.7z`，而 Nsis7z 解码器读不了多流 BCJ2 ⇒ **静默跳过所有 PE 文件**（主程序 +
+    全部 DLL）。实测：BCJ2 装出 68 文件/71.3MB/0 DLL/无主程序，BCJ 装出 75 文件/
+    287.7MB/6 DLL/主程序 `PE 0xAA64` 且能启动。所以 `npm run dist:win*` 走
+    `scripts/build-win.js`（固定滤镜 + 构建后校验 payload 方法），并且**验收必须在真
+    Windows 上装一遍并启动**，不能只看 exit code。
+34. **「豁免这个服务」必须同时看 group 和 child，不能只看 group。**
+    本地 dsh web 是两进程家族（guard + service）：旧 state 记 guard 的 pid（service 是它的
+    **子进程**），新 state 记 service 的 pid（此时它的**组 id 属于 guard**，问「它自己的组」
+    什么也问不到）。只查 group ⇒ 少豁免一个 ⇒ **杀掉刚验证过的健康服务**（已复现：
+    keep-guard-pid 时清扫杀了 1 个而非 0 个）。用 `serviceFamily()`，它同时走
+    `pgrep -g`（组）与 `pgrep -P`（子进程），且都不依赖 `ps`。
+35. **`getBounds()` 在 Windows 上可能返回负的 y**（窗口最大化/多显示器）。
+    `window-manager.normalizeBounds` 只校验尺寸下限，不夹取坐标——改这块前先想清楚
+    多显示器下「恢复到哪里」的语义。
 ## 7. 文档同步要求
 
 完成新功能后，更新三份文档：
@@ -203,3 +291,26 @@ for f in /tmp/settings.html.js /tmp/shell.html.js; do node --check "$f"; done
 - `docs/agent.md`：本次提交清单、新坑与速查。
 
 最后按功能拆分 git commit；不要把 UI、端口、插件、文档混成一个 commit。
+
+
+## 8. Android 客户端（android/）—— 真机验证后才暴露的坑
+
+1. **Compose 面板用 `background()` 会丢内容色。** `Modifier.background()` 只上底色，
+   不设 `LocalContentColor`，默认黑色 ⇒ 深色主题下所有没显式写 `color` 的 `Text`
+   都是黑底黑字。用 `Surface(color=…, contentColor=…)`。手机截图里那个面板恰好没露出
+   标题，平板一眼就看见「选择一个终端」不见了。
+2. **双栏布局里的「日志」必须渲染在右栏。** 早先右栏只放了一句「日志在左侧导航中查看」，
+   而左栏只有开关，日志实际无处可看。凡「右栏占位 + 左栏入口」的设计，先确认入口真的
+   能到达内容。
+3. **`adb install` 在 MIUI/澎湃上可能报 `INSTALL_FAILED_USER_RESTRICTED`。** 那是「USB
+   安装」需要确认；先 `settings put global adb_install_need_confirm 0` 与
+   `verifier_verify_adb_installs 0` 再装。
+4. **连接工作必须在 `Dispatchers.IO`。** 主线程开 socket 抛
+   `NetworkOnMainThreadException`，被探活的 `try/catch` 吞成「隧道超时」——症状是
+   「SSH 已连接、端口已绑定，却说过不去」。
+5. **`dsh web` 默认只监听 127.0.0.1。** 用局域网 IP 直连必然超时（不是网络问题）；
+   要么远端 `--host 0.0.0.0`，要么用 SSH 模式的隧道。URL 模式的错误提示要能说出这一点。
+6. **JSch 绑定转发端口用 (host, 0, rhost, rport)。** 先探测空闲端口再绑定有竞态；
+   让 JSch 自己挑并回传实际端口。
+7. **WebView 需要在文档启动注入兼容层。** harness 在模块作用域调
+   `Promise.withResolvers`/`AbortSignal.any`，注入晚了（onPageStarted 之后）bundle 已经挂了。

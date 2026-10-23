@@ -59,6 +59,10 @@ The decision is made from the **window** size (`FormFactor`), not the device
 screen: on Android 12+ a tablet in split-screen has a phone-width window, and
 forcing the two-pane layout there would squeeze a 264dp rail into 400dp.
 
+Rotating a tablet therefore switches layouts live, without dropping the page:
+the harness WebView is recreated only when the URL authority changes, so a
+rotation keeps the conversation and its scroll position.
+
 The phone layout is a route stack, not a drawer: tapping a terminal replaces the
 list with the harness full-screen, because on a phone every dp belongs to the
 conversation, and the back arrow returns to the list. The tablet layout keeps
@@ -120,6 +124,18 @@ of a blank page (`WebViewSupport`).
 
 > 两张截图都是**真实链路**：客户端通过 SSH 连到测试机、复用已运行的 `dsh web`、
 > 建立本地转发，WebView 加载的是隧道另一端的真实 Harness UI。
+
+## 截图（真机：小米平板 Android 15 / 1920×1200，WebView 131）
+
+真实链路：平板 → SSH 到 Mac → 复用/启动远端 `dsh web` → JSch 转发 → WebView 加载隧道另一端。
+
+| 横屏双栏 + 真实 Harness | 竖屏单栏 + 真实 Harness |
+|---|---|
+| ![横屏双栏](screenshots/real-tablet-landscape.png) | ![竖屏单栏](screenshots/real-tablet-portrait.png) |
+
+| 连接日志（右侧栏内，可选中复制） |
+|---|
+| ![连接日志](screenshots/real-tablet-log.png) |
 ## Build
 
 ```sh
