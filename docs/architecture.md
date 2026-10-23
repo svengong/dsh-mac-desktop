@@ -7,10 +7,33 @@
 壳只依赖三个稳定产品面：
 
 1. 固定 URL `http://127.0.0.1:<端口>`（Web 应用的服务契约），
-2. 仓库入口 `apps/cli/lib/bin.js web --port <n>`（已构建的 CLI 入口），
-3. git + pnpm 工具链。
+2. 运行时入口 `…/lib/bin.js web --port <n>`（官方 npm 产物或仓库布局，见 `runtime-layout.js`），
+3. 官方 npm 产物渠道（`@deepseek-ai/dsh`）+ 免密 ssh。
 
-前端产物、插件组合、预设如何变化都不影响壳。壳自身没有运行时自动更新；壳发版走 `scripts/release.js` + GitHub Actions 发布流程（tag `v*` → 双架构构建 → Release）。
+前端产物、插件组合、预设如何变化都不影响壳。壳自身没有运行时自动更新；壳发版走 `scripts/release.js` + GitHub Actions 发布流程（tag `v*` → macOS arm64/x64 与 Windows arm64/x64 构建 → Release）。
+
+## 1.1 平台抽象（`platform.js` / `process-scan.js`）
+
+同一份源码跑 macOS / Windows / Linux。业务模块里**不允许**出现 `process.platform`
+分支或 `/bin/...` 硬编码——所有平台差异只在这两个模块里：
+
+| 能力 | POSIX | Windows |
+|---|---|---|
+| 结束进程 | `kill(-pgid)` 结束整个进程组 | `taskkill /T /F` 递归结束进程树 |
+| 父进程监护 | 原 `sh` 包装脚本 | `src/service-guard.js`（node，两平台共用） |
+| `current` 指针 | 相对符号链接 + rename | 目录联接（junction），无需提权 |
+| 便携 node | `.tar.gz` + `--strip-components=1` | `.zip` + 平铺 `node.exe` |
+| 端口→pid | `lsof -iTCP -sTCP:LISTEN` | `netstat -ano -p TCP` 的 LISTENING 行 |
+| 进程列表 | `ps ax -o pid=,command=`，被拒时回退 `pgrep -fl` | `Get-CimInstance Win32_Process` |
+| home 占用判定 | `lsof -Fn -p`（打开的文件） | `Get-CimInstance` 的 CommandLine 路径前缀（读不到则不杀） |
+| 可执行文件 | `node` | `node.exe` / `pnpm.cmd`（垫片经 shell 执行） |
+| PATH 键 | `PATH`（`:` 分隔） | `Path`（`;` 分隔，且与 `PATH` 保持同值） |
+| 登录 shell 探测 | `zsh -l -c 'command -v …'` | PowerShell `Get-Command` |
+| ssh 配置 | `~/.ssh/config` | `%USERPROFILE%\.ssh\config` |
+
+**进程组 vs 进程树**是这里最容易出错的一点：POSIX 下 `spawn(detached:true)` 让子进程
+成为新进程组的组长，所以 `kill(-pid)` 能一次带走 pnpm/git 的孙进程；Windows 没有这个
+概念，只能靠 `taskkill /T` 遍历子进程。`killTree()` 把两者统一成一个调用。
 
 ## 2. 目录与模块
 
@@ -40,12 +63,15 @@ desktop-shell/
 │   ├── connection.js      local + ssh connection lifecycle, port-0 service, tunnel, remote service
 │   ├── update.js          harness check / update-and-restart pipeline, .dsh-tools pnpm bootstrap
 │   ├── runner.js          foreground command runner + detached service spawner + 进程登记表
+│   ├── service-guard.js   驻留服务的跨平台父进程监护（node 实现，取代 sh 包装脚本）
+│   ├── platform.js        **唯一**平台差异层：killTree/taskkill、可执行名、PATH、node 归档、current 指针、ssh 路径
+│   ├── process-scan.js    **唯一**进程/端口发现层：lsof+ps（POSIX）/ netstat+CIM（Windows）
 │   ├── ssh.js             ssh target parsing, quoting, remote-path rendering
 │   ├── tools.js           engine-aware node/pnpm discovery + clean child environment
 │   └── ui/                shell.html (workspace frame + loading panel), settings.html, shell.css
 │
 ├── build/                 icon.icns, icon.png, iconPressed.png, tray template icons (committed)
-└── scripts/               gen-icons.sh, build.sh, install.sh, smoke.js, release.js
+└── scripts/               gen-icons.sh, build.sh, install.sh, build-win.ps1, smoke.js, release.js
 ```
 
 本目录独立于 harness 仓库，保留自己的 npm install，产品依赖图不受影响。
@@ -136,9 +162,16 @@ BrowserWindow (shell.html 边框)
 
 ## 8. 打包与发布
 
-- 产物命名遵循 GitHub Release 约定 `<name>-<version>-<os>-<arch>.<ext>`：`dsh-mac-desktop-0.1.1-macos-arm64.dmg`（`package.json#build.artifactName`）。版本号唯一来源 `package.json#version`。
-- `npm run dist`（app 目录）/ `npm run dist:dmg`（DMG+ZIP）/ `npm run dist:publish`（`GH_TOKEN=<token>` 直发 GitHub）。
-- 推送 `v*` 标签触发 `.github/workflows/release.yml`：校验标签与版本一致 → 双架构（arm64/x64）构建（`--publish never`，发布交给 action-gh-release）→ 上传 DMG/ZIP/latest-mac.yml → 创建 GitHub Release。
+- 产物命名遵循 GitHub Release 约定 `<name>-<version>-<os>-<arch>.<ext>`。版本号唯一来源 `package.json#version`。
+  - macOS：`dsh-mac-desktop-<ver>-macos-<arch>.{dmg,zip}`（`build.artifactName`，**保持不变**以免既有下载链接失效）。
+  - Windows：`dsh-desktop-<ver>-windows-<arch>.{zip,exe}`、`…-windows-<arch>-setup.exe`（NSIS）、`…-windows-<arch>-portable.exe`。
+- 构建脚本：
+  - `npm run dist`（app 目录）/ `npm run dist:dmg`（DMG+ZIP）/ `npm run dist:publish`（`GH_TOKEN=<token>` 直发 GitHub）。
+  - `npm run dist:win`（NSIS+便携版，双架构）/ `dist:win:x64` / `dist:win:arm64` / `dist:publish:win`。
+  - Windows 目标为 `nsis`、`portable`、`zip`，`arch` 均为 `["x64","arm64"]`（Windows on ARM 是一方支持目标）。
+- 图标：`build/icon.png`（512px）会被 electron-builder 自动转成多分辨率 `.ico`，无需手工维护 ICO 文件；macOS 用 `build/icon.icns`。
+- 推送 `v*` 标签触发 `.github/workflows/release.yml`：校验标签与版本一致 → 四条并行构建（macOS arm64/x64、Windows x64/arm64，全部 `--publish never`）→ 上传各平台产物 → 创建 GitHub Release。
+- `.github/workflows/ci.yml` 在 `macos-14` 与 `windows-latest` 上分别跑 `npm run smoke`，并各自做一次打包预检——两条打包链路完全不同，只验一条会让另一条静默腐化。
 - 产物未签名/未公证（`identity: null`）。
 
 ## 9. 相关文档
@@ -146,3 +179,57 @@ BrowserWindow (shell.html 边框)
 - [需求文档](requirements.md)：功能需求、边缘场景、验收标准。
 - [开发文档](development.md)：开发约定、测试、提交约定、新版本发布验证。
 - [Agent 文档](agent.md)：后续编码 Agent 的不变量、速查与常见坑。
+
+## 10. Android 客户端（`android/`）
+
+> 目录、模块、构建与 e2e 说明见 [android/README.md](../android/README.md)；远端命令
+> 依据见 [android-remote-protocol.md](android-remote-protocol.md)。
+
+### 10.1 与桌面壳的关系
+
+同一个远端 `dsh web` 服务的**两个客户端**。共享的只有协议（state 文件、启动令牌、
+探活判据、启动命令），代码零共享：桌面壳是 Electron/Node，Android 是 Kotlin/JVM。
+
+```text
+桌面壳 (Electron)                     Android 客户端
+  ssh -N -L 子进程                       JSch setPortForwardingL
+  remoteRun(ssh …)                       RemoteShell(exec + sentinel)
+  readRemoteState / launchRemoteService  RemoteService.adopt/launch
+  probeOnce / tokenAccepted (node http)  HttpProbe (HttpURLConnection)
+  WebContentsView                        WebView + document-start shim
+  BrowserWindow 46px 壳边框               Compose: 单栏路由 / 双栏 rail
+```
+
+因此**两个客户端可以并存**：桌面端启动的服务，Android 端会直接复用（版本一致时）；
+Android 端启动的服务，桌面端同样复用。
+
+### 10.2 连接状态机
+
+```text
+Idle --connect()--> Connecting(step) --> Ready(url) --watchdog 连续 2 次失败--> 重连
+                        |
+                        +--异常--> Failed(message, hint)
+```
+
+- `epoch` 是连接代数：`connect()`/`disconnect()` 自增，所有异步回调（探活、
+  看门狗、connectJob）先比对代数再动状态，防止陈旧回调把新连接打回 Failed。
+- 连接工作整体跑在 `Dispatchers.IO`：主线程开 socket 会抛
+  `NetworkOnMainThreadException`，而探活 try/catch 会把它吞成「超时」——
+  实测表现为「SSH 已连接、端口已绑定，却报隧道建立超时」。
+
+### 10.3 兼容的三层
+
+| 层 | 位置 | 作用 |
+|---|---|---|
+| 版本门禁 | `ui/WebViewSupport.kt` | < Chromium 99 直接给出可操作提示，不加载页面 |
+| API 兼容层 | `ui/WebViewCompatScript.kt` | 文档启动注入缺失 API，只定义不存在的，原生实现优先 |
+| 加载面板 | `ui/HarnessPane.kt` | ready 且 onPageFinished 前用壳面板占位，无白屏 |
+
+三者顺序有依赖：门禁决定**能不能**加载，兼容层决定加载后**跑不跑得起来**，
+加载面板决定用户**看不看得到空白**。
+
+### 10.4 前台服务
+
+`service/HarnessConnectionService.kt` 只做两件事：把进程钉在前台（否则后台
+freeze 会带走 JSch 隧道），以及提供通知入口。它**不持有**任何连接状态——
+`ConnectionManager` 是唯一事实源，服务重启不会造成「两份连接」。

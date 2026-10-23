@@ -1,15 +1,23 @@
 # DSH 桌面壳需求文档
 
-> 状态：已实现
-> 版本：跟随 `package.json#version`（当前 0.1.1）
-> 更新日期：2026-08-16
+> 状态：已实现（macOS / Windows，双架构）
+> 版本：跟随 `package.json#version`
+> 更新日期：2026-10-23
 
 ## 1. 产品目标
 
-DeepSeek Harness 桌面壳（dsh-mac-desktop）是 macOS 上的薄桌面壳：把
-DeepSeek Harness Web UI 稳定地暴露在 `http://127.0.0.1:<端口>`。业务形态参考
-VS Code Remote——用户可以选择本机 checkout 或 SSH 远程主机运行 Harness，壳只
-负责连接、构建、更新和启动，不承载任何产品页面逻辑。
+DeepSeek Harness 桌面壳（dsh-desktop）是 macOS / Windows / Linux 上的薄桌面壳：
+把 DeepSeek Harness Web UI 稳定地暴露在 `http://127.0.0.1:<端口>`。业务形态参考
+VS Code Remote——用户可以选择本机或 SSH 远程主机运行 Harness，壳只负责连接、
+安装、更新和启动，不承载任何产品页面逻辑。
+
+平台与架构（全部为一方支持目标，不是"顺带能跑"）：
+
+| 平台 | 架构 | 安装包形态 |
+|---|---|---|
+| macOS 11+ | `arm64`、`x64` | `.app`、`.dmg`、`.zip` |
+| Windows 10/11 | `x64`、`arm64` | NSIS 安装程序、便携版 `.exe`、`.zip` |
+| Linux | `x64`、`arm64` | `.AppImage`、`.deb`（尽力而为） |
 
 ## 1.1 窗口与页面流转设计（产品视图）
 
@@ -39,21 +47,23 @@ VS Code Remote——用户可以选择本机 checkout 或 SSH 远程主机运行
 
 ### 2.1 在范围内
 
-- 本地模式：git clone / 首次构建 / 启动 `dsh web` / 端口回退 / 数据目录隔离。
-- SSH 远程模式：`~/.ssh/config` 主机选择、远端 clone、隧道保活、远端服务启停与重置。
+- 本地模式：官方 npm 产物安装 / 启动 `dsh web` / 端口回退 / 数据目录隔离。
+- SSH 远程模式：`~/.ssh/config` 主机选择、远端运行时安装、隧道保活、远端服务启停与重置。
 - 多窗口工作区模型：窗口 ↔ 设备 session 绑定，同设备窗口共享后端。
 - 统一更新管理：Harness 本体、npm 插件、Git 预设。
-- 初始化构建、更新与进度/日志展示。
-- macOS 菜单栏、托盘、程序坞唤醒。
-- macOS 风格的壳边框与嵌入式设置面板。
+- 安装、更新与进度/日志展示。
+- 平台原生外壳：macOS 菜单栏 / 程序坞 / 菜单栏托盘；Windows 状态区托盘、任务栏、`titleBarOverlay` 窗口控件。
+- 三个平台的壳边框与嵌入式设置面板（同一套 46px 布局，按平台调整原生控件留白）。
+- 双架构构建：macOS 与 Windows 均提供 `arm64` 与 `x64` 产物。
 - 开发态与已安装应用的数据隔离。
 
 ### 2.2 不在范围内
 
-- 非 macOS 平台。
 - 密码交互式 SSH（只支持免密登录）。
 - 壳的运行时自动更新（壳发版走手动发布的 release 流程；升级 harness 不需要升级壳）。
 - 任意 shell 脚本执行（用户自定义组件只允许 `dsh plugin add <spec>` 与 Git 预设两类）。
+- **Windows 上的「进程是否占用某 dsh home」判定**：没有 `lsof` 的廉价等价物，改用命令行路径前缀匹配；无法判定时保守地「不杀」（见 FR-7.6）。
+- **Windows 上的进程组语义**：Windows 没有 POSIX 进程组，改为 `taskkill /T` 递归结束进程树（见 FR-7.2）。
 
 ## 3. 核心需求
 
@@ -110,11 +120,11 @@ VS Code Remote——用户可以选择本机 checkout 或 SSH 远程主机运行
 | FR-4.9 | Harness 更新必须在 `<dshHome>/runtime/<version>`（远端 `~/.dsh/runtime/<version>`）完成 staging install/build，成功后原子切换 `current`；上一版本保留。 |
 | FR-4.10 | 新 runtime 启动失败时自动回滚上一版本并重启；更新菜单提供手动「回滚 Harness」。 |
 
-### FR-5 macOS 壳 UI
+### FR-5 壳 UI（macOS 原生风格，跨平台一致）
 
 | 编号 | 需求 |
 |---|---|
-| FR-5.1 | 主窗口使用 `hiddenInset` 标题栏，壳自绘 46px 工具栏，原生红黄绿按钮在工具栏左上角。 |
+| FR-5.1 | 主窗口使用无边框标题栏：壳自绘 46px 工具栏，macOS 原生红黄绿按钮在左上角，Windows 原生最小化/最大化/关闭按钮在右上角（见 FR-7.8）。 |
 | FR-5.2 | 字体使用 SF Pro / PingFang SC 系统栈，等宽使用 SF Mono / Menlo；13px 正文、11–12px 辅助信息。 |
 | FR-5.3 | 颜色、控件高度（20–28px）、圆角（5–10px）、间距遵循 macOS HIG；浅/深色跟随 `prefers-color-scheme`。 |
 | FR-5.4 | 按钮有 hover/active/disabled 状态与焦点环；动画遵循 `prefers-reduced-motion`。 |
@@ -134,6 +144,23 @@ VS Code Remote——用户可以选择本机 checkout 或 SSH 远程主机运行
 | FR-6.6 | 窗口切换/关闭不得被更新任务阻塞；离开时取消该终端任务，官方产物 worker 可后台继续，旧版本继续运行，任务可重试。 |
 | FR-6.7 | 连接进入 `ready` 后，壳周期探测服务 URL；检测到服务不可用（连续两次探测失败）或自管服务退出时自动重连并刷新窗口到新端口，无需手动点击「重新连接」（无感接入）。 |
 
+### FR-7 跨平台与架构
+
+| 编号 | 需求 |
+|---|---|
+| FR-7.1 | 同一份源码在 macOS / Windows / Linux 上可运行；所有平台差异集中在 `src/platform.js`（进程树结束、可执行文件命名、PATH 分隔符与系统目录、node 分发归档、`current` 指针、ssh 配置路径）与 `src/process-scan.js`（进程/端口发现）。业务模块不得直接出现 `process.platform` 分支。 |
+| FR-7.2 | 结束子进程必须按平台语义执行：POSIX 结束整个进程组（`kill(-pgid)`，防止 pnpm/git 孙进程孤儿化）；Windows 用 `taskkill /T /F` 递归结束进程树。所有 kill 路径（超时、取消、退出、重置、残留清理）统一走 `platform.killTree`。 |
+| FR-7.3 | 驻留服务的父进程监护必须跨平台：`sh` 版 watchParent 包装脚本由 `src/service-guard.js`（node 实现）取代，负责宣告真实服务 pid、父进程消失时结束服务树、服务自行退出时透传退出码。监护进程以 `ELECTRON_RUN_AS_NODE=1` 运行，且不得把该变量泄漏给被监护服务。 |
+| FR-7.4 | 运行时 `current` 指针必须原子切换且免提权：POSIX 用相对符号链接 + rename；Windows 用目录联接（junction，无需管理员或开发者模式）并保证切换失败时恢复旧指针。 |
+| FR-7.5 | 便携版 node 引导按目标平台选择归档：POSIX 取 `node-v<ver>-<platform>-<arch>.tar.gz`（`--strip-components=1` 解压）；Windows 取 `node-v<ver>-win-<arch>.zip` 并平铺出 `node.exe`。下载优先使用 node 自带 fetch，失败再回退平台 curl。 |
+| FR-7.6 | 进程与端口发现按平台实现：POSIX 用 `lsof`/`ps`，`ps` 被拒时回退 `pgrep -fl`；Windows 用 `netstat -ano`（LISTENING 行的 owner pid）与 `Get-CimInstance Win32_Process`（pid + 命令行）。「该进程是否在用我的 dsh home」在 Windows 上改用**命令行路径前缀**判定（本地 host 必从 `<dshHome>/runtime/…` 启动）；读不到命令行时返回 false（保守不杀）。 |
+| FR-7.7 | 工具发现按平台解析可执行文件：Windows 依次尝试 `.exe`/`.cmd`/`.bat`，PATH 键名用 `Path` 且与 `PATH` 保持一致，`.cmd` 垫片经 shell 执行；登录 shell 探测在 Windows 上改用 PowerShell `Get-Command`。仓库内引擎版本校验（node ^22.19 或 ≥24）在三个平台一致生效。 |
+| FR-7.8 | 窗口外壳按平台使用不同原生控件：macOS `hiddenInset` + `trafficLightPosition`（左侧红黄绿，壳边框留 84px）；Windows/Linux `hidden` + `titleBarOverlay`（右侧最小化/最大化/关闭，留白改到右侧）。壳边框高度恒为 46px 且等于 overlay 高度。 |
+| FR-7.9 | 菜单与托盘按平台挂载：macOS 用应用菜单承载 连接/更新，并提供 Dock 右键菜单；Windows/Linux 用窗口菜单但默认隐藏菜单栏（保留 `CmdOrCtrl` 加速键），操作入口同时出现在托盘菜单。快捷键文案按平台显示 ⌘ 或 Ctrl。 |
+| FR-7.10 | 托盘图标按平台选取：macOS 用模板图（黑 + alpha，随菜单栏自动着色）；Windows/Linux 用彩色应用图标缩放到 16px（黑色模板图在深色任务栏不可见）。 |
+| FR-7.11 | Windows 与 macOS 的自动构建均覆盖双架构：release 工作流产出 macOS `arm64`/`x64` 与 Windows `arm64`/`x64`（含 Windows on ARM）。CI 在 macOS 与 Windows runner 上分别跑冒烟与打包预检。 |
+| FR-7.12 | 安装包命名按平台区分：macOS 保持 `dsh-mac-desktop-<ver>-macos-<arch>.<ext>`（向后兼容既有下载链接）；Windows 为 `dsh-desktop-<ver>-windows-<arch>-setup.exe` / `-portable.exe` / `.zip`。 |
+| FR-7.13 | 冒烟测试必须跨平台：不得依赖 `/bin/sh`、`/bin/echo`、`/bin/sleep`、`/bin/zsh` 等 POSIX 路径；子进程测试统一用当前 node 执行内联脚本。当宿主拒绝进程枚举（沙箱、无 Full Disk Access）时，依赖枚举的断言降级跳过并显式提示，而不是报失败。 |
 ## 4. 关键边缘场景
 
 | 场景 | 处理 |
@@ -158,11 +185,43 @@ VS Code Remote——用户可以选择本机 checkout 或 SSH 远程主机运行
 
 ## 5. 验收标准
 
-- `node scripts/smoke.js` 全部通过。
+- `node scripts/smoke.js` 在 macOS 与 Windows 上全部通过（含平台原语断言：
+  可执行文件命名、home 展开、node 分发归档形状、`current` 指针原子切换、
+  netstat/CIM 解析、npm 定位、ssh 配置路径、干净子进程 PATH、killTree 幂等）。
 - `DSH_DESKTOP_SMOKE=1 npx electron .` 输出 `ok:true`。
+- `npm run dist:win:x64` 与 `npm run dist:win:arm64` 各产出一份 NSIS 安装包、
+  一份便携版与一份 zip，命名符合 FR-7.12。
 - `npm start` 后 `~/.dsh-dev/settings.json` 与 `~/.dsh-dev/logs/` 正常生成，不触碰
   `~/Library/Application Support/DeepSeek Harness`。
-- 主窗口顶部 46px 工具栏可见红黄绿按钮，未与品牌区重叠。
+- 主窗口顶部 46px 工具栏：macOS 可见红黄绿按钮且未与品牌区重叠；Windows
+  可见右上角原生窗口控件、未与「新建窗口」或状态区重叠。
 - 更新管理 tab 滚动顺序为：运行组件 → 更新源 → 固定高度日志。
 - 新建 npm 插件时，直接粘贴 `dsh plugin --profile web add github:owner/repo` 可保存并执行。
 - smoke 实际启动 `dsh web --port 0`，断言回读端口 > 0；`window-state.json` 可恢复 last-active 设备与 bounds。
+
+## 10. Android 客户端（`android/`）
+
+> 独立原生客户端，与桌面壳共享**远端协议**但不共享代码。产品说明见
+> [android/README.md](../android/README.md)。
+
+| 编号 | 需求 |
+|---|---|
+| FR-10.1 | 支持两种连接模式：SSH 远程（本机开隧道 + 托管远端服务）与直接地址（只加载已有 URL）。 |
+| FR-10.2 | SSH 必须复用桌面壳的远端协议：登录 shell 探测（`getent passwd` 第 7 列）、sentinel 包裹、`~/.dsh/desktop-web.state.json` 读写、`curl -sL` 探活、`setsid` 后台启动 `--port 0`、`rehostUrl` 重宿令牌。 |
+| FR-10.3 | 复用判定：`state.version == manifest.json#current` 且端口探活通过；令牌被服务拒绝（单跳 401/403）时才重启服务换新令牌。 |
+| FR-10.4 | 启动新服务前必须清理**本 home** 的残留 `dsh web`（`usesHome` 限定），不得误杀他人实例。 |
+| FR-10.5 | 本地转发端口由 JSch 自行分配并回报，禁止「先探测再绑定」的竞态。 |
+| FR-10.6 | 连接工作必须离开主线程（`Dispatchers.IO`）：主线程 socket 会抛 `NetworkOnMainThreadException` 并被探活吞成「隧道超时」。 |
+| FR-10.7 | 就绪后每 4s 探活，连续 2 次失败自动整链重连；隧道/服务换端口后必须把新 URL 推给 WebView。 |
+| FR-10.8 | 布局按**窗口**尺寸判定：≥720dp 且宽大于高双栏（左侧 264dp 常驻终端栏 + 右侧 Harness），否则单栏路由栈。 |
+| FR-10.9 | 手机单栏：终端列表 ⇄ Harness 全屏；返回键在页面有历史时回退页面，否则回列表。 |
+| FR-10.10 | 平板双栏：切换终端不重建 Harness 视图，仅换 URL；启动时自动连接上次使用的终端。 |
+| FR-10.11 | Harness 页仅在连接 ready **且**页面加载完成后显示；连接中/失败/未连接一律由壳面板占位，不出现白屏。 |
+| FR-10.12 | 文档启动即注入缺失 JS API 兼容层（`Promise.withResolvers`、`AbortSignal.any`、`findLast`、`toSorted`、`structuredClone`），只补齐缺失者。 |
+| FR-10.13 | WebView 主版本 < 99 时显示可操作的升级提示面板，而不是空白页。 |
+| FR-10.14 | WebView 只加载回环转发地址；其余 http(s) 与所有非 web scheme 交给系统浏览器/处理器。 |
+| FR-10.15 | 连接期间以前台服务持有进程；服务不保存连接状态（单一是 ConnectionManager）。 |
+| FR-10.16 | 私钥只存应用私有目录（0600），不在 UI 回显；口令单独保存。 |
+| FR-10.17 | 连接日志（300 行环形缓冲）必须在应用内可读、可选中复制——手机上这是唯一排障入口。 |
+| FR-10.18 | 设备与密钥以单个 JSON 文档持久化；损坏时按空列表归一化，不崩溃。 |
+

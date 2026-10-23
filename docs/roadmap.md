@@ -5,11 +5,27 @@
 | 阶段 | 状态 | 说明 |
 |---|---|---|
 | 桌面壳（macOS）本地 + SSH 远程 | ✅ 已交付 | 静默部署/自动升级驻留程序、多窗口、产物优先更新，e2e 验证通过 |
-| 自动发布链路 | ✅ 已交付 | `scripts/release.js` 一键发布 + GitHub Actions 双架构构建 |
+| **桌面壳（Windows）双架构** | ✅ 已交付 | x64 + arm64（Windows on ARM）；进程组→进程树、symlink→junction、lsof/ps→netstat/CIM、sh 监护→node 监护，见 [架构 §1.1](architecture.md) |
+| 自动发布链路 | ✅ 已交付 | `scripts/release.js` 一键发布 + GitHub Actions 三平台/双架构构建 |
 | 官方产物渠道 | 🟡 部分可用 | npm 预检已实现；上游 `@deepseek-ai/dsh-frontend` 发布后自动生效 |
-| **移动端：手机 SSH 连 Linux** | ⬜ 规划中 | 本文档第 2 节 |
+| **移动端：Android 原生客户端** | ✅ 已交付 | `android/`：Kotlin + Compose + WebView + JSch；手机竖屏单栏 / 平板横屏双栏；真实 SSH e2e 通过 |
 
-## 2. 移动端：手机通过 SSH 连 Linux
+## 2. 移动端：手机通过 SSH 连 Linux（已交付，见 `android/`）
+
+> **状态更新（2026-10-23）**：P1「一体化 SSH + WebView 移动壳」已按原生 Android
+> 实现并完成端到端验证，交付物在 `android/`，说明见
+> [android/README.md](../android/README.md)、协议依据见
+> [android-remote-protocol.md](android-remote-protocol.md)。下文保留原始方案评估作为
+> 决策记录；实现与评估的差异如下：
+>
+> - 选型按原计划「自研移动壳」，但用 **Kotlin + Compose + 系统 WebView**，而非
+>   Flutter：SSH 转发用 JSch（纯 Java，无需 NDK），UI 直接复用 Android 自适应能力。
+> - **P1 的功能边界被突破**：不满足于「只读复用」，而是完整移植了桌面壳的
+>   adopt-or-launch（复用健康服务 / 清理残留 / 启动新服务 / 写 state 文件），
+>   因此原 P2 的「驻留服务自动恢复」已随 P1 一起交付。
+> - iOS 未实现：SSH 与后台隧道在 iOS 上需要 NetworkExtension 级别的工作，另行评估。
+
+## 2.0 原始方案评估（保留）
 
 ### 2.1 需求背景
 
@@ -83,7 +99,8 @@
 ## 3. 其他规划方向（备选，未排期）
 
 - **官方产物通道打通**：上游发布 `@deepseek-ai/dsh-frontend` 后，`artifact.js` 预检自动放行，移动端/桌面端均可纯产物部署。
-- **Windows 桌面壳**：当前全部机制为 POSIX 设计（setsid/stat/lsof），需评估 Windows 等价物（任务计划/等价的进程组管理）。
+- **Windows 进程归属判定加固**：目前用命令行里的运行时路径前缀判定（够用且免费）。若要更严格，可评估随包附带轻量 helper 或 CIM 句柄查询——但必须先证明它不会拖慢每次连接。
+- **Linux 正式支持**：代码路径已就绪（POSIX 分支 + `process-scan`），尚缺 CI 打包与真机验收。
 
 ## 4. 计划维护
 

@@ -15,3 +15,18 @@ tools/
 
 # WorkBuddy 工作区记忆
 .workbuddy/
+
+# ── Android 客户端（android/）────────────────────────────────────────────────
+# 沙箱/CI 中 ~/.gradle 与 ~/.android 可能不可写，构建状态落在仓库内
+android/.gradle-home/
+android/.keystore/
+android/.android-sdk/
+android/app/build/
+android/build/
+
+# 本地 e2e 环境：真实 SSH 测试服务、远端 dsh home 夹具、测试私钥、模拟器 AVD
+# 测试私钥是明文私钥（虽是本地夹具），绝不能入库
+.e2e/
+.emulator/
+.android-sdk/
+.DS_Store

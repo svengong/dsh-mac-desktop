@@ -9,16 +9,25 @@ npm install
 # 开发模式：userData 固定在 ~/.dsh-dev，不影响已安装应用
 npm start
 
-# Electron-free 模块测试
+# Electron-free 模块测试（macOS / Windows / Linux 都跑这一条）
 npm run smoke
 
 # Electron 内冒烟（菜单/托盘/Dock 等）
-DSH_DESKTOP_SMOKE=1 npx electron .
+DSH_DESKTOP_SMOKE=1 npx electron .            # macOS / Linux
+$env:DSH_DESKTOP_SMOKE=1; npx electron .      # Windows PowerShell
 
 # 构建 macOS 应用目录 / DMG + ZIP（产物带版本号，见「9. 打包与发布」）
 npm run dist
 npm run dist:dmg
+
+# 构建 Windows 安装包（NSIS + 便携版 + zip）
+npm run dist:win          # 双架构
+npm run dist:win:x64
+npm run dist:win:arm64    # Windows on ARM
 ```
+
+> **两条打包链路完全不同**（dmg/zip vs nsis/portable）。改了 `package.json#build`
+> 或壳里任何与平台有关的东西，两个平台都要跑一次；CI 已经这样配置。
 
 ### 1.1 开发态数据隔离
 
@@ -33,8 +42,9 @@ npm run dist:dmg
 DSH_DESKTOP_USER_DATA=~/tmp/dsh-shell-dev npm start
 ```
 
-已打包应用默认仍使用
-`~/Library/Application Support/DeepSeek Harness`，除非显式设置该环境变量。
+已打包应用默认仍使用平台 userData 目录
+（`~/Library/Application Support/DeepSeek Harness` / `%APPDATA%\DeepSeek Harness`），
+除非显式设置该环境变量。
 
 ## 2. 目录与模块
 
@@ -53,11 +63,14 @@ src/
 ├── components.js     组件目录、归一化、npm spec 解析、版本比较/树哈希
 ├── ssh.js            ssh config 解析、目标解析、quoting、remote path
 ├── tools.js          node/pnpm 探测（engine 过滤）与干净子进程环境
-├── runner.js         runCommand / spawnService（独立进程组）
+├── runner.js         runCommand / spawnService（独立进程组/进程树）
+├── service-guard.js  驻留服务的跨平台父进程监护（node，取代 sh 包装脚本）
+├── platform.js       **唯一**平台差异层（killTree、可执行名、PATH、node 归档、current 指针）
+├── process-scan.js   **唯一**进程/端口发现层（lsof+ps / netstat+CIM）
 ├── dialogs.js        SetupDialog（嵌入式 WebContentsView）
 ├── labels.js         全局一致的 DSH-[终端] 标签
 ├── external-open.js  harness 导航 URL 分类（主框架根路径 / 子框架跨源）
-├── menu.js / tray.js / windows.js  macOS 菜单、托盘、窗口呈现
+├── menu.js / tray.js / windows.js  菜单、托盘、窗口呈现（按平台挂载，见 §7.1）
 └── ui/
     ├── shell.html / shell.css / shell-preload.js   主窗口 46px 壳边框
     └── settings.html / dialog-preload.js           设置面板（定位菜单 + 居中内容）
@@ -261,7 +274,23 @@ npm 插件与 Git 预设的实际安装通过 `withComponentLock` 串行化（�
 export named ...`），导致新产物启动失败并自动回滚。处理方式是卸载/升级不兼容的
 插件，而不是回退 runtime。
 
-## 7. macOS UI 约定
+## 7. 平台外壳约定
+
+### 7.1 macOS / Windows 的挂载差异
+
+| 能力 | macOS | Windows / Linux |
+|---|---|---|
+| 标题栏 | `titleBarStyle:'hiddenInset'` + `trafficLightPosition`（左侧） | `titleBarStyle:'hidden'` + `titleBarOverlay`（右侧，高度 = 46px） |
+| 壳边框留白 | `padding-left: 84px` | `padding-right: 152px`（`:root[data-platform="windows"]`） |
+| 应用菜单 | `Menu.setApplicationMenu(...)`（即菜单栏） | 装为窗口菜单但 `setMenuBarVisibility(false)`，保留加速键 |
+| Dock/任务栏 | Dock 右键菜单 + 图标按压反馈 | 无 Dock；入口靠托盘菜单 |
+| 托盘图标 | `trayTemplate.png`（模板图，自动着色） | `icon.png` 缩到 16px（彩色，深色任务栏可见） |
+| 平台信息下发 | 渲染进程读 `location.search` 的 `platform` 参数（`shell-preload` 暴露 `api.platform`） | 同左 |
+
+`platform` 参数由主进程在 `loadFile(SHELL_HTML, { query })` 与
+`SetupDialog.loadQuery()` 里注入，落到 `<html data-platform>`，所以留白规则全在 CSS。
+
+### 7.2 macOS 视觉约定
 
 - 主窗口：`titleBarStyle: 'hiddenInset'`、`trafficLightPosition: {x:18,y:15}`，
   壳边框 46px，左侧 84px 避让红黄绿按钮。
@@ -298,24 +327,42 @@ DSH_DESKTOP_SMOKE=1 npx electron .       # Electron 冒烟（菜单/Dock/actions
 - `WindowManager` 保存/恢复 last-active device 与 bounds。
 - ssh quoting、remotePath、tunnelArgs。
 - UpdateManager 非网络快照与 preset checkout 路径。
+- **平台原语**（`src/platform.js`）：可执行文件命名、home 展开、node 分发归档形状
+  （tar.gz/zip、arm64/x64/x86）、`current` 指针原子切换且不留临时目录、npm 定位、
+  ssh 配置路径、干净子进程 PATH、`killTree` 对无效 pid 幂等。
+- **Windows 进程发现**（`src/process-scan.js`）：`netstat -ano` 行解析（只认 loopback/
+  通配 + LISTENING）、CIM 进程行解析、PowerShell 引号转义。
+
+> 依赖进程枚举（`ps` / `lsof` / `netstat`）的断言在宿主拒绝枚举时会**显式跳过**并打印
+> 一行提示（`enumerationWorks`）。这是环境限制，不是缺陷——不要把它改回硬失败。
 
 ## 9. 打包与发布
 
-- 产物命名遵循 GitHub Release 约定 `<name>-<version>-<os>-<arch>.<ext>`：
-  `dsh-mac-desktop-0.1.1-macos-arm64.dmg` / `dsh-mac-desktop-0.1.1-macos-arm64.zip`
-  （`package.json#build.artifactName`，小写连字符、无空格、含版本与架构）。
+- 产物命名遵循 GitHub Release 约定 `<name>-<version>-<os>-<arch>.<ext>`
+  （`package.json#build.artifactName`，小写连字符、无空格、含版本与架构）：
+  - macOS：`dsh-mac-desktop-<ver>-macos-{arm64,x64}.{dmg,zip}` —— **保持不变**，
+    避免既有下载链接与 `latest-mac.yml` 失效。
+  - Windows：`dsh-desktop-<ver>-windows-{x64,arm64}-setup.exe`（NSIS）、
+    `…-portable.exe`、`…-windows-{x64,arm64}.zip`。
 - 版本号唯一来源是 `package.json#version`（semver）；打包时请先 `npm version`
   或手工提升版本，再打 `v<version>` 标签推送，GitHub Actions 自动构建并发布。
-- 本地打包：`npm run dist`（app 目录，供 install.sh 安装）、`npm run dist:dmg`
-  （DMG + ZIP）。直接发布到 GitHub Releases：`GH_TOKEN=<token> npm run dist:publish`。
-- 自动发布流水线见 `.github/workflows/release.yml`：tag `v*` → 双架构
-  （arm64/x64）构建 → 上传 DMG/ZIP/latest-mac.yml → 创建 GitHub Release。
+- 本地打包：
+  - macOS：`npm run dist`（app 目录，供 install.sh 安装）、`npm run dist:dmg`（DMG + ZIP）。
+  - Windows：`powershell -ExecutionPolicy Bypass -File scripts\build-win.ps1`（一键双架构），
+    或 `npm run dist:win` / `dist:win:x64` / `dist:win:arm64`。
+  - 直接发布到 GitHub Releases：`GH_TOKEN=<token> npm run dist:publish` / `dist:publish:win`。
+- Windows 图标不需要单独维护 `.ico`：electron-builder 会把 `build/icon.png`（512px）
+  转成多分辨率的 `.ico`。
+- 自动发布流水线见 `.github/workflows/release.yml`：tag `v*` → 四条并行构建
+  （macOS arm64/x64、Windows x64/arm64）→ 上传各平台产物 → 创建 GitHub Release。
+- CI（`.github/workflows/ci.yml`）在 `macos-14` 与 `windows-latest` 上分别跑冒烟与打包预检。
 - **一键发布**：`node scripts/release.js`——分析自上次 tag 以来的提交
   （conventional commits：breaking→major / feat→minor / fix→patch / 仅文档→不发），
   检查当前版本是否已发布（远端 tag 是否存在：已发布→bump 新版本；未发布→直接
   发当前版本），确认后自动 `npm version` + push main + push tag 触发流水线。
   选项：`--dry-run` 只分析；`--yes` 跳过确认；`--bump <type>` 强制版本类型。
-- 未签名/未公证（`identity: null`），发布为正式 Release 即可，首次启动由 macOS 确认。
+- 未签名/未公证（`identity: null`），发布为正式 Release 即可，首次启动由 macOS
+  Gatekeeper / Windows SmartScreen 要求确认。
 
 ## 10. 新版本发布约定：驻留程序自动升级验证
 
@@ -334,7 +381,8 @@ DSH_DESKTOP_SMOKE=1 npx electron .       # Electron 冒烟（菜单/Dock/actions
 
 ### 验证步骤（每次新版本必做）
 
-1. `node scripts/smoke.js` + `DSH_DESKTOP_SMOKE=1 npx electron .` 全绿。
+1. `node scripts/smoke.js` + `DSH_DESKTOP_SMOKE=1 npx electron .` 全绿；
+   改了平台相关代码时，**Windows 上也要各跑一次**。
 2. 手工冒烟（推荐）：旧版本壳保持连接 → 另一实例触发升级 → 确认旧壳窗口不会
    把版本拉回旧值（多实例防回退：closeWatcher 重启前重解析 serviceVersion）。
 3. 回滚验证：新版本启动失败 → 自动回滚 previous 并恢复旧服务。
@@ -366,3 +414,54 @@ DSH_DESKTOP_SMOKE=1 npx electron .       # Electron 冒烟（菜单/Dock/actions
 4. macOS 壳边框样式。
 5. npm 插件安装 spec 兼容。
 6. 需求/开发/agent 文档。
+
+## 12. Android 客户端开发（`android/`）
+
+### 12.1 环境与构建
+
+```sh
+cd android
+GRADLE_USER_HOME=$PWD/.gradle-home ./gradlew :app:assembleDebug
+# 产物：app/build/outputs/apk/debug/app-debug.apk
+```
+
+需要 JDK 17 + Android SDK（`platforms;android-35`、`build-tools;35.0.0`）。
+沙箱/CI 中若 `~/.gradle`、`~/.android` 不可写，用仓库内的 `GRADLE_USER_HOME`；
+debug 签名用仓库内 `android/.keystore/`（已 gitignore），不依赖 `~/.android/debug.keystore`。
+
+### 12.2 端到端验证（无需真机）
+
+`.e2e/` 下自带一套可复现的 e2e：
+
+- `.e2e/mina/E2eSshd.java`：Apache MINA SSHD 起的**真实 SSH 服务**（公钥认证、
+  exec 通道跑真实 shell、`direct-tcpip` 端口转发），替代无法在沙箱里启动的系统 sshd。
+- `.e2e/remote-home/.dsh/`：远端 dsh home 夹具（`runtime/current` + `manifest.json`），
+  让 adopt/launch 逻辑面对真实的运行时布局与真实的 `dsh web` 进程。
+- `.e2e/id_rsa_e2e`：测试专用密钥（gitignore）。
+
+流程：启动 MINA → `adb install` → 往 `files/devices.json` 与 `files/keys/` 落夹具
+→ 点终端 → 观察应用内日志与真实 Harness 页面。
+
+> 模拟器注意：软件 GPU 下 harness 首屏需要 1~3 分钟；多台模拟器并行会让主机负载
+> 冲到 9 并触发系统 ANR 弹窗——那是模拟器性能问题，不是应用缺陷。
+
+### 12.3 改哪里
+
+- **连接行为** → `connection/ConnectionManager.kt`（唯一状态机）+ `ssh/RemoteService.kt`
+  （远端命令）。改远端命令前先对照 `docs/android-remote-protocol.md` 与桌面壳实现，
+  两边必须保持一致，否则会互相杀服务。
+- **新增远端命令** → 必须走 `RemoteShell.run()`（自带 sentinel 包裹与登录 shell），
+  不要自己起 exec；命令体内**不能出现单引号**（外层已单引号包裹）。
+- **UI 布局分支** → `ui/FormFactor.kt`。不要在 Composable 里直接读
+  `Configuration.screenWidthDp` 做双栏判定——分屏平板的窗口是手机宽。
+- **新的兼容 API** → `ui/WebViewCompatScript.kt`，并在 `android/README.md` 的兼容表
+  登记「引入版本 + 为什么需要」。
+- **持久化** → 设备/密钥在 `data/DeviceStore.kt`（JSON 文档），纯账号级偏好才进
+  `SettingsStore`（DataStore）。
+
+### 12.4 已验证的组合
+
+| 形态 | 设备 | 结果 |
+|---|---|---|
+| 手机竖屏 | Pixel 7 / API 33 / WebView 103 | SSH 连接、复用远端服务、隧道、WebView 加载真实 Harness |
+| 平板横屏 | 10.1" / API 34 / 2560×1600 | 双栏布局 + 右侧真实 Harness UI |
