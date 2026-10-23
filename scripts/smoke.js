@@ -22,7 +22,8 @@ const { resolveChannelVersion, notargetPackage } = require('../src/artifact')
 const { UpdateManager } = require('../src/update-manager')
 const { parseTarget, shellQuote, remotePath, tunnelArgs, parseSshConfig, listSshHosts } = require('../src/ssh')
 const { runCommand, spawnService, killActiveChildren, SERVICE_PID_PREFIX } = require('../src/runner')
-const { ConnectionManager, rehostUrl, probeOnce, processUsesHome } = require('../src/connection')
+const { ConnectionManager, rehostUrl, probeOnce } = require('../src/connection')
+const { processUsesHome } = require('../src/process-scan')
 const { findFreePort, releasePort, reservePort } = require('../src/ports')
 const runtimeStore = require('../src/runtime-store')
 const { WindowManager } = require('../src/window-manager')
@@ -822,7 +823,7 @@ async function main() {
   // their loopback ports, and `processUsesHome` must never claim a host that
   // belongs to somebody else's home. Assertions are shape- and guard-only:
   // whether a host happens to be running depends on the machine.
-  const { dshWebProcesses, listeningLoopbackPorts, processUsesHome } = require('../src/connection')
+  const { dshWebProcesses, listeningLoopbackPorts, processUsesHome } = require('../src/process-scan')
   const bystanderHome = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-bystander-'))
   const scanned = await dshWebProcesses()
   assert.ok(Array.isArray(scanned), 'dshWebProcesses must return an array')
@@ -907,7 +908,17 @@ async function main() {
   // single command returns `pid|files-under-home|port,port` per host and the
   // parsing is a pure function — the part most likely to rot, so it is
   // asserted here with no ssh connection involved.
-  const { parseRemoteHostScan, parseRemoteProbe, REMOTE_HOST_SCAN } = require('../src/connection')
+  const { parseRemoteHostScan, parseRemoteProbe, REMOTE_HOST_SCAN } = require('../src/remote-protocol')
+  // The remote protocol is its own module and must stay dependency-free: it is
+  // the one file that has to stay byte-compatible with the remote side and with
+  // the Android client, so it must not grow a dependency on ssh, sessions or
+  // process handles. Asserted structurally rather than by convention.
+  {
+    const protocolSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'remote-protocol.js'), 'utf8')
+    const requires = [...protocolSource.matchAll(/require\(['"]([^'"]+)['"]\)/gu)].map(m => m[1])
+    assert.deepStrictEqual(requires, [], 'the remote protocol must not require anything')
+    assert.ok(!/require\('\.\/(ssh|runner|tools|process-scan|runtime-store)'\)/u.test(protocolSource), 'the remote protocol must not reach into lifecycle modules')
+  }
   // The scan now also reports whether it could LOOK. `parseRemoteHostScan`
   // returns { hosts, psAvailable, lsofAvailable } so a caller can tell "nothing
   // to reap" from "could not scan" - the second used to be indistinguishable
@@ -977,7 +988,7 @@ async function main() {
   // `import.meta.main` is undefined, and the dsh CLI became a silent no-op
   // (rc=0, no output): "闪一下就没".
   {
-    const { parseRemoteLoginShell, REMOTE_LOGIN_SHELL_PROBE } = require('../src/connection')
+    const { parseRemoteLoginShell, REMOTE_LOGIN_SHELL_PROBE } = require('../src/remote-protocol')
     // The authoritative answer wins even when zsh exists.
     assert.strictEqual(parseRemoteLoginShell(['/bin/bash']), '/bin/bash', 'the real login shell must win over zsh')
     assert.strictEqual(parseRemoteLoginShell('/bin/bash\n'), '/bin/bash', 'a raw string is accepted too')
@@ -1001,7 +1012,7 @@ async function main() {
   // and the local run only ever proved the parser against a real account. The
   // parser itself is asserted above, platform-independently.
   if (!IS_WINDOWS) {
-    const { parseRemoteLoginShell, REMOTE_LOGIN_SHELL_PROBE } = require('../src/connection')
+    const { parseRemoteLoginShell, REMOTE_LOGIN_SHELL_PROBE } = require('../src/remote-protocol')
     const probed = await runCommand({ cmd: '/bin/sh', args: ['-c', REMOTE_LOGIN_SHELL_PROBE], timeoutMs: 15_000 })
     assert.strictEqual(probed.code, 0, 'the login-shell probe must succeed')
     const resolved = parseRemoteLoginShell(probed.lines)

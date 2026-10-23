@@ -87,6 +87,7 @@ src/
 ├── runtime-store.js  local/remote runtime state、`dsh web` URL 解析、原子 clone/build 锁
 ├── ports.js          SSH 本地转发端口的进程内预留与 TCP 探测
 ├── connection.js     本地服务/SSH 隧道连接、state 复用、服务重置、日志 ring
+├── remote-protocol.js 远端协议：ssh 命令常量与纯解析器（无依赖，Android 侧同源）
 ├── update.js         官方产物安装管线：registry 预检 → npm install → 原子切换 → 重启
 ├── update-manager.js 组件检查/更新：harness、npm 插件、git preset
 ├── components.js     组件目录、归一化、npm spec 解析、版本比较/树哈希
