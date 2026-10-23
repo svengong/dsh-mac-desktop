@@ -1,0 +1,10 @@
+# Android build outputs
+.gradle/
+build/
+local.properties
+captures/
+*.apk
+*.aab
+*.iml
+.idea/
+src/main/assets/test-ssh/
