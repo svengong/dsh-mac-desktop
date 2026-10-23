@@ -22,7 +22,7 @@ const { resolveChannelVersion, notargetPackage } = require('../src/artifact')
 const { UpdateManager } = require('../src/update-manager')
 const { parseTarget, shellQuote, remotePath, tunnelArgs, parseSshConfig, listSshHosts } = require('../src/ssh')
 const { runCommand, spawnService, killActiveChildren, SERVICE_PID_PREFIX } = require('../src/runner')
-const { ConnectionManager, rehostUrl, probeOnce } = require('../src/connection')
+const { ConnectionManager, rehostUrl, probeOnce, processUsesHome } = require('../src/connection')
 const { findFreePort, releasePort, reservePort } = require('../src/ports')
 const runtimeStore = require('../src/runtime-store')
 const { WindowManager } = require('../src/window-manager')
@@ -31,6 +31,37 @@ const { resolveTools, engineOk } = require('../src/tools')
 const { presentWindow, focusViewInKeyWindow } = require('../src/windows')
 const { isExternalUrl, isExternalSubFrameUrl } = require('../src/external-open')
 const { BOOT_FAILURE_PROBE, shouldReloadAfterBootFailure } = require('../src/boot-watch')
+const {
+  IS_WINDOWS, cmdQuote, expandHome, extractNodeArchive, isPidAlive, killTree,
+  nodeDistArchive, spawnInvocation, swapCurrentLink, executableNames, npmFor, sshConfigPath,
+} = require('../src/platform')
+const {
+  parseNetstatListeners, parseWindowsProcessList, isLoopbackAddress, psQuote,
+  windowsProcessUsesHome, posixProcessLines, dshWebProcesses,
+  processChildren, processGroupMembers, serviceFamily, commandMentionsPath,
+  windowsHostBin,
+} = require('../src/process-scan')
+
+/**
+ * A portable "sleep" for tests. `/bin/sleep` and `/bin/echo` do not exist on
+ * Windows, so every child-process test uses THIS process's own node with a
+ * tiny inline script — one code path, both platforms.
+ * @param {string} body - JS source for the child.
+ * @param {string[]} [args]
+ */
+function nodeChild(body, args = []) {
+  return { cmd: process.execPath, args: ['-e', body, ...args] }
+}
+
+/** `echo` equivalent that works everywhere. */
+function echoCommand(text) {
+  return { cmd: process.execPath, args: ['-e', 'process.stdout.write(process.argv[1] + "\\n")', text] }
+}
+
+/** `sleep <seconds>` equivalent that works everywhere. */
+function sleepCommand(seconds) {
+  return nodeChild(`setTimeout(() => {}, ${Number(seconds) * 1000})`)
+}
 
 async function main() {
   // settings: flat active-device view plus the per-device map. A legacy
@@ -261,13 +292,13 @@ async function main() {
   fs.rmSync(dir, { recursive: true, force: true })
 
   // runner
-  const echo = await runCommand({ cmd: '/bin/echo', args: ['dsh-smoke'] })
+  const echo = await runCommand(echoCommand('dsh-smoke'))
   assert.strictEqual(echo.code, 0)
   assert.deepStrictEqual(echo.lines, ['dsh-smoke'])
-  const failing = await runCommand({ cmd: '/bin/sh', args: ['-c', 'echo out; echo err >&2; exit 3'] })
+  const failing = await runCommand(nodeChild('process.stdout.write("out\\n");process.stderr.write("err\\n");process.exit(3)'))
   assert.strictEqual(failing.code, 3)
   assert.deepStrictEqual(failing.lines, ['out', 'err'])
-  const noNewline = await runCommand({ cmd: '/bin/sh', args: ['-c', 'printf no-newline'] })
+  const noNewline = await runCommand(nodeChild('process.stdout.write("no-newline")'))
   assert.deepStrictEqual(noNewline.lines, ['no-newline'])
 
   // remoteRun payload extraction: a newline-less command output that fuses
@@ -361,12 +392,31 @@ async function main() {
     await new Promise(resolve => authForProbe.listen(0, '127.0.0.1', resolve))
     const probePort = authForProbe.address().port
     // Reproduce the exact remote command builder.
+    //
+    // The probe body is a POSIX SHELL command that runs on the REMOTE host, so
+    // it cannot simply be executed here on Windows (there is no /bin/sh, and
+    // `cmd.exe /c exit 1` would make this assertion pass vacuously by never
+    // touching the stub). Instead the command is run through a real POSIX shell
+    // when one exists, and otherwise its ONE effect — fetching the probe URL
+    // and testing the body — is reproduced in-process. What is under test is
+    // the classification (LIVE vs not) and the command's shape, not the shell.
     let captured = ''
     const prober = Object.create(ConnectionManager.prototype)
     prober.remoteRun = async (_target, inner) => {
       captured = inner
-      const run = await runCommand({ cmd: '/bin/sh', args: ['-c', inner], timeoutMs: 10_000 })
-      return { ...run, lines: run.lines }
+      if (!IS_WINDOWS) {
+        const run = await runCommand({ cmd: '/bin/sh', args: ['-c', inner], timeoutMs: 10_000 })
+        return { ...run, lines: run.lines }
+      }
+      // Windows: interpret the probe the way the remote shell would.
+      const urlMatch = /curl -sL --max-time \d+ (http:\/\/[^\s)]+)/u.exec(inner)
+      if (urlMatch === null) return { code: 1, lines: ['unrecognised probe'] }
+      const probe = await probeOnce(urlMatch[1])
+      // The remote command echoes 1 ONLY when the body carries the boot marker
+      // or the auth notice — i.e. `isDsh`, not merely "something answered".
+      // Using `up` here would adopt any unrelated web server, which is the
+      // exact failure the next assertion guards against.
+      return { code: 0, lines: [probe.isDsh === true ? '1' : '0'] }
     }
     assert.strictEqual(await prober.remoteProbePort({ ssh: { host: 'stub' } }, probePort), true,
       'a token-gated harness must read as LIVE (bare and token shapes alike)')
@@ -450,7 +500,7 @@ async function main() {
 
   // runner process registry: killActiveChildren must terminate every tracked
   // child (in-flight build, service, tunnel) so app quit never orphans one.
-  const sleeper = spawnService({ cmd: '/bin/sleep', args: ['30'] })
+  const sleeper = spawnService(sleepCommand(30))
   await new Promise(resolve => sleeper.child.once('spawn', resolve))
   killActiveChildren()
   const sleeperEnd = await new Promise(resolve => sleeper.child.once('close', (code, signal) => resolve({ code, signal })))
@@ -609,7 +659,7 @@ async function main() {
   assert.strictEqual(engineOk('v23.11.0'), false)
   assert.strictEqual(engineOk('v22.19.0'), true)
   assert.strictEqual(engineOk('v24.16.0'), true)
-  const tools = resolveTools({ local: { repoDir: '', repoUrl: '' }, toolPaths: { node: '', git: '', pnpm: '', shell: '/bin/zsh' } })
+  const tools = resolveTools({ local: { repoDir: '', repoUrl: '' }, toolPaths: { node: '', git: '', pnpm: '', shell: require('../src/tools').defaultLoginShell() } })
   assert.ok(tools.node !== '', 'node not resolved')
   assert.ok(tools.pnpm !== '', 'pnpm not resolved')
   const pnpmRun = await runCommand({ cmd: tools.pnpm, args: [...tools.pnpmPrefix, '--version'], env: tools.env })
@@ -629,7 +679,7 @@ async function main() {
       },
     }),
     saveUpdate: () => {},
-    connection: { resolvedTools: () => resolveTools({ local: { repoDir: '', repoUrl: '' }, toolPaths: { node: '', git: '', pnpm: '', shell: '/bin/zsh' } }) },
+    connection: { resolvedTools: () => resolveTools({ local: { repoDir: '', repoUrl: '' }, toolPaths: { node: '', git: '', pnpm: '', shell: require('../src/tools').defaultLoginShell() } }) },
     harnessUpdater: { check: async () => ({ gitRepo: false, branch: '', upstream: '', ahead: 0, behind: 0, dirty: false, summary: 'not a repo' }) },
     onLog: () => {},
     onState: () => {},
@@ -798,18 +848,51 @@ async function main() {
   // reports paths with symlinks resolved (macOS `/tmp` is `/private/tmp`), so
   // if only one side is resolved every host looks like a bystander, the sweep
   // reaps nothing, and an orphan survives to hold the session store — silently.
+  //
+  // The two OSes answer the question from DIFFERENT evidence, so the
+  // assertions differ too:
+  //
+  //  - POSIX reads open files (`lsof`), so merely HOLDING a file in the home
+  //    is enough, and a symlinked path must resolve to the same answer.
+  //  - Windows reads the process COMMAND LINE (there is no cheap open-file
+  //    query). A test process that merely wrote a file there is therefore
+  //    NOT identifiable as "using" the home — and that is the correct,
+  //    fail-closed answer: the sweep must never adopt a process it cannot
+  //    tie to its own home. What Windows CAN prove is the argv test, which is
+  //    asserted directly below.
   const linkTarget = path.join(os.tmpdir(), `dsh-link-target-${process.pid}`)
   const linkPath = path.join(os.tmpdir(), `dsh-link-${process.pid}`)
   fs.mkdirSync(linkTarget, { recursive: true })
   const marker = fs.openSync(path.join(linkTarget, 'marker'), 'w')
   try {
-    fs.symlinkSync(linkTarget, linkPath)
-    assert.strictEqual(await processUsesHome(process.pid, linkTarget), true, 'a home this process holds a file in is ours')
-    assert.strictEqual(
-      await processUsesHome(process.pid, linkPath),
-      true,
-      'the same home reached through a symlink is still ours',
-    )
+    if (IS_WINDOWS) {
+      // This process's argv does not mention the home, so it is a bystander
+      // as far as the Windows check is concerned.
+      assert.strictEqual(
+        await processUsesHome(process.pid, linkTarget),
+        false,
+        'on Windows a process whose argv does not name the home is not adopted',
+      )
+      // The argv matcher itself is what decides adoption; assert its edges.
+      assert.strictEqual(
+        commandMentionsPath(`node "${path.join(linkTarget, 'runtime', 'x', 'bin.js')}" web`, linkTarget),
+        true,
+        'a runtime path under the home is ours',
+      )
+      assert.strictEqual(
+        commandMentionsPath(`node "${linkTarget}-decoy\\x\\bin.js" web`, linkTarget),
+        false,
+        'a sibling directory sharing the home as a prefix is NOT ours',
+      )
+    } else {
+      assert.strictEqual(await processUsesHome(process.pid, linkTarget), true, 'a home this process holds a file in is ours')
+      fs.symlinkSync(linkTarget, linkPath)
+      assert.strictEqual(
+        await processUsesHome(process.pid, linkPath),
+        true,
+        'the same home reached through a symlink is still ours',
+      )
+    }
   } finally {
     fs.closeSync(marker)
     fs.rmSync(linkTarget, { recursive: true, force: true })
@@ -825,30 +908,51 @@ async function main() {
   // parsing is a pure function — the part most likely to rot, so it is
   // asserted here with no ssh connection involved.
   const { parseRemoteHostScan, parseRemoteProbe, REMOTE_HOST_SCAN } = require('../src/connection')
+  // The scan now also reports whether it could LOOK. `parseRemoteHostScan`
+  // returns { hosts, psAvailable, lsofAvailable } so a caller can tell "nothing
+  // to reap" from "could not scan" - the second used to be indistinguishable
+  // and read as a clean home while a second host kept the session store.
+  const hostOnly = lines => parseRemoteHostScan(lines).hosts
   assert.deepStrictEqual(
-    parseRemoteHostScan(['3663408|8|35993']),
+    hostOnly(['3663408|8|35993']),
     [{ pid: 3663408, usesHome: true, ports: [35993] }],
     'a host with files under the home is one we may adopt',
   )
   assert.deepStrictEqual(
-    parseRemoteHostScan(['42|0|53100,53101']),
+    hostOnly(['42|0|53100,53101']),
     [{ pid: 42, usesHome: false, ports: [53100, 53101] }],
     'a host outside our dsh home must be marked a bystander',
   )
   assert.deepStrictEqual(
-    parseRemoteHostScan(['7|3|']),
+    hostOnly(['7|3|']),
     [{ pid: 7, usesHome: true, ports: [] }],
     'a host not listening yet still has to be reaped',
   )
-  assert.deepStrictEqual(parseRemoteHostScan(['garbage', '', '|1|80', '0|1|80']), [], 'malformed scan lines are ignored')
-  assert.deepStrictEqual(parseRemoteHostScan([]), [], 'an empty scan yields no hosts')
-  assert.deepStrictEqual(parseRemoteHostScan(undefined), [], 'a missing scan yields no hosts')
+  assert.deepStrictEqual(hostOnly(['garbage', '', '|1|80', '0|1|80']), [], 'malformed scan lines are ignored')
+  assert.deepStrictEqual(hostOnly([]), [], 'an empty scan yields no hosts')
+  assert.deepStrictEqual(hostOnly(undefined), [], 'a missing scan yields no hosts')
+  // Capability markers must be consumed, not mistaken for host rows.
+  assert.deepStrictEqual(
+    parseRemoteHostScan(['__dsh_lsof_ok', '__dsh_ps_ok', '3663408|8|35993']),
+    { hosts: [{ pid: 3663408, usesHome: true, ports: [35993] }], psAvailable: true, lsofAvailable: true },
+    'capability markers set the report flags and never become hosts',
+  )
+  assert.deepStrictEqual(
+    parseRemoteHostScan(['__dsh_lsof_ok', '__dsh_ps_missing']),
+    { hosts: [], psAvailable: false, lsofAvailable: true },
+    'a host that denies ps reports psAvailable=false instead of a clean home',
+  )
+  assert.deepStrictEqual(
+    parseRemoteHostScan(['__dsh_lsof_missing', '__dsh_ps_ok']),
+    { hosts: [], psAvailable: true, lsofAvailable: false },
+    'a host without lsof cannot attribute hosts to a home',
+  )
   // A raw string is split into lines. Passing one to a `for..of` over an array
-  // would iterate CHARACTER by character and match nothing — and an empty sweep
+  // would iterate CHARACTER by character and match nothing - and an empty sweep
   // reads as "nothing to reap", leaving an orphan to hold the task-board ledger
   // and crash-loop the next spawn. The failure is silent, so it is asserted.
   assert.deepStrictEqual(
-    parseRemoteHostScan('3663408|8|35993\n42|0|53100,53101\n'),
+    hostOnly('3663408|8|35993\n42|0|53100,53101\n'),
     [{ pid: 3663408, usesHome: true, ports: [35993] }, { pid: 42, usesHome: false, ports: [53100, 53101] }],
     'a raw scan string is split into lines instead of iterated per character',
   )
@@ -861,6 +965,9 @@ async function main() {
   // single quotes, so an unescaped one inside would break it.
   assert.ok(!REMOTE_HOST_SCAN.includes("'"), 'the remote scan must not use single quotes')
   assert.ok(REMOTE_HOST_SCAN.includes('$HOME/.dsh/'), 'the remote scan must confine itself to the remote dsh home')
+  assert.ok(REMOTE_HOST_SCAN.includes('__dsh_ps_ok') && REMOTE_HOST_SCAN.includes('__dsh_ps_missing'), 'the scan reports whether ps could run')
+  assert.ok(REMOTE_HOST_SCAN.includes('__dsh_lsof_ok') && REMOTE_HOST_SCAN.includes('__dsh_lsof_missing'), 'the scan reports whether lsof exists')
+  assert.ok(REMOTE_HOST_SCAN.includes('; fi'), 'the ps guard must be a closed if-block')
 
   // The login shell must be the account's REAL one (what sshd runs), not the
   // most capable shell that merely exists. The old probe walked `zsh, bash,
@@ -888,7 +995,12 @@ async function main() {
   }
   // Executed for real: the probe must resolve THIS machine's login shell. On
   // macOS there is no `getent`, so this also covers the $SHELL fallback.
-  {
+  //
+  // Windows has no /bin/sh and no `getent`, so there is nothing to execute:
+  // the probe runs on the REMOTE host (always POSIX in this shell's SSH mode),
+  // and the local run only ever proved the parser against a real account. The
+  // parser itself is asserted above, platform-independently.
+  if (!IS_WINDOWS) {
     const { parseRemoteLoginShell, REMOTE_LOGIN_SHELL_PROBE } = require('../src/connection')
     const probed = await runCommand({ cmd: '/bin/sh', args: ['-c', REMOTE_LOGIN_SHELL_PROBE], timeoutMs: 15_000 })
     assert.strictEqual(probed.code, 0, 'the login-shell probe must succeed')
@@ -940,7 +1052,11 @@ async function main() {
     let asked = null
     const sweeper = Object.create(ConnectionManager.prototype)
     sweeper.log = () => {}
-    sweeper.remoteHostCandidates = async () => sweepCase.candidates
+    // A report, not a bare array: the sweep needs to know whether the scan
+    // could look at all. These stubs represent a host where it could.
+    sweeper.remoteHostCandidates = async () => ({
+      hosts: sweepCase.candidates, psAvailable: true, lsofAvailable: true,
+    })
     sweeper.killRemotePids = async (_target, pids) => {
       asked = pids
       return pids
@@ -949,6 +1065,44 @@ async function main() {
     assert.deepStrictEqual(asked, sweepCase.expect, sweepCase.name)
     assert.strictEqual(killed, sweepCase.expect === null ? 0 : sweepCase.expect.length, `${sweepCase.name} (count)`)
   }
+  // A scan that cannot LOOK must never be reported as a clean home. This is
+  // the failure that made two hosts sharing a session store invisible: the
+  // sweep said "nothing to reap" while `ps` was denied on the host.
+  for (const broken of [
+    { name: 'ps denied', report: { hosts: [], psAvailable: false, lsofAvailable: true }, expectNote: /ps 不可用/ },
+    { name: 'lsof missing', report: { hosts: [], psAvailable: true, lsofAvailable: false }, expectNote: /lsof 不可用/ },
+  ]) {
+    let asked = null
+    const notes = []
+    const sweeper = Object.create(ConnectionManager.prototype)
+    sweeper.log = line => notes.push(String(line))
+    sweeper.remoteHostCandidates = async () => broken.report
+    sweeper.killRemotePids = async (_target, pids) => {
+      asked = pids
+      return pids
+    }
+    const killed = await sweeper.reapStrayRemoteHosts({ ssh: { host: 'stub' } }, 10)
+    assert.strictEqual(asked, null, `${broken.name}: an unusable scan must not authorise a kill`)
+    assert.strictEqual(killed, 0, `${broken.name}: nothing was killed`)
+    assert.ok(
+      notes.some(line => broken.expectNote.test(line)),
+      `${broken.name}: the skip must be reported, not silent (got ${JSON.stringify(notes)})`,
+    )
+  }
+  // A visible stray that survives the kill must still be reported, so a wedged
+  // sweep is not mistaken for a clean home.
+  {
+    const notes = []
+    const sweeper = Object.create(ConnectionManager.prototype)
+    sweeper.log = line => notes.push(String(line))
+    sweeper.remoteHostCandidates = async () => ({
+      hosts: [{ pid: 10, usesHome: true, ports: [5110] }, { pid: 20, usesHome: true, ports: [5120] }],
+      psAvailable: true, lsofAvailable: true,
+    })
+    sweeper.killRemotePids = async () => []
+    await sweeper.reapStrayRemoteHosts({ ssh: { host: 'stub' } }, 10)
+    assert.ok(notes.some(line => /未能清理/.test(line)), 'a stray that survived must be reported')
+  }
   // A corrupt state file must not become "kill everything". The arbiter is the
   // recorded pid, so when it is missing or nonsense we cannot tell the hosts
   // apart and must kill none — leaving a stray alive is the survivable error.
@@ -956,7 +1110,9 @@ async function main() {
     let asked = null
     const sweeper = Object.create(ConnectionManager.prototype)
     sweeper.log = () => {}
-    sweeper.remoteHostCandidates = async () => [{ pid: 10, usesHome: true, ports: [5110] }]
+    sweeper.remoteHostCandidates = async () => ({
+      hosts: [{ pid: 10, usesHome: true, ports: [5110] }], psAvailable: true, lsofAvailable: true,
+    })
     sweeper.killRemotePids = async (_target, pids) => {
       asked = pids
       return pids
@@ -1031,8 +1187,15 @@ async function main() {
   // the sweep exempts the keepPid's whole process GROUP (covers state files in
   // both the old wrapper-pid and new service-pid formats), and wrappers are
   // never host candidates (a full sweep kills exactly the one real host).
-  const alive = pid => {
-    try { process.kill(pid, 0); return true } catch { return false }
+  const alive = pid => isPidAlive(pid)
+  // The sweep can only work if the host lets us LIST processes at all. The
+  // shell now has two independent listers (`ps`, then `pgrep -fl`), so this
+  // probe asks the real code path rather than assuming a single tool: a host
+  // that refuses `ps` is exactly the case the fallback exists for.
+  const enumerationWorks = (await posixProcessLines().catch(() => null)) !== null
+    || IS_WINDOWS
+  if (!enumerationWorks) {
+    console.log('  · no process lister available on this host; skipping the sweep assertions')
   }
   const familyHome = fs.mkdtempSync(path.join(os.tmpdir(), `dsh-family-home-${process.pid}-`))
   const fakeBin = path.join(familyHome, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
@@ -1071,18 +1234,20 @@ async function main() {
     assert.notStrictEqual(servicePid, familySpawn.child.pid, 'announced pid is the SERVICE, not the wrapper')
     assert.ok(alive(servicePid), 'announced service pid is alive')
 
-    assert.strictEqual(
-      await familySweeper.reapLocalHosts(familySettings, familySpawn.child.pid),
-      0,
-      'OLD-format state (wrapper pid) must spare the service — same group',
-    )
-    assert.ok(alive(servicePid), 'service survives a wrapper-pid keepPid sweep')
-    assert.strictEqual(
-      await familySweeper.reapLocalHosts(familySettings, servicePid),
-      0,
-      'NEW-format state (service pid) must spare the service',
-    )
-    assert.ok(alive(servicePid), 'service survives a service-pid keepPid sweep')
+    if (enumerationWorks) {
+      assert.strictEqual(
+        await familySweeper.reapLocalHosts(familySettings, familySpawn.child.pid),
+        0,
+        'OLD-format state (wrapper pid) must spare the service — same group',
+      )
+      assert.ok(alive(servicePid), 'service survives a wrapper-pid keepPid sweep')
+      assert.strictEqual(
+        await familySweeper.reapLocalHosts(familySettings, servicePid),
+        0,
+        'NEW-format state (service pid) must spare the service',
+      )
+      assert.ok(alive(servicePid), 'service survives a service-pid keepPid sweep')
+    }
 
     // Register the close listener BEFORE the kill: the wrapper can exit (and
     // emit its one close event) while the sweep+sleep below runs, and a
@@ -1090,18 +1255,20 @@ async function main() {
     const wrapperClosed = new Promise(resolve => {
       familySpawn.child.once('close', () => resolve('closed'))
     })
-    assert.strictEqual(
-      await familySweeper.reapLocalHosts(familySettings),
-      1,
-      'full sweep kills exactly the one real host (the wrapper is not a host candidate)',
-    )
-    await new Promise(resolve => setTimeout(resolve, 2000))
-    assert.ok(!alive(servicePid), 'full sweep killed the real service')
-    const wrapperEnd = await Promise.race([
-      wrapperClosed,
-      new Promise(resolve => setTimeout(() => resolve('timeout'), 8000)),
-    ])
-    assert.strictEqual(wrapperEnd, 'closed', 'wrapper exits once its service is gone')
+    if (enumerationWorks) {
+      assert.strictEqual(
+        await familySweeper.reapLocalHosts(familySettings),
+        1,
+        'full sweep kills exactly the one real host (the wrapper is not a host candidate)',
+      )
+      await new Promise(resolve => setTimeout(resolve, 2000))
+      assert.ok(!alive(servicePid), 'full sweep killed the real service')
+      const wrapperEnd = await Promise.race([
+        wrapperClosed,
+        new Promise(resolve => setTimeout(() => resolve('timeout'), 8000)),
+      ])
+      assert.strictEqual(wrapperEnd, 'closed', 'wrapper exits once its service is gone')
+    }
   } finally {
     if (familySpawn !== null) familySpawn.stop()
     fs.rmSync(familyHome, { recursive: true, force: true })
@@ -1218,7 +1385,7 @@ async function main() {
     })
     const portZeroTools = resolveTools({
       local: { repoDir, repoUrl: '' },
-      toolPaths: { node: '', git: '', pnpm: '', shell: '/bin/zsh' },
+      toolPaths: { node: '', git: '', pnpm: '', shell: require('../src/tools').defaultLoginShell() },
     })
     portZeroConnection.resolvedTools = () => portZeroTools
     let spawnError = null
@@ -1353,8 +1520,7 @@ async function main() {
   // resolves with `aborted: true` instead of hanging for the full timeout.
   let abortAt = 0
   const abortable = await runCommand({
-    cmd: '/bin/sleep',
-    args: ['30'],
+    ...sleepCommand(30),
     shouldAbort: () => (abortAt += 1) > 2,
   })
   assert.strictEqual(abortable.aborted, true)
@@ -1370,7 +1536,7 @@ async function main() {
     getSettings: () => ({ mode: 'local', local: { repoDir: '', repoUrl: '', dshHome: cancelHome }, ssh: {} }),
     connection: {
       owner: () => 'smoke-cancel-owner',
-      resolvedTools: () => resolveTools({ local: { repoDir: '', repoUrl: '' }, toolPaths: { node: '', git: '', pnpm: '', shell: '/bin/zsh' } }),
+      resolvedTools: () => resolveTools({ local: { repoDir: '', repoUrl: '' }, toolPaths: { node: '', git: '', pnpm: '', shell: require('../src/tools').defaultLoginShell() } }),
       remoteRun: async () => ({ code: 0, lines: [] }),
       restartService: async () => { cancelCalls.push('restart') },
     },
@@ -1413,6 +1579,519 @@ async function main() {
   assert.strictEqual(mergeUpdates({ channel: 'alpha' }, {}).channel, undefined)
   assert.strictEqual(mergeUpdates({}, { channel: 'alpha' }).channel, undefined)
 
+
+  // ── platform primitives ──────────────────────────────────────────────────
+  // The shell runs on macOS, Windows and Linux; every OS-specific primitive is
+  // asserted here so a port cannot silently fall back to a POSIX assumption.
+
+  // Executable naming: a bare tool name resolves to .exe/.cmd shims on
+  // Windows and to the bare name elsewhere.
+  {
+    const names = executableNames('node')
+    if (IS_WINDOWS) {
+      assert.deepStrictEqual(names.slice(0, 3), ['node.exe', 'node.cmd', 'node.bat'],
+        'Windows must prefer node.exe, then the .cmd/.bat shims')
+      assert.ok(names.includes('node'), 'the extensionless form stays as a last resort')
+    } else {
+      assert.deepStrictEqual(names, ['node'], 'POSIX tools resolve to the bare name')
+    }
+    // An explicit extension is never rewritten: pnpm.cmd must stay pnpm.cmd.
+    assert.deepStrictEqual(executableNames('pnpm.cmd'), ['pnpm.cmd'])
+  }
+
+  // Home expansion handles both separators, so a settings file written on one
+  // platform still resolves on the other.
+  {
+    const home = os.homedir()
+    assert.strictEqual(expandHome('~'), home)
+    assert.strictEqual(expandHome('~/x'), path.join(home, 'x'))
+    assert.strictEqual(expandHome('~' + path.sep + 'x'), path.join(home, 'x'))
+    assert.strictEqual(expandHome('/absolute/path'), '/absolute/path')
+  }
+
+  // Node distribution: the archive kind and filename differ per OS, and the
+  // arch spelling must map arm64/x64 correctly (Windows arm64 builds ship).
+  {
+    // The POSIX shape is asserted with an explicit target so the assertion
+    // means the same thing on a Windows host.
+    const mac = nodeDistArchive('22.19.0', 'arm64', { windows: false, platform: 'darwin' })
+    assert.ok(mac.url.endsWith('.tar.gz'), 'POSIX node distributions are tarballs')
+    assert.ok(mac.url.includes('node-v22.19.0-'), 'the url carries the version')
+    assert.ok(/22\.19\.0-darwin-arm64\.tar\.gz$/.test(mac.url), 'arch and platform are carried through')
+    assert.strictEqual(mac.kind, 'tar.gz')
+    // The archive kind follows the TARGET OS, so both shapes are assertable
+    // from either host (a Windows installer may be built on a macOS runner).
+    const win = nodeDistArchive('22.19.0', 'x64', { windows: true })
+    assert.strictEqual(win.kind, 'zip', 'Windows node distributions are zips')
+    assert.ok(win.url.includes('-win-x64.zip'), `Windows url must use the win-x64 shape, got ${win.url}`)
+    const ia32 = nodeDistArchive('22.19.0', 'ia32')
+    assert.ok(ia32.url.includes('-x86.'), 'ia32 maps to the x86 archive')
+  }
+
+  // The `current` pointer swap works on both a symlink and a junction host and
+  // never leaves a half-swapped directory behind.
+  {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-current-swap-'))
+    try {
+      const v1 = path.join(root, 'npm1')
+      const v2 = path.join(root, 'npm2')
+      fs.mkdirSync(v1)
+      fs.mkdirSync(v2)
+      fs.writeFileSync(path.join(v1, 'which.txt'), 'one')
+      fs.writeFileSync(path.join(v2, 'which.txt'), 'two')
+      const current = path.join(root, 'current')
+      swapCurrentLink(current, v1, 'npm1')
+      assert.strictEqual(fs.readFileSync(path.join(current, 'which.txt'), 'utf8'), 'one')
+      swapCurrentLink(current, v2, 'npm2')
+      assert.strictEqual(fs.readFileSync(path.join(current, 'which.txt'), 'utf8'), 'two',
+        'a second swap must repoint current atomically')
+      assert.deepStrictEqual(
+        fs.readdirSync(root).filter(name => name.startsWith('.') || name.includes('.tmp-') || name.includes('.old-')),
+        [],
+        'no swap turds are left behind',
+      )
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true })
+    }
+  }
+
+  // Windows process discovery: netstat rows become loopback listeners, CIM
+  // records become pid + command lines. Parsed as pure data so the formats are
+  // covered without needing a Windows host.
+  {
+    const rows = [
+      '  TCP    127.0.0.1:3080         0.0.0.0:0              LISTENING       12345',
+      '  TCP    [::1]:5678             [::]:0                 LISTENING       999',
+      '  TCP    192.168.1.5:445        0.0.0.0:0              LISTENING       4',
+      '  TCP    127.0.0.1:52000        127.0.0.1:5000         ESTABLISHED     777',
+      '  UDP    127.0.0.1:53           *:*                                    888',
+    ]
+    const listeners = parseNetstatListeners(rows)
+    assert.deepStrictEqual(listeners.map(entry => entry.port), [3080, 5678],
+      'only loopback/wildcard LISTENING rows are listeners; LAN-only and non-LISTENING rows are not')
+    assert.strictEqual(listeners[0].pid, 12345)
+    assert.deepStrictEqual(parseNetstatListeners(''), [])
+    assert.deepStrictEqual(parseNetstatListeners(undefined), [])
+    assert.strictEqual(isLoopbackAddress('127.0.0.1'), true)
+    assert.strictEqual(isLoopbackAddress('::1'), true)
+    assert.strictEqual(isLoopbackAddress('0.0.0.0'), true, 'a wildcard bind serves loopback too')
+    assert.strictEqual(isLoopbackAddress('10.1.2.3'), false)
+
+    const processes = parseWindowsProcessList([
+      '4321\t"C:\\Program Files\\nodejs\\node.exe" C:\\Users\\u\\.dsh\\runtime\\current\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js web --port 0',
+      'not-a-pid\tsomething',
+      '',
+    ])
+    assert.strictEqual(processes.length, 1, 'only pid-prefixed records parse')
+    assert.strictEqual(processes[0].pid, 4321)
+    assert.ok(processes[0].command.includes('bin.js web --port 0'))
+
+    // PowerShell string literals escape a single quote by doubling it.
+    assert.strictEqual(psQuote("a'b"), "'a''b'")
+
+    // Windows batch shims (npm.cmd, pnpm.cmd) can only run through cmd.exe,
+    // and cmd.exe parses its command line differently from POSIX shells.
+    const plain = spawnInvocation('/usr/bin/git', ['status'])
+    assert.strictEqual(plain.cmd, '/usr/bin/git', 'POSIX invocation is unchanged')
+    assert.deepStrictEqual(plain.args, ['status'])
+    assert.deepStrictEqual(plain.options, {})
+    // Quote rules are pure, so they are asserted on every platform.
+    assert.strictEqual(cmdQuote('plain'), 'plain')
+    assert.strictEqual(cmdQuote('has space'), '"has space"', 'spaces need quotes')
+    // cmd.exe treats & | < > as LITERALS inside double quotes, so quoting (not
+    // caret-escaping) is what neutralises them.
+    assert.strictEqual(cmdQuote('a&b'), '"a&b"', 'cmd metacharacters are neutralised by quoting')
+    assert.strictEqual(cmdQuote('say "hi"'), '"say ""hi"""', 'embedded quotes are doubled')
+    assert.strictEqual(cmdQuote(''), '""')
+  }
+
+  // npm lives beside node and is spelled differently per OS; a wrong guess
+  // makes 'install pnpm / the official artifact' fail with ENOENT.
+  {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-npm-locate-'))
+    try {
+      for (const name of IS_WINDOWS ? ['node.exe', 'npm.cmd'] : ['node', 'npm']) {
+        fs.writeFileSync(path.join(dir, name), '')
+      }
+      const nodePath = path.join(dir, IS_WINDOWS ? 'node.exe' : 'node')
+      assert.strictEqual(npmFor(nodePath), path.join(dir, IS_WINDOWS ? 'npm.cmd' : 'npm'),
+        'npm must resolve to the launcher that actually exists on this OS')
+      assert.strictEqual(npmFor(''), '', 'an empty node path has no npm beside it')
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  }
+
+  // ssh config path: %USERPROFILE%\.ssh\config on Windows, ~/.ssh/config elsewhere.
+  {
+    const configPath = sshConfigPath()
+    assert.strictEqual(configPath, path.join(os.homedir(), '.ssh', 'config'))
+  }
+
+  // Tool resolution must not depend on the launch PATH: every candidate list
+  // includes the platform's system dirs and the repo-local tool bins.
+  {
+    const settings = {
+      local: { repoDir: path.join(__dirname, '..', 'deepseek-harness') },
+      toolPaths: { node: '', git: '', pnpm: '', shell: require('../src/tools').defaultLoginShell() },
+    }
+    const env = require('../src/tools').childEnv(settings, '')
+    const pathKey = IS_WINDOWS ? 'Path' : 'PATH'
+    assert.ok(typeof env[pathKey] === 'string' && env[pathKey] !== '', 'the child PATH must be set')
+    const parts = env[pathKey].split(path.delimiter)
+    assert.ok(parts.some(part => part.endsWith(path.join('.dsh-tools', 'node', 'bin'))),
+      'the repo-local toolchain bin must be on PATH')
+    assert.ok(parts.some(part => part.endsWith(path.join('node_modules', '.bin'))),
+      'node_modules/.bin must be on PATH (pnpm shims live there)')
+    if (IS_WINDOWS) {
+      assert.strictEqual(env.PATH, env.Path, 'both PATH spellings must agree on Windows')
+    }
+    assert.strictEqual(env.DSH_LEFTHOOK_ALLOW_HOOKS_PATH_OVERRIDE, '1',
+      'the lefthook override must survive the clean env')
+  }
+
+  // Home ownership gates a KILL: a host the sweep cannot identify must never be
+  // signalled. The Windows path answers false when it cannot read a command
+  // line, and the POSIX path answers false when lsof refuses — both are
+  // asserted here because getting the polarity wrong kills bystanders.
+  {
+    // A pid that cannot exist has no command line and no open files.
+    assert.strictEqual(
+      await processUsesHome(2 ** 30, path.join(os.tmpdir(), 'dsh-no-such-home')),
+      false,
+      'an unidentifiable process must never be reported as using our home',
+    )
+    assert.strictEqual(
+      await processUsesHome(process.pid, ''),
+      true,
+      'no configured home means "cannot distinguish" — keep the process',
+    )
+    // The Windows twin answers false when it cannot read a command line (no
+    // PowerShell, no such pid, permission denied) — the fail-closed direction.
+    assert.strictEqual(
+      await windowsProcessUsesHome(2 ** 30, path.join(os.tmpdir(), 'nope')),
+      false,
+      'an unreadable Windows process must never count as using our home',
+    )
+  }
+
+
+  // ps-free process enumeration: the shell must not lose its sweep when the
+  // host denies `ps`. pgrep reaches processes through a different interface,
+  // and the family walk (group members + children) is what keeps a validated
+  // service alive — the ps-only version killed it (reproduced).
+  {
+    // `posixProcessLines` is the POSIX lister (`ps`, then `pgrep`); on Windows
+    // there is neither, and the Windows path uses WMI instead — so an empty
+    // answer here is CORRECT on Windows, not a missing capability.
+    const lines = IS_WINDOWS ? null : await posixProcessLines().catch(() => null)
+    if (lines === null) {
+      if (!IS_WINDOWS) {
+        console.log('  · no process lister at all on this host; skipping enumeration assertions')
+      }
+    } else {
+      assert.ok(lines.length > 0, 'a working lister must yield lines')
+      assert.ok(
+        lines.some(line => /^\s*\d+\s+\S/.test(line)),
+        'every line must be "pid command" so the parser can read it',
+      )
+      assert.ok(
+        lines.some(line => Number(line.match(/^\s*(\d+)/)[1]) > 0),
+        'pids must be numeric',
+      )
+    }
+    // processChildren / processGroupMembers must degrade to [] rather than throw
+    // for pids that cannot exist (cancellation and sweep paths call them blind).
+    assert.deepStrictEqual(await processChildren(0), [])
+    assert.deepStrictEqual(await processChildren(-1), [])
+    assert.deepStrictEqual(await processGroupMembers(0), [])
+    // A family always contains its own anchor, even with no discoverable kin:
+    // skipping the anchor is what makes "keep this service" meaningful.
+    const solo = await serviceFamily(process.pid)
+    assert.ok(solo.has(process.pid), 'the anchor pid is always in its own family')
+    const empty = await serviceFamily(0)
+    assert.strictEqual(empty.size, 0, 'no anchor means no family')
+  }
+
+
+  // Windows host identification, exercised from any OS.
+  //
+  // Found on real Windows 11 ARM64: `dshWebProcesses()` returned [] while
+  // WMI clearly listed the host, because the node binary there is `node.exe`
+  // (a pattern accepting only bare `node` matches nothing) and because the
+  // guard wrapper's command line CONTAINS the service's argv, so a greedy
+  // "everything before bin.js" capture produced the guard's whole command line
+  // as the bin path. Both are asserted here, plus the argv[1]-only rule that
+  // keeps the guard out even if its argv ever changes shape.
+  {
+    const svc = String.raw`C:\Users\u\tools\node\node.exe C:\Users\u\.dsh\runtime\x\node_modules\@deepseek-ai\dsh\lib\bin.js web --port 0`
+    assert.strictEqual(
+      windowsHostBin(svc),
+      String.raw`C:\Users\u\.dsh\runtime\x\node_modules\@deepseek-ai\dsh\lib\bin.js`,
+      'node.exe + runtime bin + web is a host (the .exe must not defeat the match)',
+    )
+    assert.strictEqual(
+      windowsHostBin(String.raw`C:\n\node.exe C:\r\apps\cli\lib\bin.js web --port 0`),
+      String.raw`C:\r\apps\cli\lib\bin.js`,
+      'the repo layout (apps/cli) is a host too',
+    )
+    assert.strictEqual(
+      windowsHostBin(String.raw`"C:\Program Files\nodejs\node.exe" "C:\u\.dsh\node_modules\@deepseek-ai\dsh\lib\bin.js" web`),
+      String.raw`C:\u\.dsh\node_modules\@deepseek-ai\dsh\lib\bin.js`,
+      'quoted paths (Program Files) stay one token',
+    )
+    // NEVER a host: the guard wrapper, an unrelated app, a non-web subcommand,
+    // and the Electron binary itself.
+    assert.strictEqual(
+      windowsHostBin(`C:\\n\\node.exe C:\\r\\src\\service-guard.js 42 ${svc}`),
+      '',
+      'the guard wrapper must not read as a host even though it contains the argv',
+    )
+    assert.strictEqual(windowsHostBin(String.raw`node.exe C:\other\app.js`), '', 'an unrelated node app is not a host')
+    assert.strictEqual(
+      windowsHostBin(String.raw`node.exe C:\x\node_modules\@deepseek-ai\dsh\lib\bin.js plugin add foo`),
+      '',
+      'only the web subcommand counts',
+    )
+    assert.strictEqual(
+      windowsHostBin(String.raw`C:\app\DeepSeek Harness.exe C:\x\node_modules\@deepseek-ai\dsh\lib\bin.js web`),
+      '',
+      'a non-node executable is not a host',
+    )
+  }
+
+  // Home ownership is boundary-aware: a sibling directory that merely shares a
+  // prefix (`.dsh` vs `.dsh-dev`) must never be adopted — that would let the
+  // sweep kill a bystander's healthy instance.
+  {
+    const home = String.raw`C:\Users\u\.dsh`
+    assert.strictEqual(commandMentionsPath(`node "${home}\\runtime\\x\\bin.js" web`, home), true)
+    assert.strictEqual(commandMentionsPath(String.raw`node "C:\Users\u\.dsh-dev\runtime\x\bin.js" web`, home), false,
+      'a prefix-sharing sibling home is not ours')
+    assert.strictEqual(commandMentionsPath(`node ${home} --x`, home), true, 'a bare quoted home matches')
+    assert.strictEqual(commandMentionsPath(String.raw`node C:\other\bin.js`, home), false)
+    assert.strictEqual(commandMentionsPath('/home/u/.dsh/runtime/x/bin.js web', '/home/u/.dsh'), true)
+    assert.strictEqual(commandMentionsPath('/home/u/.dsh-dev/runtime/x/bin.js web', '/home/u/.dsh'), false)
+  }
+
+
+  // A failed connect must NEVER look like a hang.
+  //
+  // The old code retried twice in total silence and only then showed a MODAL
+  // error box. On a clean Windows install (no node anywhere) that produced the
+  // exact reported symptom: the loading panel counted "已等待 Ns" forever over a
+  // log that never mentioned the failure, because the reason only ever reached
+  // the third attempt's blocking dialog.
+  {
+    const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'main.js'), 'utf8')
+    // Take EVERYTHING from the handler to the next top-level function: a
+    // non-greedy "up to the first \n}" stops inside the nested setTimeout/if
+    // blocks and would then miss code that lives further down (which is exactly
+    // how a deleted pendingOpen clear slipped past an earlier version of this
+    // assertion).
+    const start = source.indexOf('function onSessionConnectFailed(')
+    assert.ok(start !== -1, 'onSessionConnectFailed must exist')
+    const rest = source.slice(start)
+    const nextFn = rest.slice(1).search(/\n(?:async )?function /u)
+    const body = nextFn === -1 ? rest : rest.slice(0, nextFn + 1)
+    // The failure reason must be logged BEFORE any retry branch, so attempt #1
+    // already tells the user why.
+    const firstLog = body.indexOf('connection.log')
+    const retryGate = body.indexOf('autoReconnectAttempts <= 2')
+    assert.ok(firstLog !== -1, 'the failure must be logged at all')
+    assert.ok(
+      firstLog < retryGate,
+      'the error must be logged before the retry branch, so a first failure is never silent',
+    )
+    assert.ok(/详情|detail/u.test(body) || body.includes('error.message'), 'the message itself must reach the log')
+    // A modal dialog must not be the only way the user learns about it.
+    assert.ok(
+      !/dialog\.showErrorBox\(\s*'连接失败'/u.test(body),
+      'connect failures must not rely on a blocking showErrorBox',
+    )
+    // pendingOpen pins the loading panel; leaving it set is what keeps the
+    // "正在连接 · 已等待 N 秒" counter alive over a dead connect. Check it inside
+    // THIS handler — a match anywhere in main.js would let the fix be deleted.
+    assert.ok(
+      /workspace\.pendingOpen\s*=\s*false/u.test(body),
+      'a failed connect must clear pendingOpen inside the handler',
+    )
+    // And the banner must actually be installed on the workspace(s).
+    assert.ok(
+      /setProgress\(workspace,\s*progress\)/u.test(body),
+      'a failed connect must install a visible failure banner',
+    )
+  }
+
+  // The detached worker must be able to bootstrap node itself.
+  //
+  // On a clean machine the shell hands the FIRST connect to the worker before
+  // any toolchain exists; a worker that just errors out dead-ends the very
+  // first run. Bootstrap is shared so the shell and worker cannot drift.
+  {
+    const { ensurePortableNode, PORTABLE_NODE_VERSION } = require('../src/node-bootstrap')
+    assert.strictEqual(typeof ensurePortableNode, 'function', 'node bootstrap must be shared, not shell-only')
+    assert.ok(/^\d+\.\d+\.\d+$/u.test(PORTABLE_NODE_VERSION), 'the vendored node version must be pinned')
+    // Already-runnable hosts must not download anything.
+    const skipped = await ensurePortableNode({
+      toolRoot: path.join(os.tmpdir(), 'dsh-should-not-exist'),
+      isRunnable: () => true,
+      onLine: () => {},
+    })
+    assert.strictEqual(skipped.ok, true, 'an already-working node must short-circuit')
+    assert.ok(!fs.existsSync(path.join(os.tmpdir(), 'dsh-should-not-exist')), 'a working node must not create dirs')
+    // The worker must reference it, not re-implement or skip it.
+    // The worker must CALL it (an import alone would still dead-end), and must
+    // not fall back to the old "no node -> throw" behaviour.
+    const worker = fs.readFileSync(path.join(__dirname, '..', 'src', 'update-worker.js'), 'utf8')
+    assert.ok(
+      /await\s+ensurePortableNode\(/u.test(worker),
+      'the update worker must CALL ensurePortableNode rather than fail on a clean machine',
+    )
+    assert.ok(
+      !/if \(tools\.node === ''\)\s*\{\s*throw new Error\('未找到兼容的 node/u.test(worker),
+      'the worker must not hard-fail when no node is found',
+    )
+    const shell = fs.readFileSync(path.join(__dirname, '..', 'src', 'update.js'), 'utf8')
+    assert.ok(
+      /await\s+ensurePortableNode\(/u.test(shell),
+      'the shell must use the same bootstrap',
+    )
+  }
+
+
+  // EVERY runtimeStore.<name> used anywhere in src/ must actually be exported.
+  //
+  // This class of bug is brutal because the call site looks fine, the failure
+  // is a TypeError at RUNTIME, and it lands inside a promise whose rejection the
+  // shell used to swallow — so the whole app just sat on "正在连接" forever with
+  // an empty log. Found live on Windows 11 ARM64:
+  //   ✗ 任务异常终止：runtimeStore.localRuntimeRoot is not a function
+  // That one missing export dead-ended EVERY first connect, on every platform.
+  {
+    const runtimeStore = require('../src/runtime-store')
+    const srcDir = path.join(__dirname, '..', 'src')
+    const used = new Set()
+    for (const name of fs.readdirSync(srcDir)) {
+      if (!name.endsWith('.js')) continue
+      const text = fs.readFileSync(path.join(srcDir, name), 'utf8')
+      for (const match of text.matchAll(/runtimeStore\.([A-Za-z_][A-Za-z0-9_]*)/gu)) used.add(match[1])
+    }
+    assert.ok(used.size > 20, `expected many runtimeStore accesses, saw ${used.size}`)
+    const missing = [...used].filter(key => runtimeStore[key] === undefined).sort()
+    assert.deepStrictEqual(
+      missing,
+      [],
+      `runtime-store does not export: ${missing.join(', ')} — every call site would throw at runtime`,
+    )
+    // The specific regression.
+    assert.strictEqual(typeof runtimeStore.localRuntimeRoot, 'function', 'localRuntimeRoot must stay exported')
+  }
+
+  // The update worker's own spawn path must be reachable end to end.
+  //
+  // spawnUpdateWorker writes the task file under the runtime root BEFORE
+  // spawning, so if that step throws, no worker exists, no status file appears,
+  // and the shell waits forever. Assert the function it calls is callable.
+  {
+    const runtimeStore = require('../src/runtime-store')
+    const settings = { mode: 'local', local: { dshHome: os.tmpdir(), repoDir: '' }, toolPaths: {}, update: {} }
+    const root = runtimeStore.localRuntimeRoot(settings)
+    assert.ok(typeof root === 'string' && root.includes('runtime'), `runtime root must be a path, got ${root}`)
+    // Every export the worker touches.
+    for (const name of ['buildLockName', 'localVersionDir', 'localRuntimeRoot', 'withLocalLock', 'writeUpdateStatus', 'clearPendingUpdate', 'clearCancelToken', 'readCancelToken', 'activateLocalRuntime']) {
+      assert.strictEqual(typeof runtimeStore[name], 'function', `worker dependency runtimeStore.${name} must be exported`)
+    }
+  }
+
+  // A killTree on a dead pid is a no-op rather than a throw: cancellation paths
+  // call it on children that may already have exited.
+  {
+    assert.strictEqual(killTree(0), false)
+    assert.strictEqual(killTree(-1), false)
+    assert.strictEqual(killTree(2 ** 30), false, 'a pid that cannot exist must not throw')
+  }
+
+  // ── Windows branch, executed on every host ───────────────────────────────
+  // platform.js / tools.js / settings.js read process.platform at require
+  // time, so a fresh copy of each is loaded with platform faked to win32. This
+  // is how the Windows side gets real coverage on a macOS/Linux CI runner; the
+  // only thing it cannot prove is a call that needs a real Windows binary.
+  {
+    // Every platform-aware module must be re-required inside the fake window:
+    // `tools`/`settings` capture IS_WINDOWS from `platform` at require time, so
+    // loading them alone would silently reuse the POSIX copy of platform.js
+    // (which is exactly the mistake this test caught once already).
+    const load = modulePath => {
+      const chain = ['../src/platform', '../src/process-scan', '../src/tools', '../src/settings']
+      const saved = chain.map(entry => {
+        const resolved = require.resolve(entry)
+        const cached = require.cache[resolved]
+        delete require.cache[resolved]
+        return { resolved, cached }
+      })
+      const frozen = Object.getOwnPropertyDescriptor(process, 'platform')
+      Object.defineProperty(process, 'platform', { value: 'win32', configurable: true })
+      try {
+        return require(require.resolve(modulePath))
+      } finally {
+        Object.defineProperty(process, 'platform', frozen)
+        for (const entry of saved) {
+          delete require.cache[entry.resolved]
+          if (entry.cached !== undefined) require.cache[entry.resolved] = entry.cached
+        }
+      }
+    }
+    const win = load('../src/platform')
+    assert.strictEqual(win.IS_WINDOWS, true, 'faked platform must reach platform.js')
+    assert.deepStrictEqual(win.executableNames('node'), ['node.exe', 'node.cmd', 'node.bat', 'node'])
+    assert.strictEqual(win.PATH_DELIMITER, ';', 'Windows PATH separator')
+    assert.strictEqual(win.PATH_KEY, 'Path', 'Windows spells the PATH key Path')
+    assert.strictEqual(win.needsShell('npm.cmd'), true, 'npm.cmd needs cmd.exe')
+    assert.strictEqual(win.needsShell('node.exe'), false, 'node.exe runs directly')
+
+    // A batch shim is launched through cmd.exe with verbatim arguments, and
+    // every path/arg with spaces stays one token.
+    const shim = win.spawnInvocation('C:\\Program Files\\nodejs\\npm.cmd', ['install', '--prefix', 'C:\\a b'])
+    assert.ok(/cmd\.exe$/i.test(shim.cmd), 'a .cmd shim must run under cmd.exe')
+    assert.deepStrictEqual(shim.args.slice(0, 3), ['/d', '/s', '/c'])
+    assert.strictEqual(shim.options.windowsVerbatimArguments, true,
+      'the pre-quoted line must reach cmd.exe untouched')
+    const line = shim.args[3]
+    assert.ok(line.includes('C:\\Program Files\\nodejs\\npm.cmd'), 'the shim path survives: ' + line)
+    assert.ok(line.includes('\"C:\\a b\"'), 'a spaced argument stays one token: ' + line)
+    assert.ok(line.indexOf(String.fromCharCode(39)) === -1, 'POSIX quoting must never reach cmd.exe')
+    assert.strictEqual(win.spawnInvocation('C:\\nodejs\\node.exe', ['x']).cmd, 'C:\\nodejs\\node.exe')
+
+    // Windows node distributions are zips named -win-<cpu>.zip.
+    const winDist = win.nodeDistArchive('22.19.0', 'arm64')
+    assert.strictEqual(winDist.kind, 'zip')
+    assert.ok(winDist.url.includes('win-arm64.zip'), winDist.url)
+    // OpenSSH ships inside System32 on Windows and must be on the clean PATH,
+    // otherwise remote mode cannot find ssh.exe.
+    assert.ok(win.SYSTEM_PATH_DIRS.some(dir => String(dir).toLowerCase().includes('openssh')),
+      'System32\\OpenSSH must be on the system PATH list')
+    assert.ok(win.expandHome('~\\x').endsWith('x'), 'backslash home paths expand')
+
+    // The clean child environment keys PATH as Path AND keeps both spellings in
+    // sync — writing only PATH leaves cmd.exe reading a stale value.
+    const winTools = load('../src/tools')
+    const winEnv = winTools.childEnv(
+      { local: { repoDir: 'C:\\work\\deepseek-harness' }, toolPaths: {} },
+      'C:\\nodejs\\node.exe',
+    )
+    assert.strictEqual(typeof winEnv.Path, 'string')
+    assert.strictEqual(winEnv.PATH, winEnv.Path, 'PATH and Path must agree on Windows')
+    assert.ok(winEnv.Path.split(';').some(part => part.includes('deepseek-harness')),
+      'the repo toolchain must be on the Windows PATH')
+
+    // A settings file carried over from macOS names a shell Windows cannot run;
+    // normalization must swap in this platform's default.
+    const winSettings = load('../src/settings')
+    const swapped = winSettings.normalizeSettings({ toolPaths: { shell: '/bin/zsh' } })
+    assert.notStrictEqual(swapped.toolPaths.shell, '/bin/zsh',
+      'a POSIX shell path must not survive on Windows')
+  }
   console.log('smoke: all checks passed')
 }
 

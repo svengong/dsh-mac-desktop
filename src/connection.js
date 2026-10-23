@@ -29,6 +29,12 @@ const { findFreePort, releasePort, reservePort, tcpProbe } = require('./ports')
 const { runtimeLayout } = require('./runtime-layout')
 const runtimeStore = require('./runtime-store')
 const { compareVersions } = require('./components')
+const {
+  IS_MAC, IS_WINDOWS, expandHome: expandHomeDir, isPidAlive, killTree,
+} = require('./platform')
+const {
+  dshWebProcesses, findListeningPid, listeningLoopbackPorts, processUsesHome, serviceFamily,
+} = require('./process-scan')
 
 const PROBE_INTERVAL_MS = 750
 const READY_TIMEOUT_MS = 90 * 1000
@@ -176,13 +182,7 @@ function sleep(ms) {
 
 /** Whether a local PID is alive (signal 0 probes without signalling). */
 function pidAlive(pid) {
-  if (!Number.isInteger(pid) || pid <= 0) return false
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch (error) {
-    return error.code === 'EPERM'
-  }
+  return isPidAlive(pid)
 }
 
 /**
@@ -257,137 +257,28 @@ function tokenAccepted(url) {
   })
 }
 
-/**
- * Resolve the real PID listening on a local loopback port, falling back to
- * `lsof` when the state file's recorded pid has gone stale (e.g. an
- * externally-started service the shell adopted but whose state was never
- * updated). Returns 0 when nothing answers or `lsof` is unavailable.
- */
-async function findListeningPid(port) {
-  if (!Number.isInteger(port) || port <= 0) return 0
-  const candidates = ['/usr/sbin/lsof', '/usr/bin/lsof', 'lsof']
-  for (const bin of candidates) {
-    try {
-      const result = await runCommand({
-        cmd: bin,
-        args: ['-t', `-iTCP:${port}`, '-sTCP:LISTEN'],
-        timeoutMs: 5000,
-      })
-      if (result.code !== 0) continue
-      const pid = Number((result.lines[0] || '').trim())
-      if (Number.isInteger(pid) && pid > 0) return pid
-    } catch {
-      // Try the next candidate.
-    }
-  }
-  return 0
-}
-
-/**
- * Every running `dsh web` host process, with the runtime bin it boots.
- *
- * Needed because the harness can end up running WITHOUT the shell having
- * spawned it: the dsh-market plugin relaunches the host through a detached
- * helper (`dshmarket/src/restart.ts`) whose stdout is redirected to a temp
- * file. The shell's port handshake reads the child's stdout, so it never
- * learns the replacement's port — and the state file keeps pointing at the
- * port the process that just exited was using. The service is healthy and
- * answering; the shell simply has no idea where it went.
- *
- * `node` only, exactly like the remote twin (REMOTE_HOST_SCAN): a
- * `sh/bash -c "… bin.js web …"` wrapper shares the host's command line and
- * killing it would take down the wrapper, not the host. Real hosts always
- * exec node — the local watchParent guard is the one wrapper in play, and it
- * must never be mistaken for a second host (or a keepPid sweep protecting
- * the real service while the wrapper is killed out from under it).
- * @returns {Array<{pid: number, bin: string}>}
- */
-async function dshWebProcesses() {
-  const result = await runCommand({
-    cmd: 'ps',
-    args: ['ax', '-o', 'pid=,command='],
-    timeoutMs: 5000,
-  }).catch(() => null)
-  if (result === null || result.code !== 0) return []
-  const found = []
-  for (const line of result.lines) {
-    const match = /^\s*(\d+)\s+(.*)$/u.exec(line)
-    if (match === null) continue
-    const pid = Number(match[1])
-    if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) continue
-    const command = match[2]
-    // `node <bin> web …` — matches both the npm artifact and the repo layout.
-    // The command must START with the node binary: launcher shells that merely
-    // quote the same argv in their `-c` string are wrappers, not hosts.
-    if (!/^(\S*\/)?node(\d+(\.\d+)*)?\s/u.test(command)) continue
-    const binMatch = /(\S*(?:@deepseek-ai[\\/]dsh|apps[\\/]cli)[\\/]lib[\\/]bin\.js)\s+web\b/u.exec(command)
-    if (binMatch === null) continue
-    found.push({ pid, bin: binMatch[1] })
-  }
-  return found
-}
-
-/** Loopback TCP ports one process is listening on. */
-async function listeningLoopbackPorts(pid) {
-  const result = await runCommand({
-    cmd: 'lsof',
-    args: ['-nP', '-a', '-p', String(pid), '-iTCP', '-sTCP:LISTEN'],
-    timeoutMs: 5000,
-  }).catch(() => null)
-  if (result === null || result.code !== 0) return []
-  const ports = []
-  for (const line of result.lines) {
-    const match = /(?:127\.0\.0\.1|\[::1\]|localhost):(\d{1,5})\s+\(LISTEN\)/u.exec(line)
-    if (match === null) continue
-    const port = Number(match[1])
-    if (Number.isInteger(port) && port > 0) ports.push(port)
-  }
-  return ports
-}
-
-/**
- * Whether a process has files open under `dshHome` — its settings or
- * credentials. This is what tells two `dsh web` hosts that share one
- * installed runtime apart: the shell must only ever adopt the instance
- * serving ITS dsh home, never a bystander started from another one.
- */
-async function processUsesHome(pid, dshHome) {
-  if (dshHome === null || dshHome === undefined || dshHome === '') return true
-  const result = await runCommand({
-    cmd: 'lsof',
-    args: ['-Fn', '-p', String(pid)],
-    timeoutMs: 5000,
-  }).catch(() => null)
-  if (result === null || result.code !== 0) return false
-  // `lsof` reports paths with symlinks resolved — on macOS `/tmp` comes back
-  // as `/private/tmp`. The home has to be resolved the same way, or a home
-  // configured under a symlink matches NOTHING: every host then looks like a
-  // bystander, the sweep reaps nothing, and an orphan keeps holding the
-  // session store. The failure is silent, which is the worst kind here.
-  let home = dshHome
-  try {
-    home = fs.realpathSync(dshHome)
-  } catch {
-    // Unresolvable (missing or unreadable): match on the path we were given
-    // rather than giving up — this check only ever errs toward NOT killing.
-  }
-  const prefix = home.endsWith('/') ? home : `${home}/`
-  // `-Fn` prints one field per line, `n` being the file name.
-  return result.lines.some(line => line.startsWith('n') && line.slice(1).startsWith(prefix))
-}
+// Process discovery lives in `process-scan.js`: it is the one module that
+// knows how to ask each OS "who owns this port / this pid / this command
+// line" (lsof+ps on POSIX, netstat+CIM on Windows). Re-exported here because
+// the smoke tests and the connection paths have always imported these names
+// from the connection module.
 
 /**
  * The process group a pid belongs to, or null when it cannot be determined
  * (already dead, ps missing). Local dsh web services are spawned detached:
- * the watchParent guard shell is the group LEADER and the real node service
- * is its group MEMBER, so "keep this service" must exempt the whole GROUP,
- * not just the one pid the state file happens to record (older builds
- * recorded the wrapper's pid, newer ones the service's — the group covers
- * both).
+ * the service guard is the group LEADER and the real node service is its
+ * group MEMBER, so "keep this service" must exempt the whole GROUP, not just
+ * the one pid the state file happens to record (older builds recorded the
+ * guard's pid, newer ones the service's — the group covers both).
+ *
+ * Windows has no process groups: there is nothing to widen, because the
+ * guard's own tree kill already covers the family and a pid is its own
+ * identity. Returning the pid keeps every caller's exemption logic identical.
  * @returns {Promise<number|null>}
  */
 async function processGroupOf(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return null
+  if (IS_WINDOWS) return pid
   const result = await runCommand({
     cmd: 'ps',
     args: ['-o', 'pgid=', '-p', String(pid)],
@@ -406,7 +297,12 @@ async function processGroupOf(pid) {
 // `node` only: a `bash -c "… bin.js web …"` launcher shares the host's
 // command line and often its cwd under the home, and killing it would take
 // down a wrapper rather than a host. Real hosts always exec node.
-const REMOTE_HOST_SCAN = 'ps ax -o pid=,command= 2>/dev/null | grep -E "bin\\.js +web" | grep -v grep | grep -E "^[[:space:]]*[0-9]+[[:space:]]+([^[:space:]]*/)?node([0-9.]*)?[[:space:]]" | sed -E "s/^[[:space:]]*([0-9]+).*/\\1/" | while read p; do uses=$(lsof -Fn -p $p 2>/dev/null | grep -c "^n$HOME/.dsh/"); ports=$(lsof -nP -a -p $p -iTCP -sTCP:LISTEN 2>/dev/null | grep -oE "(127\\.0\\.0\\.1|\\[::1\\]):[0-9]+" | sed -E "s/.*:([0-9]+)$/\\1/" | tr "\\n" "," | sed "s/,$//"); echo "$p|$uses|$ports"; done'
+// The scan opens with two capability lines so a sweep can tell "nothing to
+// reap" apart from "could not look": `ps` may exist yet be denied (restricted
+// shells, hardening), and an empty host list then reads as a clean home while a
+// second host quietly keeps the session store and the task-board ledger. That
+// failure is silent, so it is reported instead of inferred.
+const REMOTE_HOST_SCAN = 'command -v lsof >/dev/null 2>&1 && echo __dsh_lsof_ok || echo __dsh_lsof_missing; if ps ax -o pid=,command= >/dev/null 2>&1; then echo __dsh_ps_ok; ps ax -o pid=,command= 2>/dev/null | grep -E "bin\.js +web" | grep -v grep | grep -E "^[[:space:]]*[0-9]+[[:space:]]+([^[:space:]]*/)?node([0-9.]*)?[[:space:]]" | sed -E "s/^[[:space:]]*([0-9]+).*/\\1/" | while read p; do uses=$(lsof -Fn -p $p 2>/dev/null | grep -c "^n$HOME/.dsh/"); ports=$(lsof -nP -a -p $p -iTCP -sTCP:LISTEN 2>/dev/null | grep -oE "(127\.0\.0\.1|\[::1\]):[0-9]+" | sed -E "s/.*:([0-9]+)$/\\1/" | tr "\\n" "," | sed "s/,$//"); echo "$p|$uses|$ports"; done; else echo __dsh_ps_missing; fi'
 
 /**
  * Resolve the shell `sshd` itself would use for this account, on the remote.
@@ -457,6 +353,7 @@ function parseRemoteLoginShell(lines) {
  */
 function parseRemoteHostScan(lines) {
   const hosts = []
+  const report = { hosts, psAvailable: null, lsofAvailable: null }
   // Accept a raw string too. `for..of` over a string walks it CHARACTER by
   // character, so a string argument would match nothing and silently yield no
   // hosts — and an empty sweep means "nothing to reap", letting an orphan
@@ -464,7 +361,14 @@ function parseRemoteHostScan(lines) {
   // empty result is the worst possible answer here, so make it impossible to
   // reach by accident.
   for (const line of typeof lines === 'string' ? lines.split('\n') : lines ?? []) {
-    const match = /^(\d+)\|(\d+)\|(.*)$/u.exec(line.trim())
+    const trimmed = line.trim()
+    // Capability markers. A sweep needs to distinguish "no hosts" from "could
+    // not look", and only the host can tell us which.
+    if (trimmed === '__dsh_ps_ok') { report.psAvailable = true; continue }
+    if (trimmed === '__dsh_ps_missing') { report.psAvailable = false; continue }
+    if (trimmed === '__dsh_lsof_ok') { report.lsofAvailable = true; continue }
+    if (trimmed === '__dsh_lsof_missing') { report.lsofAvailable = false; continue }
+    const match = /^(\d+)\|(\d+)\|(.*)$/u.exec(trimmed)
     if (match === null) continue
     const pid = Number(match[1])
     if (!Number.isInteger(pid) || pid <= 0) continue
@@ -477,7 +381,7 @@ function parseRemoteHostScan(lines) {
         .filter(port => Number.isInteger(port) && port > 0),
     })
   }
-  return hosts
+  return report
 }
 
 /**
@@ -508,13 +412,9 @@ async function waitReady(url, timeoutMs = READY_TIMEOUT_MS) {
   throw new Error(`等待 ${url} 就绪超时（${Math.round(timeoutMs / 1000)} 秒）。请打开服务日志排查。`)
 }
 
-/** Expand a leading `~/` against the user's home directory. */
-function expandHome(dir) {
-  const { homedir } = require('node:os')
-  if (dir === '~') return homedir()
-  if (dir.startsWith('~/')) return path.join(homedir(), dir.slice(2))
-  return dir
-}
+// `expandHome` (platform-aware, also handles `~\\`) comes from platform.js as
+// `expandHomeDir`; the local alias keeps this module's call sites unchanged.
+const expandHome = expandHomeDir
 
 class ConnectionManager extends EventEmitter {
   constructor({ getSettings, onLog, getOwner }) {
@@ -772,12 +672,14 @@ class ConnectionManager extends EventEmitter {
     const home = expandHome(settings.local.dshHome)
     if (home === '') return 0
     // A keepPid names ONE process, but a local dsh web is a FAMILY: the
-    // watchParent guard shell plus the node service it backgrounds. Older
-    // state files record the guard's pid, newer ones the service's — either
-    // way the group both live in is the same, so exempting the whole group
-    // protects the service a reuse path just validated, whatever pid the
-    // state file named. See `processGroupOf`.
-    const keepGroup = keepPid > 0 ? await processGroupOf(keepPid) : null
+    // service guard plus the node service it backgrounds. Older state files
+    // record the guard's pid, newer ones the service's, so the exemption must
+    // cover BOTH directions (group members AND children) — see
+    // `serviceFamily`. Doing this with `ps` alone was a live bug: on a host
+    // that denies `ps` the group came back "unknown", the exemption vanished,
+    // and the sweep killed the healthy service it had just validated
+    // (reproduced: keep-guard-pid reaped 1 instead of 0).
+    const keepFamily = keepPid > 0 ? await serviceFamily(keepPid) : new Set()
     let reaped = 0
     for (const entry of await dshWebProcesses()) {
       // `keepPid` is the host the state file names, i.e. the one we are about
@@ -786,14 +688,16 @@ class ConnectionManager extends EventEmitter {
       // enforce the one-host-per-home invariant without dropping the service
       // it just validated. See `reapStrayRemoteHosts`.
       if (entry.pid === keepPid) continue
-      if (keepGroup !== null && (await processGroupOf(entry.pid)) === keepGroup) continue
+      if (keepFamily.has(entry.pid)) continue
       if (!(await processUsesHome(entry.pid, home))) continue
       reaped += 1
       this.log(`清理${keepPid > 0 ? '多余' : '残留'} dsh web（pid ${entry.pid}，${entry.bin}）…`)
-      try {
-        process.kill(entry.pid, 'SIGTERM')
-      } catch {
-        // Already gone.
+      if (!killTree(entry.pid, 'SIGTERM')) {
+        try {
+          process.kill(entry.pid, 'SIGTERM')
+        } catch {
+          // Already gone.
+        }
       }
     }
     return reaped
@@ -801,23 +705,19 @@ class ConnectionManager extends EventEmitter {
 
   /**
    * Kill the whole family behind a recorded local service pid. A local dsh
-   * web spawns as a detached GROUP: the watchParent guard shell (leader) plus
-   * the node service it backgrounds. Signalling only the recorded pid leaves
-   * the other one behind — killing the wrapper orphans the service, killing
-   * the service strands the wrapper. Resolve the group first and signal THAT;
-   * a dead/unresolvable pid degrades to a direct signal that no-ops.
+   * web spawns as a detached GROUP: the service guard (leader) plus the node
+   * service it backgrounds. Signalling only the recorded pid leaves the other
+   * one behind — killing the guard orphans the service, killing the service
+   * strands the guard. Resolve the group first and signal THAT; a
+   * dead/unresolvable pid degrades to a direct signal that no-ops.
+   *
+   * Windows does the equivalent through `killTree` (taskkill /T walks the
+   * child tree), which is why the group id there is just the pid.
    */
   async killLocalServiceTree(pid) {
     if (!Number.isInteger(pid) || pid <= 0) return
     const pgid = await processGroupOf(pid)
-    if (pgid !== null) {
-      try {
-        process.kill(-pgid, 'SIGTERM')
-        return
-      } catch {
-        // Group already gone (or permission); fall through to the direct pid.
-      }
-    }
+    if (pgid !== null && killTree(pgid, 'SIGTERM')) return
     try {
       process.kill(pid, 'SIGTERM')
     } catch {
@@ -1045,13 +945,11 @@ class ConnectionManager extends EventEmitter {
     this.setStatus({ state: 'idle', detail: '后端服务已重置', serviceOwner: 'none' })
   }
 
-  /** Mark a child as intentionally stopped and terminate its process group. */
+  /** Mark a child as intentionally stopped and terminate its process tree. */
   killChild(child) {
     if (child === null || child === undefined) return
     child._dshStopRequested = true
-    try {
-      process.kill(-child.pid, 'SIGTERM')
-    } catch {
+    if (!killTree(child.pid, 'SIGTERM')) {
       try {
         child.kill('SIGTERM')
       } catch {
@@ -1145,10 +1043,12 @@ class ConnectionManager extends EventEmitter {
         if (!pidAlive(pid)) pid = await findListeningPid(urlPort(url))
         if (pidAlive(pid)) {
           this.log(`重启本地服务（外部托管，pid ${pid}）…`)
-          try {
-            process.kill(pid, 'SIGTERM')
-          } catch {
-            // Already gone; fall through to a fresh spawn.
+          if (!killTree(pid, 'SIGTERM')) {
+            try {
+              process.kill(pid, 'SIGTERM')
+            } catch {
+              // Already gone; fall through to a fresh spawn.
+            }
           }
           this.localPort = null
           // Clear EVERY host over this dsh home, not just the recorded pid:
@@ -1636,7 +1536,9 @@ class ConnectionManager extends EventEmitter {
     if (test.code !== 0) {
       const output = test.lines.join('\n')
       const lanHint = /No route to host|Network is unreachable|Operation not permitted/.test(output)
-        ? '\n提示：目标为局域网地址且连接被拒，若本机是 macOS 15+，请在「系统设置 → 隐私与安全性 → 本地网络」中允许 DeepSeek Harness。'
+        ? IS_MAC
+          ? '\n提示：目标为局域网地址且连接被拒，若本机是 macOS 15+，请在「系统设置 → 隐私与安全性 → 本地网络」中允许 DeepSeek Harness。'
+          : '\n提示：目标为局域网地址且连接被拒，请检查本机防火墙（Windows Defender 防火墙 → 允许应用）是否放行了 ssh.exe。'
         : ''
       throw new Error(
         `SSH 连接失败（${target}）。请确认：1) 已配置免密登录（ssh-copy-id 后可用 ssh ${target} 直连）；2) 主机可达。${lanHint}`,
@@ -1847,7 +1749,7 @@ class ConnectionManager extends EventEmitter {
   async remoteHostCandidates(settings) {
     const scan = await this.remoteRun(settings.ssh.host, REMOTE_HOST_SCAN, { timeoutMs: 20_000 })
       .catch(() => null)
-    if (scan === null || scan.code !== 0) return []
+    if (scan === null) return { hosts: [], psAvailable: false, lsofAvailable: false }
     return parseRemoteHostScan(scan.lines)
   }
 
@@ -1945,7 +1847,13 @@ class ConnectionManager extends EventEmitter {
    * @returns {Promise<number>} how many host processes were signalled.
    */
   async reapRemoteHosts(settings, state = null) {
-    const candidates = await this.remoteHostCandidates(settings)
+    const report = await this.remoteHostCandidates(settings)
+    // The clear-everything sweep still works without a full scan when `lsof` is
+    // missing (it falls back to the recorded pid), so this only WARNS about an
+    // unusable scan rather than skipping: on this path we are deliberately
+    // clearing the deck, and doing nothing would leave a wedged host.
+    if (!report.psAvailable) this.log('提示：该主机上 ps 不可用，只能按记录的 pid 清理')
+    const candidates = report.hosts
     const pids = candidates.filter(host => host.usesHome).map(host => host.pid)
     const recorded = state !== null && state !== undefined && Number.isInteger(state.pid) ? state.pid : 0
     if (recorded > 0 && !pids.includes(recorded)) {
@@ -2036,13 +1944,23 @@ class ConnectionManager extends EventEmitter {
    */
   async reapStrayRemoteHosts(settings, keepPid) {
     if (!Number.isInteger(keepPid) || keepPid <= 0) return 0
-    const candidates = await this.remoteHostCandidates(settings)
-    const pids = candidates
-      .filter(host => host.usesHome && host.pid !== keepPid)
-      .map(host => host.pid)
+    const report = await this.remoteHostCandidates(settings)
+    // A sweep that cannot LOOK is not a sweep that found nothing. Say so: two
+    // hosts over one dsh home fight over the session store and the ledger, and
+    // silence here is what kept that invisible.
+    const unavailable = !report.psAvailable || report.lsofAvailable === false
+    if (unavailable) {
+      this.log(report.psAvailable === false
+        ? '跳过清理：该主机上 ps 不可用，无法发现多余实例'
+        : '跳过清理：该主机上 lsof 不可用，无法判断实例属于哪个 dsh home')
+      return 0
+    }
+    const sharing = report.hosts.filter(host => host.usesHome)
+    const pids = sharing.filter(host => host.pid !== keepPid).map(host => host.pid)
     if (pids.length === 0) return 0
     const killed = await this.killRemotePids(settings.ssh.host, pids)
     if (killed.length > 0) this.log(`清理多余远端 dsh web（pid ${killed.join('、')}）…`)
+    else this.log(`检测到 ${sharing.length} 个实例，但未能清理`)
     return killed.length
   }
 
@@ -2060,10 +1978,12 @@ class ConnectionManager extends EventEmitter {
       return
     }
     this.log(`清理残留 SSH 隧道（pid ${state.pid}）…`)
-    try {
-      process.kill(state.pid, 'SIGTERM')
-    } catch {
-      // Already gone.
+    if (!killTree(state.pid, 'SIGTERM')) {
+      try {
+        process.kill(state.pid, 'SIGTERM')
+      } catch {
+        // Already gone.
+      }
     }
     runtimeStore.removeLocalTunnelState(settings)
   }
@@ -2312,9 +2232,13 @@ module.exports = {
   probeOnce,
   waitReady,
   rehostUrl,
+  // Re-exported from process-scan.js: these have always been imported from
+  // the connection module by the smoke tests and by main.js.
   dshWebProcesses,
+  findListeningPid,
   listeningLoopbackPorts,
   processUsesHome,
+  processGroupOf,
   parseRemoteHostScan,
   parseRemoteProbe,
   parseRemoteLoginShell,

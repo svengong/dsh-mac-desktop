@@ -10,6 +10,9 @@ launch token) so both clients can share one resident service on the same
 machine — but every UI decision here is made for touch, portrait, and a screen
 that may be 400dp or 1280dp wide.
 
+> 三端（macOS / Windows / Linux 桌面 · Android）必须一致的行为、以及有意不同的
+> 地方，见 [../docs/android-parity.md](../docs/android-parity.md)。
+
 ## Why a native client
 
 The desktop shell's job — install a runtime, keep a service alive, tunnel to it —

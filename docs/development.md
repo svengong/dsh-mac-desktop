@@ -444,6 +444,12 @@ DSH_DESKTOP_SMOKE=1 npx electron .       # Electron 冒烟（菜单/Dock/actions
 5. npm 插件安装 spec 兼容。
 6. 需求/开发/agent 文档。
 
+## 11.1 三端一致性
+
+macOS / Windows / Linux 共用 `src/`，Android 在 `android/`；两者共享**远端协议**但零
+代码共享。哪些行为必须一致、哪些地方有意不同，见
+[android-parity.md](android-parity.md)。改远端协议相关代码时按那份清单两端都过一遍。
+
 ## 12. Android 客户端开发（`android/`）
 
 ### 12.1 环境与构建
