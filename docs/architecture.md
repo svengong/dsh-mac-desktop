@@ -69,6 +69,11 @@ BrowserWindow (shell.html 边框)
 - 启动/恢复的第一个窗口绑定上次活跃设备并自动连接；显式新建窗口为 detached，默认连接页。每个终端最多一个已绑定窗口；保存已打开终端时仅聚焦已有窗口，当前窗口保持不变。
 - 任务进度横幅存在 session 上（`session.progress`），同终端所有已绑定窗口共享；`sessionTask` 给壳工具栏提供检查/更新/构建/重启状态。切离窗口时通过 runner owner 取消该终端任务，释放锁后再停 session。
 - 窗口切换设备调用 `attachWorkspace`；`local` session 常驻以支持多开。
+- **焦点归属**：`WebContentsView.webContents.focus()` 会激活其宿主窗口（实测 Electron 35），
+  因此所有视图聚焦都经 `windows.js#focusViewInKeyWindow`——只有已经是 key window 的窗口
+  才真正聚焦视图。否则同终端会话级广播（`onSessionStatus`/`setProgress`/
+  `observeUpdateWorker`/`reloadSessionWindows`）会让后台窗口抢焦点；双屏下表现为
+  窗口与顶部菜单在两块屏幕间来回闪。
 
 ### 3.1 harness 视图的导航护栏（`external-open.js` + `main.js`）
 

@@ -87,6 +87,10 @@ BrowserWindow (shell.html 边框)
   防止“旧表单被另一个窗口重新保存”。
 - `window-manager.js` 持久化 `window-state.json`：bounds、active view、last-active
   workspace/device；启动先恢复 last-active 设备，IPC fallback 不再只靠焦点扫描。
+- 视图聚焦一律经 `windows.js#focusViewInKeyWindow(win, webContents)`：聚焦
+  `WebContentsView` 会**激活其宿主窗口**，会话级广播若不加守卫就会让后台窗口抢焦点
+  （双屏下窗口与顶部菜单来回闪）。守卫用 `win.isFocused()`，该值在窗口自身
+  `focus` 事件里已为 true，故正常切换仍会重新聚焦视图。
 
 ## 4. 端口与冲突策略
 

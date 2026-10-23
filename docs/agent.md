@@ -30,6 +30,7 @@ Electron macOS 薄壳：主窗口顶部 46px 壳边框，下面是 harness WebCo
 | 无感自动重连 | `src/connection.js` | close watcher 重启后发布新端口 `ready`；`ready` 态每 4s 健康探测，连续 2 次失败自动 `connect()`（`startHealthMonitor`/`healthTick`/`HEALTH_INTERVAL_MS`/`HEALTH_FAILURE_THRESHOLD`），覆盖插件安装/进程内重载/外部托管/远端崩溃 |
 | 设置定位菜单 | `src/ui/settings.html`、`src/ui/shell.css` | 左侧 176px 菜单只**定位**分区（更新/连接/外观/日志，全部平铺不折叠），随滚动高亮；内容整体居中（外层 940px、正文 660px）；有可用更新时「更新」带橙点 |
 | 设置入口焦点 | `src/main.js#setWorkspaceView`、`src/dialogs.js`、`src/ui/settings.html` | 只有「连接」语义的入口（终端启动器／⌘,／终端徽标／失败页「连接设置」）才锚定到「连接」；顶栏「设置」等普通入口锚点为 `null`，面板停在顶部。初始焦点在 boot 状态与 `updates.getState()` **两次渲染都完成后**才施加，否则偏移量按旧布局计算会落空 |
+| 多屏焦点抖动 | `src/windows.js#focusViewInKeyWindow`、`src/main.js#updateHarnessVisibility`、`src/dialogs.js` | 聚焦 `WebContentsView.webContents` 会**激活其宿主窗口**（实测 Electron 35）：会话级广播会给同终端所有窗口重设视图焦点，后台窗口因此抢走前窗；双屏下表现为窗口与顶部菜单在两个屏幕间来回闪。所有视图聚焦统一走「仅当窗口已是 key window 才聚焦」 |
 | harness 导航护栏 | `src/external-open.js`、`src/main.js#installHarnessNavigationGuard` | 主框架 `isExternalUrl` 只保留 harness 根路径，其余交系统浏览器；子框架 `isExternalSubFrameUrl` 只驱逐跨源内容（插件 iframe 归插件）。拦截后 `restoreHarnessAfterBlockedNav()` 恢复就绪态；`did-start-navigation`(isMainFrame) 才代表文档被替换 |
 | `--no-open` 门控 | `src/connection.js` | `dsh web --no-open` 只在运行时 ≥ `NO_OPEN_MIN_VERSION` 时传（旧产物遇未知选项启动即失败）；`unknown` 版本按旧处理 |
 
@@ -184,6 +185,14 @@ for f in /tmp/settings.html.js /tmp/shell.html.js; do node --check "$f"; done
     页面高度，导致偏移量过时（实测 135 vs 249）；等两次渲染都完成再锚定。
 23. **别给页面底部加垫层来实现「末分区定位到顶」。** 垫层在滚到底时就是大片空白；
     用 `Math.min(maxScroll, …)` 夹取，让末分区完整可见即可。
+24. **给 `WebContentsView` 聚焦会激活宿主窗口，必须用 `focusViewInKeyWindow()`。**
+    实测（Electron 35 / macOS）：`win.webContents.focus()` 对非 key 窗口无效，但
+    `view.webContents.focus()` 会把该窗口**激活**并抢走最前状态。壳的
+    `onSessionStatus` / `setProgress` / `observeUpdateWorker` / `reloadSessionWindows`
+    都会遍历**同终端所有窗口**，无守卫的 `focus()` 因此让后台窗口抢焦点；
+    健康看门狗每 4s 还会持续喂事件，于是两个窗口互相顶替——双屏下就是窗口与顶部
+    （菜单栏）在两块屏幕间来回闪。`isFocused()` 在窗口自身 `focus` 事件里已为 true，
+    所以正常的窗口切换重新聚焦不受影响。新增任何视图聚焦都走该守卫。
 
 ## 7. 文档同步要求
 
