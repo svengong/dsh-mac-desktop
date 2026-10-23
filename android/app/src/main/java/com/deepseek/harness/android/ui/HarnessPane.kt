@@ -15,12 +15,18 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Article
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Computer
+import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.Error
+import androidx.compose.material.icons.filled.LightMode
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
@@ -333,7 +339,15 @@ fun PhoneHarnessTopBar(
     onBack: () -> Unit,
     onReconnect: () -> Unit,
     onShowLog: () -> Unit,
+    onAdd: () -> Unit,
+    onThemeChange: (String) -> Unit,
+    themeMode: String,
 ) {
+    // The two-pane layout exposes these in the permanent left rail. Single-column
+    // has no rail, so without an overflow menu on the phone there was simply no
+    // way to add a terminal or change the theme there - the features existed and
+    // were unreachable.
+    var menuOpen by remember { mutableStateOf(false) }
     TopAppBar(
         navigationIcon = {
             IconButton(onClick = onBack) {
@@ -368,6 +382,40 @@ fun PhoneHarnessTopBar(
             }
             IconButton(onClick = onReconnect) {
                 Icon(Icons.Filled.Refresh, contentDescription = "重新连接")
+            }
+            Box {
+                IconButton(onClick = { menuOpen = true }) {
+                    Icon(Icons.Filled.MoreVert, contentDescription = "更多")
+                }
+                DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                    DropdownMenuItem(
+                        text = { Text("新建终端") },
+                        leadingIcon = { Icon(Icons.Filled.Add, contentDescription = null) },
+                        onClick = {
+                            menuOpen = false
+                            onAdd()
+                        },
+                    )
+                    DropdownMenuItem(
+                        text = { Text(if (themeMode == "dark") "浅色主题" else "深色主题") },
+                        leadingIcon = {
+                            Icon(
+                                if (themeMode == "dark") Icons.Filled.LightMode else Icons.Filled.DarkMode,
+                                contentDescription = null,
+                            )
+                        },
+                        onClick = {
+                            menuOpen = false
+                            onThemeChange(
+                                when (themeMode) {
+                                    "system" -> "dark"
+                                    "dark" -> "light"
+                                    else -> "system"
+                                }
+                            )
+                        },
+                    )
+                }
             }
         },
         colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface),

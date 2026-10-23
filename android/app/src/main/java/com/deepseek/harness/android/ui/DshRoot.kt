@@ -47,6 +47,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.movableContentOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -56,6 +57,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.deepseek.harness.android.connection.ConnectionManager
 import com.deepseek.harness.android.connection.ConnectionState
@@ -109,6 +111,33 @@ fun DshRoot(
         manager.connect(selected)
     }
 
+    // ONE harness instance, MOVED between layouts instead of rebuilt.
+    //
+    // `if (isTwoPane) TwoPane else OnePane` gives each branch its own subtree, so
+    // a rotation disposed the harness subtree (which calls WebView.destroy()) and
+    // the other branch built a fresh one and reloaded the page. A rotation is not
+    // a navigation: it must not cost the conversation, the scroll position or an
+    // in-flight turn. movableContentOf keeps the same WebView across the switch,
+    // so only the chrome around it changes.
+    val harnessContent = remember(manager) {
+        movableContentOf<HarnessSlot> { slot ->
+            HarnessPane(
+                manager = manager,
+                selected = slot.selected,
+                connection = slot.connection,
+                showLog = slot.showLog,
+                onShowLog = slot.onShowLog,
+                onReconnect = slot.onReconnect,
+                onAdd = slot.onAdd,
+                onConnectionChanged = slot.onConnectionChanged,
+                maxWidth = slot.maxWidth,
+                modifier = Modifier.fillMaxSize(),
+                onBackToList = slot.onBackToList,
+                topBar = slot.topBar,
+            )
+        }
+    }
+
     if (form.isTwoPane) {
         TwoPaneLayout(
             manager = manager,
@@ -128,6 +157,7 @@ fun DshRoot(
             onThemeChange = onThemeChange,
             themeMode = settings?.themeMode ?: "system",
             onConnectionChanged = onConnectionChanged,
+            harness = { slot -> harnessContent(slot) },
         )
     } else {
         OnePaneLayout(
@@ -148,6 +178,7 @@ fun DshRoot(
             onThemeChange = onThemeChange,
             themeMode = settings?.themeMode ?: "system",
             onConnectionChanged = onConnectionChanged,
+            harness = { slot -> harnessContent(slot) },
         )
     }
 
@@ -187,6 +218,7 @@ private fun TwoPaneLayout(
     onThemeChange: (String) -> Unit,
     themeMode: String,
     onConnectionChanged: (Boolean) -> Unit,
+    harness: @Composable (HarnessSlot) -> Unit,
 ) {
     val form = FormFactor.current()
     Row(Modifier.fillMaxSize()) {
@@ -226,17 +258,19 @@ private fun TwoPaneLayout(
             color = MaterialTheme.colorScheme.outline.copy(alpha = 0.4f),
         )
         Box(Modifier.weight(1f).fillMaxHeight()) {
-            HarnessPane(
-                manager = manager,
-                selected = selected,
-                connection = connection,
-                showLog = showLog,
-                onShowLog = onShowLog,
-                onReconnect = onReconnect,
-                onAdd = onAdd,
-                onConnectionChanged = onConnectionChanged,
-                maxWidth = form.contentMaxWidth,
-                modifier = Modifier.fillMaxSize(),
+            harness(
+                HarnessSlot(
+                    selected = selected,
+                    connection = connection,
+                    showLog = showLog,
+                    onShowLog = onShowLog,
+                    onReconnect = onReconnect,
+                    onAdd = onAdd,
+                    onConnectionChanged = onConnectionChanged,
+                    maxWidth = form.contentMaxWidth,
+                    onBackToList = null,
+                    topBar = null,
+                )
             )
         }
     }
@@ -347,6 +381,7 @@ private fun OnePaneLayout(
     onThemeChange: (String) -> Unit,
     themeMode: String,
     onConnectionChanged: (Boolean) -> Unit,
+    harness: @Composable (HarnessSlot) -> Unit,
 ) {
     // Which of the two phone routes is showing. A connection to a terminal is
     // what puts the user on the harness route; disconnecting returns to the list
@@ -377,33 +412,54 @@ private fun OnePaneLayout(
                 onShowLog = { onShowLog(true) },
                 onThemeChange = onThemeChange,
             )
-            Route.Harness -> HarnessPane(
-                manager = manager,
-                selected = selected,
-                connection = connection,
-                showLog = false,
-                onShowLog = onShowLog,
-                onReconnect = onReconnect,
-                onAdd = onAdd,
-                onConnectionChanged = onConnectionChanged,
-                maxWidth = FormFactor.current().contentMaxWidth,
-                modifier = Modifier.fillMaxSize(),
-                onBackToList = { route = Route.Terminals },
-                topBar = {
-                    PhoneHarnessTopBar(
-                        device = selected,
-                        connection = connection,
-                        onBack = { route = Route.Terminals },
-                        onReconnect = onReconnect,
-                        onShowLog = { onShowLog(true) },
-                    )
-                },
+            Route.Harness -> harness(
+                HarnessSlot(
+                    selected = selected,
+                    connection = connection,
+                    showLog = false,
+                    onShowLog = onShowLog,
+                    onReconnect = onReconnect,
+                    onAdd = onAdd,
+                    onConnectionChanged = onConnectionChanged,
+                    maxWidth = FormFactor.current().contentMaxWidth,
+                    onBackToList = { route = Route.Terminals },
+                    topBar = {
+                        PhoneHarnessTopBar(
+                            device = selected,
+                            connection = connection,
+                            onBack = { route = Route.Terminals },
+                            onReconnect = onReconnect,
+                            onShowLog = { onShowLog(true) },
+                            onAdd = onAdd,
+                            onThemeChange = onThemeChange,
+                            themeMode = themeMode,
+                        )
+                    },
+                )
             )
         }
     }
 }
 
 private enum class Route { Terminals, Harness, Log }
+
+/**
+ * Everything the harness pane needs, bundled so ONE movable composable can serve
+ * both layouts. Keeping the arguments in a value object is what lets the same
+ * WebView instance be moved instead of rebuilt when the form factor changes.
+ */
+private data class HarnessSlot(
+    val selected: Device?,
+    val connection: ConnectionState,
+    val showLog: Boolean,
+    val onShowLog: (Boolean) -> Unit,
+    val onReconnect: () -> Unit,
+    val onAdd: () -> Unit,
+    val onConnectionChanged: (Boolean) -> Unit,
+    val maxWidth: Dp,
+    val onBackToList: (() -> Unit)?,
+    val topBar: (@Composable () -> Unit)?,
+)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable

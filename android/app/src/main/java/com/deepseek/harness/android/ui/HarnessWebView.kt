@@ -53,7 +53,12 @@ fun HarnessWebView(
     // long as the WebView survives; we therefore recreate it only when the URL
     // authority changes, which is the only case where the old document is
     // meaningless anyway.
-    val identity = remember(url) { url.substringBefore("?").substringBefore("#") }
+    // The URL whose DOCUMENT is currently loaded. Compared on the part that
+    // identifies a document (scheme+host+port+path), not the whole string: the
+    // launch token lives in the query and may legitimately change after a
+    // re-adopt, without that being a different page.
+    val loadedIdentity = remember { mutableStateOf<String?>(null) }
+    val targetIdentity = remember(url) { documentIdentity(url) }
 
     // Android's back button means "go back inside the page" while there is
     // history, and "leave" otherwise. Without this, back closes the whole app
@@ -86,20 +91,10 @@ fun HarnessWebView(
                         allowContentAccess = true
                         mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
                         cacheMode = WebSettings.LOAD_DEFAULT
-                        // The harness ships its own viewport meta; letting the
-                        // WebView re-scale would double-apply safe-area maths on
-                        // tablets.
                         setSupportZoom(false)
                     }
                     CookieManager.getInstance().setAcceptCookie(true)
                     CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
-                    // Inject the compatibility shim BEFORE the document loads:
-                    // the harness calls Promise.withResolvers / AbortSignal.any at
-                    // module scope, so a shim applied after onPageStarted is too
-                    // late and the bundle has already aborted.
-                    // WebViewCompat owns this, not WebView: it is a feature-gated
-                    // androidx API, and it must be evaluated AFTER the WebView has
-                    // a provider (i.e. inside the factory), not at composable time.
                     if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
                         WebViewCompat.addDocumentStartJavaScript(this, WebViewCompatScript.JAVASCRIPT, setOf("*"))
                     }
@@ -124,16 +119,28 @@ fun HarnessWebView(
                             handleUrl(context, Uri.parse(url), view)
                     }
                     webView = this
+                    // Load here, once: the factory runs when the instance is
+                    // actually created, which is exactly when a document is needed.
+                    loadUrl(url)
+                    loadedIdentity.value = targetIdentity
                 }
             },
             update = { view ->
-                if (view.url != url && identity != view.url?.substringBefore("?")?.substringBefore("#")) {
-                    view.loadUrl(url)
-                }
+                // Only a DIFFERENT document justifies a load. Rotation, a pane
+                // switch and plain recomposition all recompose with the same
+                // identity and must be no-ops - reloading would lose the
+                // conversation, its scroll position and any in-flight turn.
+                if (loadedIdentity.value == targetIdentity) return@AndroidView
+                loadedIdentity.value = targetIdentity
+                view.loadUrl(url)
             },
         )
     }
 
+    // Destroy only when this composable really leaves the tree. Rotation and
+    // narrow/wide switches move the WebView to a different parent, which used to
+    // destroy and reload it; keeping the instance alive is what makes a rotation
+    // free. `key` inside the callers is what pins the instance across layouts.
     DisposableEffect(Unit) {
         onDispose {
             webView?.apply {
@@ -143,10 +150,16 @@ fun HarnessWebView(
             webView = null
         }
     }
+}
 
-    LaunchedEffect(url) {
-        webView?.loadUrl(url)
-    }
+/**
+ * The part of a harness URL that identifies a DOCUMENT. The launch token is a
+ * query parameter and does not change which page is loaded, so a re-adopt that
+ * only rotates the token must not trigger a reload.
+ */
+private fun documentIdentity(url: String): String {
+    val withoutFragment = url.substringBefore("#")
+    return withoutFragment.substringBefore("?")
 }
 
 private fun handleUrl(context: android.content.Context, uri: Uri, view: WebView): Boolean {
