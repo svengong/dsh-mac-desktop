@@ -12,8 +12,15 @@ The shell is a **thin wrapper**: it loads a fixed URL and only ever runs git/pnp
 |---|---|---|
 | macOS 11+ | Apple Silicon (`arm64`), Intel (`x64`) | `.dmg`, `.zip`, `.app` |
 | Windows 10/11 | `x64`, Windows on ARM (`arm64`) | NSIS `.exe` installer, portable `.exe`, `.zip` |
-| Linux | `x64`, `arm64` | `.AppImage`, `.deb` (best-effort) |
+| Linux (distros still supported by Chromium & vendor — e.g. current Ubuntu/Fedora/Debian) | `x64`, `arm64` | `.AppImage`, `.deb` |
 | **Android 8.0+** | `arm64-v8a`, `armeabi-v7a`, `x86_64` | `.apk` (phone portrait + tablet landscape) |
+
+The three desktop platforms share one source tree: every OS-specific difference
+lives in `src/platform.js` and `src/process-scan.js`, so Linux is a first-class
+target rather than a "happens to run" one. macOS and Windows installers are
+produced by the release workflow; Linux packages are built from the same source
+on a Linux host (see [Quick start](#quick-start)), since AppImage/deb cannot be
+cross-built.
 
 Every desktop build is unsigned, so the OS may ask for confirmation on first
 launch. The Android client is a separate native app — see
@@ -82,6 +89,22 @@ npm run dist:win:x64        # dist:win:arm64 for Windows on ARM
 Then run `dist\dsh-desktop-<version>-windows-<arch>-setup.exe` to install, or
 the `-portable.exe` for a no-install build.
 
+### Linux
+
+```sh
+npm install
+
+# --arm64 on ARM hosts
+npx electron-builder --linux AppImage deb --x64 \
+  -c.linux.artifactName='dsh-desktop-${version}-linux-${arch}.${ext}'
+```
+
+The `-c.linux.artifactName` override matters: `package.json` only declares a
+macOS-named top-level `artifactName`, so a Linux build without an explicit
+`linux` block would emit `…-macos-x64.AppImage`. Linux packages must be built on
+a Linux host (AppImage/deb cannot be cross-built from macOS or Windows);
+`npm start` works on all three platforms for development.
+
 ### Any platform (development)
 
 ```sh
@@ -122,3 +145,4 @@ On Windows use PowerShell and the same commands; `DSH_DESKTOP_SMOKE` works as
 - SSH mode requires key-based auth; password prompts cannot work without a terminal.
 - The local-mode service log only covers shell-owned processes.
 - On Windows the "does this process use my dsh home?" check uses the process command line's runtime path instead of `lsof` open files; when it cannot tell, the shell leaves the process alone.
+- Linux reuses the Windows `hidden` + `titleBarOverlay` window branch, but `src/ui/shell.css` only scopes its insets to `:root[data-platform="windows"]` — Linux therefore keeps the macOS left inset and does not reserve the right-hand caption strip. Window chrome on Linux desktop environments has not been verified yet.

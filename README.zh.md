@@ -12,8 +12,13 @@
 |---|---|---|
 | macOS 11+ | Apple Silicon（`arm64`）、Intel（`x64`） | `.dmg`、`.zip`、`.app` |
 | Windows 10/11 | `x64`、Windows on ARM（`arm64`） | NSIS 安装程序 `.exe`、便携版 `.exe`、`.zip` |
-| Linux | `x64`、`arm64` | `.AppImage`、`.deb`（尽力而为） |
+| Linux（Chromium 与发行版都仍在支持期内的版本，如当前 Ubuntu/Fedora/Debian） | `x64`、`arm64` | `.AppImage`、`.deb` |
 | **Android 8.0+** | `arm64-v8a`、`armeabi-v7a`、`x86_64` | `.apk`（手机竖屏 + 平板横屏） |
+
+三个桌面平台共用同一份源码：所有平台差异只在 `src/platform.js` 与
+`src/process-scan.js` 里，Linux 是**一方支持目标**，不是「顺带能跑」。macOS 与
+Windows 安装包由发布流水线产出；Linux 包需在同一份源码的 Linux 主机上构建（见
+[快速开始](#快速开始)）——AppImage/deb 无法跨平台交叉构建。
 
 桌面产物均未签名，首次启动时系统可能要求确认；Android 版为独立原生客户端，见 [android/README.md](android/README.md)。
 
@@ -38,7 +43,7 @@
 `android/` 是同一产品理念的原生 Android 客户端（Kotlin + Compose + WebView + JSch），
 不是在手机上跑桌面壳：
 
-- **SSH 远程**：手机上直接连 Linux 机器，自动**复用或启动**远端 `dsh web`，
+- **SSH 远程**：手机上直接连任意 Linux 主机，自动**复用或启动**远端 `dsh web`，
   JSch 建立本地端口转发，WebView 加载隧道另一端的 Harness UI。协议与桌面壳同源，
   两边的驻留服务可以互相复用。
 - **直接地址**：填一个已能访问的 URL（反向代理 / 局域网），不建 SSH、不托管服务。
@@ -73,6 +78,21 @@ npm run dist:win:x64        # Windows on ARM 用 dist:win:arm64
 
 安装用 `dist\dsh-desktop-<版本>-windows-<arch>-setup.exe`；免安装用
 `-portable.exe`。
+
+### Linux
+
+```sh
+npm install
+
+# ARM 主机用 --arm64
+npx electron-builder --linux AppImage deb --x64 \
+  -c.linux.artifactName='dsh-desktop-${version}-linux-${arch}.${ext}'
+```
+
+`-c.linux.artifactName` 不能省：`package.json` 只声明了 macOS 命名的顶层
+`artifactName`，不显式给 `linux` 段时产物会叫 `…-macos-x64.AppImage`。Linux 包
+必须在 Linux 主机上构建（AppImage/deb 不能从 macOS 或 Windows 交叉构建）；
+`npm start` 三个平台都能跑。
 
 ### 任意平台（开发态）
 
@@ -114,3 +134,4 @@ Windows 上用 PowerShell 执行同样的命令；环境变量写法为
 - SSH 模式必须免密登录；没有终端，密码交互无法工作。
 - 本地模式的「服务日志」只覆盖壳自管进程。
 - Windows 上没有 `lsof` 的廉价等价物，「这个进程是否在用我的 dsh home」改用进程命令行的运行时路径判定；判断不出来时壳保持「不杀」。
+- Linux 复用 Windows 的 `hidden` + `titleBarOverlay` 窗口分支，但 `src/ui/shell.css` 的留白规则只写在 `:root[data-platform="windows"]` 下——Linux 仍套用 macOS 的左侧留白，也没有为右侧原生控件条预留位置。各 Linux 桌面环境的窗口控件表现尚未验证。

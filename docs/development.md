@@ -24,10 +24,20 @@ npm run dist:dmg
 npm run dist:win          # 双架构
 npm run dist:win:x64
 npm run dist:win:arm64    # Windows on ARM
+
+# 构建 Linux 安装包（AppImage + deb，必须在 Linux 主机上跑）
+npx electron-builder --linux AppImage deb --x64 \
+  -c.linux.artifactName='dsh-desktop-${version}-linux-${arch}.${ext}'
 ```
 
-> **两条打包链路完全不同**（dmg/zip vs nsis/portable）。改了 `package.json#build`
-> 或壳里任何与平台有关的东西，两个平台都要跑一次；CI 已经这样配置。
+> **三条打包链路互不相同**（dmg/zip、nsis/portable、AppImage/deb）。改了
+> `package.json#build` 或壳里任何与平台有关的东西，三个平台都要跑一次；CI 目前
+> 覆盖 macOS 与 Windows，Linux 需在 Linux 主机上手工验一遍。
+
+> **Linux 的 `-c.linux.artifactName` 不能省。** `package.json#build.artifactName`
+> 是 macOS 命名（`dsh-mac-desktop-…-macos-…`），electron-builder 在没有 `linux`
+> 段时会退回这个顶层值，产物就成了 `…-macos-x64.AppImage`。AppImage/deb 也不能
+> 从 macOS 或 Windows 交叉构建，必须在 Linux 主机上打包。
 
 > **Windows 打包必须走 `node scripts/build-win.js`（即 `npm run dist:win*`），
 > 不要直接调 `electron-builder`。** 它会固定 `ELECTRON_BUILDER_7Z_FILTER=BCJ`，
@@ -306,7 +316,13 @@ export named ...`），导致新产物启动失败并自动回滚。处理方式
 
 ## 7. 平台外壳约定
 
-### 7.1 macOS / Windows 的挂载差异
+### 7.1 macOS / Windows / Linux 的挂载差异
+
+> Linux 在 `main.js` 里走的是与 Windows 相同的 `hidden` + `titleBarOverlay`
+> 分支（`platformName()` 返回 `'linux'`），但 **`shell.css` 的留白规则目前只
+> 写了 `:root[data-platform="windows"]`**：Linux 实际仍套用 macOS 的左侧 84px
+> 留白，右侧也没有为原生控件条让位。改窗口外壳时三处要一起看：`platformName()`、
+> `shell.css` 的 `:root[data-platform=…]` 规则、`titleBarOverlay.height`。
 
 | 能力 | macOS | Windows / Linux |
 |---|---|---|
@@ -374,6 +390,9 @@ DSH_DESKTOP_SMOKE=1 npx electron .       # Electron 冒烟（菜单/Dock/actions
     避免既有下载链接与 `latest-mac.yml` 失效。
   - Windows：`dsh-desktop-<ver>-windows-{x64,arm64}-setup.exe`（NSIS）、
     `…-portable.exe`、`…-windows-{x64,arm64}.zip`。
+  - Linux：`dsh-desktop-<ver>-linux-{x64,arm64}.AppImage`、`…-linux-{x64,arm64}.deb`。
+    顶层 `artifactName` 是 macOS 命名，Linux 构建务必带
+    `-c.linux.artifactName='dsh-desktop-${version}-linux-${arch}.${ext}'`。
 - 版本号唯一来源是 `package.json#version`（semver）；打包时请先 `npm version`
   或手工提升版本，再打 `v<version>` 标签推送，GitHub Actions 自动构建并发布。
 - 本地打包：
@@ -385,7 +404,10 @@ DSH_DESKTOP_SMOKE=1 npx electron .       # Electron 冒烟（菜单/Dock/actions
   转成多分辨率的 `.ico`。
 - 自动发布流水线见 `.github/workflows/release.yml`：tag `v*` → 四条并行构建
   （macOS arm64/x64、Windows x64/arm64）→ 上传各平台产物 → 创建 GitHub Release。
+  **Linux 产物不在这条流水线里**：AppImage/deb 需在 ubuntu runner 或本地 Linux
+  主机上构建，目前是手工步骤。
 - CI（`.github/workflows/ci.yml`）在 `macos-14` 与 `windows-latest` 上分别跑冒烟与打包预检。
+  Linux 的冒烟（`npm run smoke`）在 ubuntu 上同样可跑，但尚未进入矩阵。
 - **一键发布**：`node scripts/release.js`——分析自上次 tag 以来的提交
   （conventional commits：breaking→major / feat→minor / fix→patch / 仅文档→不发），
   检查当前版本是否已发布（远端 tag 是否存在：已发布→bump 新版本；未发布→直接

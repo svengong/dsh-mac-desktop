@@ -14,8 +14,8 @@
 
 ## 1.1 平台抽象（`platform.js` / `process-scan.js`）
 
-同一份源码跑 macOS / Windows / Linux。业务模块里**不允许**出现 `process.platform`
-分支或 `/bin/...` 硬编码——所有平台差异只在这两个模块里：
+同一份源码跑 macOS / Windows / Linux，三个平台是**同等的一方支持目标**。业务模块里
+**不允许**出现 `process.platform` 分支或 `/bin/...` 硬编码——所有平台差异只在这两个模块里：
 
 | 能力 | POSIX | Windows |
 |---|---|---|
@@ -34,6 +34,12 @@
 **进程组 vs 进程树**是这里最容易出错的一点：POSIX 下 `spawn(detached:true)` 让子进程
 成为新进程组的组长，所以 `kill(-pid)` 能一次带走 pnpm/git 的孙进程；Windows 没有这个
 概念，只能靠 `taskkill /T` 遍历子进程。`killTree()` 把两者统一成一个调用。
+
+**Linux 与 macOS 同属 POSIX 分支**，`platform.js` 里没有第三套实现：`IS_LINUX` 只
+用于 `platformName()` 与 node 分发归档的默认值。因此 Linux 的行为完全由 POSIX 一列
+决定——唯一的例外在**窗口外壳**：`main.js` 对 Linux 走 Windows 的 `hidden` +
+`titleBarOverlay` 分支，而 `shell.css` 的留白规则只写了 `[data-platform="windows"]`，
+所以 Linux 实际套用 macOS 的左侧 84px 留白、右侧未避让原生控件条（已知缺口）。
 
 ## 2. 目录与模块
 
@@ -170,8 +176,9 @@ BrowserWindow (shell.html 边框)
   - `npm run dist:win`（NSIS+便携版，双架构）/ `dist:win:x64` / `dist:win:arm64` / `dist:publish:win`。
   - Windows 目标为 `nsis`、`portable`、`zip`，`arch` 均为 `["x64","arm64"]`（Windows on ARM 是一方支持目标）。
 - 图标：`build/icon.png`（512px）会被 electron-builder 自动转成多分辨率 `.ico`，无需手工维护 ICO 文件；macOS 用 `build/icon.icns`。
-- 推送 `v*` 标签触发 `.github/workflows/release.yml`：校验标签与版本一致 → 四条并行构建（macOS arm64/x64、Windows x64/arm64，全部 `--publish never`）→ 上传各平台产物 → 创建 GitHub Release。
-- `.github/workflows/ci.yml` 在 `macos-14` 与 `windows-latest` 上分别跑 `npm run smoke`，并各自做一次打包预检——两条打包链路完全不同，只验一条会让另一条静默腐化。
+- Linux：`dsh-desktop-<ver>-linux-<arch>.AppImage` / `.deb`，由 `electron-builder --linux` 在 Linux 主机上产出。**顶层 `artifactName` 是 macOS 命名**，Linux 构建必须显式传 `-c.linux.artifactName`，否则产物会带 `-macos-` 后缀；AppImage/deb 也不能交叉构建。
+- 推送 `v*` 标签触发 `.github/workflows/release.yml`：校验标签与版本一致 → 四条并行构建（macOS arm64/x64、Windows x64/arm64，全部 `--publish never`）→ 上传各平台产物 → 创建 GitHub Release。**Linux 产物不在该流水线内**，需在 ubuntu/本地 Linux 上手工构建后上传。
+- `.github/workflows/ci.yml` 在 `macos-14` 与 `windows-latest` 上分别跑 `npm run smoke`，并各自做一次打包预检——两条打包链路完全不同，只验一条会让另一条静默腐化。Linux 的烟雾测试在 ubuntu 上同样可跑，但尚未进入矩阵。
 - 产物未签名/未公证（`identity: null`）。
 
 ## 9. 相关文档

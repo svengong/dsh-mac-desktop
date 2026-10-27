@@ -5,9 +5,9 @@
 
 ## 1. 项目一句话
 
-Electron 薄壳（macOS / Windows / Linux）：主窗口顶部 46px 壳边框，下面是
-harness WebContentsView；每个窗口绑定一个设备 session；更新/安装全部走官方 npm
-产物渠道（`@deepseek-ai/dsh`）与 `dsh plugin` 命令。
+Electron 薄壳（macOS / Windows / Linux，三者同等支持）：主窗口顶部 46px 壳边框，
+下面是 harness WebContentsView；每个窗口绑定一个设备 session；更新/安装全部走官方
+npm 产物渠道（`@deepseek-ai/dsh`）与 `dsh plugin` 命令。
 
 ## 2. 最近一次实现清单
 
@@ -39,6 +39,7 @@ harness WebContentsView；每个窗口绑定一个设备 session；更新/安装
 | 跨平台父进程监护 | `src/service-guard.js`、`src/runner.js#spawnService` | 原 `sh` watchParent 包装脚本由 node 监护进程取代：宣告真实服务 pid、父进程消失时结束服务树、服务自行退出时透传退出码。监护进程以 `ELECTRON_RUN_AS_NODE=1` 运行，且**不得**把该变量泄漏给被监护服务 |
 | Windows 窗口外壳 | `src/main.js#createBrowserWindow`、`src/ui/shell.css` | macOS 用 `hiddenInset`+`trafficLightPosition`（左侧留 84px）；Windows 用 `hidden`+`titleBarOverlay`（右侧留 152px，overlay 高度 = 46px）。平台信息经 query param 传给 shell.html / settings.html，落到 `:root[data-platform]` |
 | 菜单/托盘按平台 | `src/menu.js`、`src/tray.js`、`src/main.js#refreshMenu` | macOS 装应用菜单 + Dock 菜单；Windows/Linux 装窗口菜单但 `setMenuBarVisibility(false)`（保留 `CmdOrCtrl` 加速键），操作入口靠托盘。托盘图标 macOS 用模板图、其它平台用彩色图标缩到 16px |
+| Linux 支持 | `src/platform.js`、`src/ui/shell.css`、`package.json#build` | 与 macOS 共用 POSIX 实现；构建产物为 AppImage/deb，须在 Linux 主机上打包并显式指定 `-c.linux.artifactName`；窗口留白目前仍只按 `windows` 限定（缺口，见不变量 34） |
 
 ## 3. 必须遵守的不变量
 
@@ -131,6 +132,17 @@ harness WebContentsView；每个窗口绑定一个设备 session；更新/安装
 33. **`titleBarOverlay` 的高度必须等于 `SHELL_FRAME_HEIGHT`。** 46px 是壳边框、也是原生
     窗口控件的高度；两者不一致会让控件条与壳边框错位。平台留白（左 84px / 右 152px）
     写在 `:root[data-platform]` 规则里，不要写进 JS。
+34. **Linux 走 POSIX 实现，但窗口外壳走 Windows 分支——两处都要照顾到。**
+    `platform.js` 里 `IS_LINUX` 只影响 `platformName()` 与 node 归档默认值，进程/端口
+    发现完全复用 POSIX（`lsof`/`ps`/`pgrep`）。但 `main.js` 对 Linux 用的是
+    `hidden` + `titleBarOverlay`，而 `shell.css` 的留白只写在 `[data-platform="windows"]`
+    下 ⇒ **当前 Linux 会套用 macOS 的左侧 84px 留白、右侧不避让原生控件**。动窗口外壳
+    时要么把选择器扩成 `:root[data-platform="windows"], :root[data-platform="linux"]`，
+    要么在 JS 侧把 Linux 并入 macOS 分支；不要只改一边。
+35. **Linux 产物只能构建、不能交叉构建。** `package.json#build.artifactName` 是 macOS
+    命名，`electron-builder --linux` 在没有 `linux` 段时会沿用它 ⇒ 产物叫
+    `…-macos-x64.AppImage`。Linux 打包必须显式带 `-c.linux.artifactName`，且必须在
+    Linux 主机上跑（AppImage/deb 不能从 macOS/Windows 交叉出）。
 ## 4. 验收命令
 
 ```sh
@@ -142,7 +154,8 @@ node --check <改动的 .js>
 
 改了 `platform.js` / `process-scan.js` / `runner.js` / `connection.js` 的进程相关逻辑后，
 **必须在 macOS 与 Windows 上都跑一次 `npm run smoke`**：这两个平台的杀进程与进程发现
-走的是完全不同实现，只在一个平台上绿等于没验证。
+走的是完全不同实现，只在一个平台上绿等于没验证。Linux 与 macOS 同属 POSIX 分支，
+通常跟着 macOS 一起过；但 Linux 桌面环境的窗口外壳（见不变量 34）需要真机看一次。
 
 UI 改动额外检查：
 

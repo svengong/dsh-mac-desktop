@@ -1,8 +1,8 @@
 # DSH 桌面壳需求文档
 
-> 状态：已实现（macOS / Windows，双架构）
+> 状态：已实现（macOS / Windows / Linux 三平台；macOS、Windows 由发布流水线产出双架构产物，Linux 在同一份源码的 Linux 主机上构建）
 > 版本：跟随 `package.json#version`
-> 更新日期：2026-10-23
+> 更新日期：2026-10-27
 
 ## 1. 产品目标
 
@@ -17,7 +17,7 @@ VS Code Remote——用户可以选择本机或 SSH 远程主机运行 Harness�
 |---|---|---|
 | macOS 11+ | `arm64`、`x64` | `.app`、`.dmg`、`.zip` |
 | Windows 10/11 | `x64`、`arm64` | NSIS 安装程序、便携版 `.exe`、`.zip` |
-| Linux | `x64`、`arm64` | `.AppImage`、`.deb`（尽力而为） |
+| Linux（Chromium 与发行版均在支持期内） | `x64`、`arm64` | `.AppImage`、`.deb`（在 Linux 主机上构建） |
 
 ## 1.1 窗口与页面流转设计（产品视图）
 
@@ -52,9 +52,10 @@ VS Code Remote——用户可以选择本机或 SSH 远程主机运行 Harness�
 - 多窗口工作区模型：窗口 ↔ 设备 session 绑定，同设备窗口共享后端。
 - 统一更新管理：Harness 本体、npm 插件、Git 预设。
 - 安装、更新与进度/日志展示。
-- 平台原生外壳：macOS 菜单栏 / 程序坞 / 菜单栏托盘；Windows 状态区托盘、任务栏、`titleBarOverlay` 窗口控件。
+- 平台原生外壳：macOS 菜单栏 / 程序坞 / 菜单栏托盘；Windows 与 Linux 状态区托盘、任务栏、`titleBarOverlay` 窗口控件。
 - 三个平台的壳边框与嵌入式设置面板（同一套 46px 布局，按平台调整原生控件留白）。
-- 双架构构建：macOS 与 Windows 均提供 `arm64` 与 `x64` 产物。
+- 全平台双架构：macOS、Windows、Linux 均提供 `arm64` 与 `x64` 产物；macOS 与
+  Windows 由发布流水线构建，Linux 包在 Linux 主机上构建。
 - 开发态与已安装应用的数据隔离。
 
 ### 2.2 不在范围内
@@ -158,8 +159,8 @@ VS Code Remote——用户可以选择本机或 SSH 远程主机运行 Harness�
 | FR-7.8 | 窗口外壳按平台使用不同原生控件：macOS `hiddenInset` + `trafficLightPosition`（左侧红黄绿，壳边框留 84px）；Windows/Linux `hidden` + `titleBarOverlay`（右侧最小化/最大化/关闭，留白改到右侧）。壳边框高度恒为 46px 且等于 overlay 高度。 |
 | FR-7.9 | 菜单与托盘按平台挂载：macOS 用应用菜单承载 连接/更新，并提供 Dock 右键菜单；Windows/Linux 用窗口菜单但默认隐藏菜单栏（保留 `CmdOrCtrl` 加速键），操作入口同时出现在托盘菜单。快捷键文案按平台显示 ⌘ 或 Ctrl。 |
 | FR-7.10 | 托盘图标按平台选取：macOS 用模板图（黑 + alpha，随菜单栏自动着色）；Windows/Linux 用彩色应用图标缩放到 16px（黑色模板图在深色任务栏不可见）。 |
-| FR-7.11 | Windows 与 macOS 的自动构建均覆盖双架构：release 工作流产出 macOS `arm64`/`x64` 与 Windows `arm64`/`x64`（含 Windows on ARM）。CI 在 macOS 与 Windows runner 上分别跑冒烟与打包预检。 |
-| FR-7.12 | 安装包命名按平台区分：macOS 保持 `dsh-mac-desktop-<ver>-macos-<arch>.<ext>`（向后兼容既有下载链接）；Windows 为 `dsh-desktop-<ver>-windows-<arch>-setup.exe` / `-portable.exe` / `.zip`。 |
+| FR-7.11 | 三个平台均覆盖双架构：release 工作流产出 macOS `arm64`/`x64` 与 Windows `arm64`/`x64`（含 Windows on ARM）；Linux `arm64`/`x64` 在同一份源码的 Linux 主机上构建（AppImage/deb 不能交叉构建）。CI 在 macOS 与 Windows runner 上分别跑冒烟与打包预检。 |
+| FR-7.12 | 安装包命名按平台区分：macOS 保持 `dsh-mac-desktop-<ver>-macos-<arch>.<ext>`（向后兼容既有下载链接）；Windows 为 `dsh-desktop-<ver>-windows-<arch>-setup.exe` / `-portable.exe` / `.zip`；Linux 为 `dsh-desktop-<ver>-linux-<arch>.AppImage` / `.deb`。**顶层 `artifactName` 是 macOS 命名**，Linux 构建必须显式指定 `-c.linux.artifactName`，否则产物会带 `-macos-` 后缀。 |
 | FR-7.13 | 冒烟测试必须跨平台：不得依赖 `/bin/sh`、`/bin/echo`、`/bin/sleep`、`/bin/zsh` 等 POSIX 路径；子进程测试统一用当前 node 执行内联脚本。当宿主拒绝进程枚举（沙箱、无 Full Disk Access）时，依赖枚举的断言降级跳过并显式提示，而不是报失败。 |
 ## 4. 关键边缘场景
 
@@ -185,7 +186,7 @@ VS Code Remote——用户可以选择本机或 SSH 远程主机运行 Harness�
 
 ## 5. 验收标准
 
-- `node scripts/smoke.js` 在 macOS 与 Windows 上全部通过（含平台原语断言：
+- `node scripts/smoke.js` 在 macOS、Windows 与 Linux 上全部通过（含平台原语断言：
   可执行文件命名、home 展开、node 分发归档形状、`current` 指针原子切换、
   netstat/CIM 解析、npm 定位、ssh 配置路径、干净子进程 PATH、killTree 幂等）。
 - `DSH_DESKTOP_SMOKE=1 npx electron .` 输出 `ok:true`。
@@ -194,7 +195,10 @@ VS Code Remote——用户可以选择本机或 SSH 远程主机运行 Harness�
 - `npm start` 后 `~/.dsh-dev/settings.json` 与 `~/.dsh-dev/logs/` 正常生成，不触碰
   `~/Library/Application Support/DeepSeek Harness`。
 - 主窗口顶部 46px 工具栏：macOS 可见红黄绿按钮且未与品牌区重叠；Windows
-  可见右上角原生窗口控件、未与「新建窗口」或状态区重叠。
+  可见右上角原生窗口控件、未与「新建窗口」或状态区重叠。Linux 走与 Windows 相同的
+  `hidden` + `titleBarOverlay` 分支，但 `shell.css` 目前只写了
+  `:root[data-platform="windows"]` 规则，Linux 仍套用 macOS 的左侧 84px 留白、
+  右侧未避让原生控件——**属已知缺口，见 README「Known limitations」**。
 - 更新管理 tab 滚动顺序为：运行组件 → 更新源 → 固定高度日志。
 - 新建 npm 插件时，直接粘贴 `dsh plugin --profile web add github:owner/repo` 可保存并执行。
 - smoke 实际启动 `dsh web --port 0`，断言回读端口 > 0；`window-state.json` 可恢复 last-active 设备与 bounds。
