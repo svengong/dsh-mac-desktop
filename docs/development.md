@@ -26,17 +26,19 @@ npm run dist:win:x64
 npm run dist:win:arm64    # Windows on ARM
 
 # 构建 Linux 安装包（AppImage + deb，必须在 Linux 主机上跑）
-npx electron-builder --linux AppImage deb --x64 \
-  -c.linux.artifactName='dsh-desktop-${version}-linux-${arch}.${ext}'
+npm run dist:linux        # 本机架构
+npm run dist:linux:x64    # 或 dist:linux:arm64
 ```
 
 > **三条打包链路互不相同**（dmg/zip、nsis/portable、AppImage/deb）。改了
-> `package.json#build` 或壳里任何与平台有关的东西，三个平台都要跑一次；CI 目前
-> 覆盖 macOS 与 Windows，Linux 需在 Linux 主机上手工验一遍。
+> `package.json#build` 或壳里任何与平台有关的东西，三个平台都要跑一次；CI 与
+> release 流水线都已覆盖三个平台。
 
-> **Linux 的 `-c.linux.artifactName` 不能省。** `package.json#build.artifactName`
-> 是 macOS 命名（`dsh-mac-desktop-…-macos-…`），electron-builder 在没有 `linux`
-> 段时会退回这个顶层值，产物就成了 `…-macos-x64.AppImage`。AppImage/deb 也不能
+> **Linux 的架构名按格式不同，不能统一写成 `x64`。** `${arch}` 宏对 AppImage
+> 展开为 `x86_64`、对 deb 展开为 `amd64`（`arm64` 不变），所以 x64 的产物是
+> `dsh-desktop-<ver>-linux-x86_64.AppImage` 与 `…-linux-amd64.deb`。`package.json`
+> 已给 `build.appImage` / `build.deb` 分别声明 `artifactName`；**不要**只依赖顶层
+> `artifactName`（那是 macOS 命名，产物会带 `-macos-` 后缀）。AppImage/deb 也不能
 > 从 macOS 或 Windows 交叉构建，必须在 Linux 主机上打包。
 
 > **Windows 打包必须走 `node scripts/build-win.js`（即 `npm run dist:win*`），
@@ -390,9 +392,11 @@ DSH_DESKTOP_SMOKE=1 npx electron .       # Electron 冒烟（菜单/Dock/actions
     避免既有下载链接与 `latest-mac.yml` 失效。
   - Windows：`dsh-desktop-<ver>-windows-{x64,arm64}-setup.exe`（NSIS）、
     `…-portable.exe`、`…-windows-{x64,arm64}.zip`。
-  - Linux：`dsh-desktop-<ver>-linux-{x64,arm64}.AppImage`、`…-linux-{x64,arm64}.deb`。
-    顶层 `artifactName` 是 macOS 命名，Linux 构建务必带
-    `-c.linux.artifactName='dsh-desktop-${version}-linux-${arch}.${ext}'`。
+  - Linux：`dsh-desktop-<ver>-linux-{x86_64,arm64}.AppImage`、
+    `…-linux-{amd64,arm64}.deb`。**架构名按格式不同**（AppImage 用 `x86_64`，deb 用
+    `amd64`），由 `build.appImage` / `build.deb` 各自的 `artifactName` 决定；
+    `build.linux.executableName` 固定为 `deepseek-harness`（unpacked 目录里的
+    二进制名，CI 靠它做断言）。
 - 版本号唯一来源是 `package.json#version`（semver）；打包时请先 `npm version`
   或手工提升版本，再打 `v<version>` 标签推送，GitHub Actions 自动构建并发布。
 - 本地打包：
@@ -402,12 +406,14 @@ DSH_DESKTOP_SMOKE=1 npx electron .       # Electron 冒烟（菜单/Dock/actions
   - 直接发布到 GitHub Releases：`GH_TOKEN=<token> npm run dist:publish` / `dist:publish:win`。
 - Windows 图标不需要单独维护 `.ico`：electron-builder 会把 `build/icon.png`（512px）
   转成多分辨率的 `.ico`。
-- 自动发布流水线见 `.github/workflows/release.yml`：tag `v*` → 四条并行构建
-  （macOS arm64/x64、Windows x64/arm64）→ 上传各平台产物 → 创建 GitHub Release。
-  **Linux 产物不在这条流水线里**：AppImage/deb 需在 ubuntu runner 或本地 Linux
-  主机上构建，目前是手工步骤。
-- CI（`.github/workflows/ci.yml`）在 `macos-14` 与 `windows-latest` 上分别跑冒烟与打包预检。
-  Linux 的冒烟（`npm run smoke`）在 ubuntu 上同样可跑，但尚未进入矩阵。
+- 自动发布流水线见 `.github/workflows/release.yml`：tag `v*` → 六条并行构建
+  （macOS arm64/x64、Windows x64/arm64、Linux x64/arm64）→ 上传各平台产物 →
+  创建 GitHub Release。Linux 用**原生架构 runner**（`ubuntu-24.04` /
+  `ubuntu-24.04-arm`）：deb 走 fpm，arm64 需要 aarch64 打包工具链，x64 runner 上
+  交叉不出。
+- CI（`.github/workflows/ci.yml`）在 `macos-14`、`windows-latest`、`ubuntu-24.04`
+  上分别跑冒烟，并在三个平台各做一次打包预检。Linux 会额外断言 AppImage/deb 的
+  真实文件名——架构名写错能让产物「构建成功但名字错误」，只有断言拦得住。
 - **一键发布**：`node scripts/release.js`——分析自上次 tag 以来的提交
   （conventional commits：breaking→major / feat→minor / fix→patch / 仅文档→不发），
   检查当前版本是否已发布（远端 tag 是否存在：已发布→bump 新版本；未发布→直接

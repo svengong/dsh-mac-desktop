@@ -6,8 +6,8 @@
 |---|---|---|
 | 桌面壳（macOS）本地 + SSH 远程 | ✅ 已交付 | 静默部署/自动升级驻留程序、多窗口、产物优先更新，e2e 验证通过 |
 | **桌面壳（Windows）双架构** | ✅ 已交付 | x64 + arm64（Windows on ARM）；进程组→进程树、symlink→junction、lsof/ps→netstat/CIM、sh 监护→node 监护，见 [架构 §1.1](architecture.md) |
-| **桌面壳（Linux）** | ✅ 已交付 | 与 macOS/Windows 共用 `src/`，POSIX 分支 + `process-scan` 直接生效；`x64`/`arm64` 的 AppImage/deb 在 Linux 主机上构建（不可交叉构建）。**已知缺口**：`shell.css` 的窗口留白规则仍只按 `windows` 限定，Linux 桌面环境的原生控件表现未验证 |
-| 自动发布链路 | ✅ 已交付 | `scripts/release.js` 一键发布 + GitHub Actions 双平台/双架构构建（macOS + Windows；Linux 产物按需在 Linux 主机上构建） |
+| **桌面壳（Linux）** | ✅ 已交付 | 与 macOS/Windows 共用 `src/`，POSIX 分支 + `process-scan` 直接生效；AppImage/deb 双架构由 CI 与 release 流水线产出；窗口留白规则已覆盖 `data-platform="linux"`（与 Windows 同一套 overlay 分支） |
+| 自动发布链路 | ✅ 已交付 | `scripts/release.js` 一键发布 + GitHub Actions 三平台/双架构构建（macOS + Windows + Linux） |
 | 官方产物渠道 | 🟡 部分可用 | npm 预检已实现；上游 `@deepseek-ai/dsh-frontend` 发布后自动生效 |
 | **移动端：Android 原生客户端** | ✅ 已交付 | `android/`：Kotlin + Compose + WebView + JSch；手机竖屏单栏 / 平板横屏双栏；真实 SSH e2e 通过 |
 
@@ -101,7 +101,7 @@
 
 - **官方产物通道打通**：上游发布 `@deepseek-ai/dsh-frontend` 后，`artifact.js` 预检自动放行，移动端/桌面端均可纯产物部署。
 - **Windows 进程归属判定加固**：目前用命令行里的运行时路径前缀判定（够用且免费）。若要更严格，可评估随包附带轻量 helper 或 CIM 句柄查询——但必须先证明它不会拖慢每次连接。
-- **Linux 打包与验收补齐**：代码路径与 POSIX 分支已就绪（三平台共用 `src/`），Linux 包也能在 Linux 主机上构建；仍缺的是**CI 里的 ubuntu 打包任务**与**真机/桌面环境验收**（尤其是 `titleBarOverlay` 控件条在 GNOME/KDE 上的表现——`shell.css` 目前只按 `windows` 平台留白）。
+- **Linux 桌面环境验收**：打包链路已进 CI 与 release（AppImage/deb 双架构），窗口留白也覆盖了 `data-platform="linux"`；仍需在真实桌面环境（GNOME / KDE）上确认 `titleBarOverlay` 控件条不与壳边框错位。
 
 ## 4. 计划维护
 

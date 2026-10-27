@@ -176,9 +176,9 @@ BrowserWindow (shell.html 边框)
   - `npm run dist:win`（NSIS+便携版，双架构）/ `dist:win:x64` / `dist:win:arm64` / `dist:publish:win`。
   - Windows 目标为 `nsis`、`portable`、`zip`，`arch` 均为 `["x64","arm64"]`（Windows on ARM 是一方支持目标）。
 - 图标：`build/icon.png`（512px）会被 electron-builder 自动转成多分辨率 `.ico`，无需手工维护 ICO 文件；macOS 用 `build/icon.icns`。
-- Linux：`dsh-desktop-<ver>-linux-<arch>.AppImage` / `.deb`，由 `electron-builder --linux` 在 Linux 主机上产出。**顶层 `artifactName` 是 macOS 命名**，Linux 构建必须显式传 `-c.linux.artifactName`，否则产物会带 `-macos-` 后缀；AppImage/deb 也不能交叉构建。
-- 推送 `v*` 标签触发 `.github/workflows/release.yml`：校验标签与版本一致 → 四条并行构建（macOS arm64/x64、Windows x64/arm64，全部 `--publish never`）→ 上传各平台产物 → 创建 GitHub Release。**Linux 产物不在该流水线内**，需在 ubuntu/本地 Linux 上手工构建后上传。
-- `.github/workflows/ci.yml` 在 `macos-14` 与 `windows-latest` 上分别跑 `npm run smoke`，并各自做一次打包预检——两条打包链路完全不同，只验一条会让另一条静默腐化。Linux 的烟雾测试在 ubuntu 上同样可跑，但尚未进入矩阵。
+- Linux：`dsh-desktop-<ver>-linux-{x86_64,arm64}.AppImage` 与 `…-linux-{amd64,arm64}.deb`，由 `electron-builder --linux` 在 Linux 主机上产出。**架构名按格式不同**（AppImage 用 `x86_64`、deb 用 `amd64`），由 `build.appImage` / `build.deb` 各自的 `artifactName` 决定；**顶层 `artifactName` 是 macOS 命名**，只依赖它会让产物带 `-macos-` 后缀。AppImage/deb 也不能交叉构建。
+- 推送 `v*` 标签触发 `.github/workflows/release.yml`：校验标签与版本一致 → 六条并行构建（macOS arm64/x64、Windows x64/arm64、Linux x64/arm64，全部 `--publish never`）→ 上传各平台产物 → 创建 GitHub Release。Linux 用原生架构 runner（`ubuntu-24.04` / `ubuntu-24.04-arm`），因为 deb 的 arm64 打包需要 aarch64 工具链，x64 runner 上交叉不出。
+- `.github/workflows/ci.yml` 在 `macos-14`、`windows-latest`、`ubuntu-24.04` 上分别跑 `npm run smoke`，并各自做一次打包预检——三条打包链路完全不同，只验一条会让另外两条静默腐化。Linux 任务额外断言 AppImage/deb 的真实文件名。
 - 产物未签名/未公证（`identity: null`）。
 
 ## 9. 相关文档

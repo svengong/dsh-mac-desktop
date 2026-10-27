@@ -93,17 +93,17 @@ the `-portable.exe` for a no-install build.
 
 ```sh
 npm install
-
-# --arm64 on ARM hosts
-npx electron-builder --linux AppImage deb --x64 \
-  -c.linux.artifactName='dsh-desktop-${version}-linux-${arch}.${ext}'
+npm run dist:linux          # AppImage + deb, host architecture
+npm run dist:linux:x64      # or :arm64
 ```
 
-The `-c.linux.artifactName` override matters: `package.json` only declares a
-macOS-named top-level `artifactName`, so a Linux build without an explicit
-`linux` block would emit `…-macos-x64.AppImage`. Linux packages must be built on
-a Linux host (AppImage/deb cannot be cross-built from macOS or Windows);
-`npm start` works on all three platforms for development.
+Linux packages must be built on a Linux host (AppImage/deb cannot be
+cross-built from macOS or Windows); `npm start` works on all three platforms
+for development.
+
+Note the arch spelling differs per format: `${arch}` expands to `x86_64` for
+AppImage and `amd64` for deb (`arm64` is `arm64` in both), so an x64 build
+produces `…-linux-x86_64.AppImage` and `…-linux-amd64.deb`.
 
 ### Any platform (development)
 
@@ -145,4 +145,4 @@ On Windows use PowerShell and the same commands; `DSH_DESKTOP_SMOKE` works as
 - SSH mode requires key-based auth; password prompts cannot work without a terminal.
 - The local-mode service log only covers shell-owned processes.
 - On Windows the "does this process use my dsh home?" check uses the process command line's runtime path instead of `lsof` open files; when it cannot tell, the shell leaves the process alone.
-- Linux reuses the Windows `hidden` + `titleBarOverlay` window branch, but `src/ui/shell.css` only scopes its insets to `:root[data-platform="windows"]` — Linux therefore keeps the macOS left inset and does not reserve the right-hand caption strip. Window chrome on Linux desktop environments has not been verified yet.
+- Linux packages build and pass CI (AppImage + deb, x64/arm64), but the `titleBarOverlay` caption strip has only been exercised on a build host — real GNOME/KDE desktops are still unverified.

@@ -1,12 +1,13 @@
 name: Release
 
-# 自动发布：推送 v* 标签时构建 macOS（arm64/x64）与 Windows（x64/arm64）安装包，
-# 并发布 GitHub Release；也可手动触发（Actions → Release → Run workflow），
-# 此时必须填写要发布的 tag。
+# 自动发布：推送 v* 标签时构建 macOS（arm64/x64）、Windows（x64/arm64）与
+# Linux（x64/arm64）安装包，并发布 GitHub Release；也可手动触发
+# （Actions → Release → Run workflow），此时必须填写要发布的 tag。
 #
 # 平台矩阵刻意分开跑：macOS 用 electron-builder 的 dmg/zip 目标，Windows 用
-# nsis/portable/zip。两边都必须产出 arm64 与 x64 —— Windows on ARM 已进入正式
-# 支持（Snapdragon X 系列），Electron 也从 33 起提供 win32-arm64 产物。
+# nsis/portable/zip，Linux 用 AppImage/deb。三个平台都必须产出 arm64 与 x64 ——
+# Windows on ARM 已进入正式支持（Snapdragon X 系列），Electron 也从 33 起提供
+# win32-arm64 产物；Linux arm64 同样是一方支持目标。
 on:
   push:
     tags:
@@ -36,6 +37,11 @@ jobs:
     # 单台 arm64 macOS runner 交叉构建两种 macOS 架构（macos-13/x64 已退役，勿用）。
     # Windows 直接用原生 runner：electron-builder 在那里打包 nsis/portable 最稳，
     # 且 win32-arm64 的 Electron 产物同样可在 x64 runner 上交叉构建。
+    #
+    # Linux 不能用交叉构建的省事路径：deb 走 fpm，arm64 需要 aarch64 的
+    # 打包工具链，x64 runner 上装不出来；AppImage 还要下载对应架构的
+    # appimage 运行库。所以这里用原生架构 runner（ubuntu-24.04-arm 是
+    # GitHub 官方 arm64 runner），各打各的架构。
     strategy:
       fail-fast: false
       matrix:
@@ -56,6 +62,14 @@ jobs:
             label: windows
             arch: arm64
             flags: --win nsis portable zip --arm64
+          - os: ubuntu-24.04
+            label: linux
+            arch: x64
+            flags: --linux AppImage deb --x64
+          - os: ubuntu-24.04-arm
+            label: linux
+            arch: arm64
+            flags: --linux AppImage deb --arm64
     runs-on: ${{ matrix.os }}
     env:
       CSC_IDENTITY_AUTO_DISCOVERY: 'false' # 未签名构建，绝不误选钥匙串身份
@@ -117,6 +131,30 @@ jobs:
         if: matrix.label == 'windows'
         run: node scripts/build-win.js --${{ matrix.arch }} --publish never
 
+      # Linux shares electron-builder with macOS, so it can be called directly
+      # (unlike Windows, which needs the BCJ pin). The deb target hard-fails
+      # without homepage + author in package.json — both are present.
+      - name: Package installers (Linux)
+        if: matrix.label == 'linux'
+        run: npx electron-builder ${{ matrix.flags }} --publish never
+
+      # ${arch} expands per format on Linux (x86_64 for AppImage, amd64 for
+      # deb), so assert the real names here instead of trusting the config.
+      - name: Assert Linux artifact names
+        if: matrix.label == 'linux'
+        shell: bash
+        run: |
+          case '${{ matrix.arch }}' in
+            x64)   ARCH_APPIMAGE=x86_64; ARCH_DEB=amd64 ;;
+            arm64) ARCH_APPIMAGE=arm64;  ARCH_DEB=arm64 ;;
+          esac
+          VERSION="$(node -p "require('./package.json').version")"
+          for f in "dsh-desktop-${VERSION}-linux-${ARCH_APPIMAGE}.AppImage" \
+                   "dsh-desktop-${VERSION}-linux-${ARCH_DEB}.deb"; do
+            test -f "dist/$f" || { echo "::error::missing $f"; ls -1 dist; exit 1; }
+          done
+          echo "linux artifacts ok (${{ matrix.arch }})"
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -125,6 +163,8 @@ jobs:
             dist/*.dmg
             dist/*.zip
             dist/*.exe
+            dist/*.AppImage
+            dist/*.deb
             dist/latest-*.yml
           if-no-files-found: error
 

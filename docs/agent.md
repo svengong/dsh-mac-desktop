@@ -39,7 +39,7 @@ npm 产物渠道（`@deepseek-ai/dsh`）与 `dsh plugin` 命令。
 | 跨平台父进程监护 | `src/service-guard.js`、`src/runner.js#spawnService` | 原 `sh` watchParent 包装脚本由 node 监护进程取代：宣告真实服务 pid、父进程消失时结束服务树、服务自行退出时透传退出码。监护进程以 `ELECTRON_RUN_AS_NODE=1` 运行，且**不得**把该变量泄漏给被监护服务 |
 | Windows 窗口外壳 | `src/main.js#createBrowserWindow`、`src/ui/shell.css` | macOS 用 `hiddenInset`+`trafficLightPosition`（左侧留 84px）；Windows 用 `hidden`+`titleBarOverlay`（右侧留 152px，overlay 高度 = 46px）。平台信息经 query param 传给 shell.html / settings.html，落到 `:root[data-platform]` |
 | 菜单/托盘按平台 | `src/menu.js`、`src/tray.js`、`src/main.js#refreshMenu` | macOS 装应用菜单 + Dock 菜单；Windows/Linux 装窗口菜单但 `setMenuBarVisibility(false)`（保留 `CmdOrCtrl` 加速键），操作入口靠托盘。托盘图标 macOS 用模板图、其它平台用彩色图标缩到 16px |
-| Linux 支持 | `src/platform.js`、`src/ui/shell.css`、`package.json#build` | 与 macOS 共用 POSIX 实现；构建产物为 AppImage/deb，须在 Linux 主机上打包并显式指定 `-c.linux.artifactName`；窗口留白目前仍只按 `windows` 限定（缺口，见不变量 34） |
+| Linux 支持 | `src/platform.js`、`src/ui/shell.css`、`package.json#build`、`.github/workflows/*.yml` | 与 macOS 共用 POSIX 实现；AppImage/deb 双架构进 CI 与 release；窗口留白已覆盖 `data-platform="linux"`；架构名按格式不同（见不变量 35） |
 
 ## 3. 必须遵守的不变量
 
@@ -135,14 +135,21 @@ npm 产物渠道（`@deepseek-ai/dsh`）与 `dsh plugin` 命令。
 34. **Linux 走 POSIX 实现，但窗口外壳走 Windows 分支——两处都要照顾到。**
     `platform.js` 里 `IS_LINUX` 只影响 `platformName()` 与 node 归档默认值，进程/端口
     发现完全复用 POSIX（`lsof`/`ps`/`pgrep`）。但 `main.js` 对 Linux 用的是
-    `hidden` + `titleBarOverlay`，而 `shell.css` 的留白只写在 `[data-platform="windows"]`
-    下 ⇒ **当前 Linux 会套用 macOS 的左侧 84px 留白、右侧不避让原生控件**。动窗口外壳
-    时要么把选择器扩成 `:root[data-platform="windows"], :root[data-platform="linux"]`，
-    要么在 JS 侧把 Linux 并入 macOS 分支；不要只改一边。
-35. **Linux 产物只能构建、不能交叉构建。** `package.json#build.artifactName` 是 macOS
-    命名，`electron-builder --linux` 在没有 `linux` 段时会沿用它 ⇒ 产物叫
-    `…-macos-x64.AppImage`。Linux 打包必须显式带 `-c.linux.artifactName`，且必须在
-    Linux 主机上跑（AppImage/deb 不能从 macOS/Windows 交叉出）。
+    `hidden` + `titleBarOverlay`（只有 macOS 走 `hiddenInset`），所以 `shell.css` 的
+    overlay 留白必须**同时**匹配 `[data-platform="windows"]` 与 `[data-platform="linux"]`：
+    只写 `windows` 会让 Linux 保留 macOS 的左侧 84px 留白、右侧不避让原生控件，
+    品牌区被窗口按钮压住。动窗口外壳时 CSS 选择器与 JS 分支要一起改。
+35. **Linux 的架构名按产物格式不同，别统一写成 `x64`。** `${arch}` 宏对 AppImage
+    展开为 `x86_64`、对 deb 展开为 `amd64`（`arm64` 两者一致），实测产物是
+    `…-linux-x86_64.AppImage` 与 `…-linux-amd64.deb`。因此 `build.appImage` 与
+    `build.deb` 必须**各自**声明 `artifactName`；只依赖顶层（macOS 命名）会得到
+    `…-macos-…` 的错误文件名。CI 与 release 都断言真实文件名，改配置后跑一次。
+36. **Linux 包不能交叉构建，arm64 也不行。** AppImage/deb 必须在 Linux 主机上打包；
+    deb 走 fpm，arm64 需要 aarch64 工具链，x64 runner 上交叉不出来。所以 release
+    用原生架构 runner（`ubuntu-24.04` / `ubuntu-24.04-arm`），不要在 x64 上加 `--arm64`。
+37. **deb 目标无 `homepage` / `author` 会直接构建失败。** `computeFpmMetaInfoOptions()`
+    在两者缺失时抛错（`Please specify project homepage` / `author 'email'`）。这两个
+    字段在 `package.json` 顶层，删掉之前先确认没有 Linux 打包任务。
 ## 4. 验收命令
 
 ```sh
@@ -155,7 +162,11 @@ node --check <改动的 .js>
 改了 `platform.js` / `process-scan.js` / `runner.js` / `connection.js` 的进程相关逻辑后，
 **必须在 macOS 与 Windows 上都跑一次 `npm run smoke`**：这两个平台的杀进程与进程发现
 走的是完全不同实现，只在一个平台上绿等于没验证。Linux 与 macOS 同属 POSIX 分支，
-通常跟着 macOS 一起过；但 Linux 桌面环境的窗口外壳（见不变量 34）需要真机看一次。
+通常跟着 macOS 一起过；CI 已在 `ubuntu-24.04` 上跑同一套冒烟。
+
+改了打包配置（`package.json#build` / 工作流）后，Linux 侧**必须真跑一次**
+`npm run dist:linux`：架构名、`executableName`、desktop 文件名都只在真实产物里
+才看得见，配置校验不会替你发现 `…-macos-` 这种错名。
 
 UI 改动额外检查：
 

@@ -1,8 +1,8 @@
 name: CI
 
 # 日常检查：PR 与 main 分支推送时跑冒烟测试 + 打包预检，防止合并前破坏打包链路。
-# macOS 与 Windows 各跑一遍：两条打包链路完全不同（dmg/zip vs nsis/portable），
-# 只在一条上验证会让另一条静默腐化。
+# macOS、Windows、Linux 各跑一遍：三条打包链路完全不同（dmg/zip、nsis/portable、
+# AppImage/deb），只在一条上验证会让另外两条静默腐化。
 on:
   push:
     branches: [main]
@@ -21,7 +21,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-14, windows-latest]
+        os: [macos-14, windows-latest, ubuntu-24.04]
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
@@ -63,6 +63,18 @@ jobs:
             label: windows
             arch: arm64
             bundle: dist/win-arm64-unpacked/DeepSeek Harness.exe
+          # Linux ships AppImage AND deb, which share one packaging chain but
+          # NOT one arch spelling: ${arch} expands to x86_64 for AppImage and
+          # amd64 for deb (arm64 is arm64 in both). The assertion below checks
+          # the real filenames, so a rename regression fails the job instead of
+          # shipping mislabelled artifacts.
+          - os: ubuntu-24.04
+            label: linux
+            arch: x64
+            # x64 has no arch suffix, so the unpacked dir is plain linux-unpacked.
+            # The binary name comes from build.linux.executableName (NOT the
+            # package name or productName) — verified against a real build.
+            bundle: dist/linux-unpacked/deepseek-harness
     runs-on: ${{ matrix.os }}
     env:
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
@@ -94,6 +106,14 @@ jobs:
         if: matrix.label == 'windows'
         run: node scripts/build-win.js --${{ matrix.arch }} --publish never
 
+      # Linux uses the same electron-builder chain as macOS/Windows, but the
+      # deb target additionally requires homepage + author (electron-builder
+      # hard-fails without them) — that is why package.json carries both.
+      # --publish never for the same reason as the other two jobs.
+      - name: Build installers (Linux)
+        if: matrix.label == 'linux'
+        run: npm run dist:linux:${{ matrix.arch }} -- --publish never
+
       - name: Assert artifact naming and bundle
         shell: bash
         run: |
@@ -101,3 +121,17 @@ jobs:
           test -e "${{ matrix.bundle }}"
           echo "bundle ok for v${VERSION} (${{ matrix.label }})"
           ls -1 dist | sed 's/^/  /'
+
+      # Guard the Linux artifact names explicitly: ${arch} expands per format
+      # (x86_64 for AppImage, amd64 for deb), so a casual rename would produce
+      # mislabelled downloads that still "build fine".
+      - name: Assert Linux artifact names
+        if: matrix.label == 'linux'
+        shell: bash
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          test -f "dist/dsh-desktop-${VERSION}-linux-x86_64.AppImage" \
+            || { echo "::error::AppImage missing or misnamed"; ls -1 dist; exit 1; }
+          test -f "dist/dsh-desktop-${VERSION}-linux-amd64.deb" \
+            || { echo "::error::deb missing or misnamed"; ls -1 dist; exit 1; }
+          echo "linux artifact names ok"

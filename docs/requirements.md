@@ -160,7 +160,7 @@ VS Code Remote——用户可以选择本机或 SSH 远程主机运行 Harness�
 | FR-7.9 | 菜单与托盘按平台挂载：macOS 用应用菜单承载 连接/更新，并提供 Dock 右键菜单；Windows/Linux 用窗口菜单但默认隐藏菜单栏（保留 `CmdOrCtrl` 加速键），操作入口同时出现在托盘菜单。快捷键文案按平台显示 ⌘ 或 Ctrl。 |
 | FR-7.10 | 托盘图标按平台选取：macOS 用模板图（黑 + alpha，随菜单栏自动着色）；Windows/Linux 用彩色应用图标缩放到 16px（黑色模板图在深色任务栏不可见）。 |
 | FR-7.11 | 三个平台均覆盖双架构：release 工作流产出 macOS `arm64`/`x64` 与 Windows `arm64`/`x64`（含 Windows on ARM）；Linux `arm64`/`x64` 在同一份源码的 Linux 主机上构建（AppImage/deb 不能交叉构建）。CI 在 macOS 与 Windows runner 上分别跑冒烟与打包预检。 |
-| FR-7.12 | 安装包命名按平台区分：macOS 保持 `dsh-mac-desktop-<ver>-macos-<arch>.<ext>`（向后兼容既有下载链接）；Windows 为 `dsh-desktop-<ver>-windows-<arch>-setup.exe` / `-portable.exe` / `.zip`；Linux 为 `dsh-desktop-<ver>-linux-<arch>.AppImage` / `.deb`。**顶层 `artifactName` 是 macOS 命名**，Linux 构建必须显式指定 `-c.linux.artifactName`，否则产物会带 `-macos-` 后缀。 |
+| FR-7.12 | 安装包命名按平台区分：macOS 保持 `dsh-mac-desktop-<ver>-macos-<arch>.<ext>`（向后兼容既有下载链接）；Windows 为 `dsh-desktop-<ver>-windows-<arch>-setup.exe` / `-portable.exe` / `.zip`；Linux 为 `dsh-desktop-<ver>-linux-<arch>.<ext>`，但**架构名按格式不同**——AppImage 用 `x86_64`、deb 用 `amd64`（`arm64` 两者一致），由 `build.appImage` / `build.deb` 各自的 `artifactName` 决定。**顶层 `artifactName` 是 macOS 命名**，只依赖它会产出带 `-macos-` 后缀的错误文件名。 |
 | FR-7.13 | 冒烟测试必须跨平台：不得依赖 `/bin/sh`、`/bin/echo`、`/bin/sleep`、`/bin/zsh` 等 POSIX 路径；子进程测试统一用当前 node 执行内联脚本。当宿主拒绝进程枚举（沙箱、无 Full Disk Access）时，依赖枚举的断言降级跳过并显式提示，而不是报失败。 |
 ## 4. 关键边缘场景
 

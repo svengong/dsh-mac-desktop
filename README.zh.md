@@ -83,16 +83,16 @@ npm run dist:win:x64        # Windows on ARM 用 dist:win:arm64
 
 ```sh
 npm install
-
-# ARM 主机用 --arm64
-npx electron-builder --linux AppImage deb --x64 \
-  -c.linux.artifactName='dsh-desktop-${version}-linux-${arch}.${ext}'
+npm run dist:linux          # AppImage + deb，本机架构
+npm run dist:linux:x64      # 或 :arm64
 ```
 
-`-c.linux.artifactName` 不能省：`package.json` 只声明了 macOS 命名的顶层
-`artifactName`，不显式给 `linux` 段时产物会叫 `…-macos-x64.AppImage`。Linux 包
-必须在 Linux 主机上构建（AppImage/deb 不能从 macOS 或 Windows 交叉构建）；
+Linux 包必须在 Linux 主机上构建（AppImage/deb 不能从 macOS 或 Windows 交叉构建）；
 `npm start` 三个平台都能跑。
+
+注意架构名按格式不同：`${arch}` 在 AppImage 下展开成 `x86_64`、在 deb 下是
+`amd64`（`arm64` 两者都是 `arm64`）。所以 x64 产物是
+`…-linux-x86_64.AppImage` 与 `…-linux-amd64.deb`。
 
 ### 任意平台（开发态）
 
@@ -134,4 +134,4 @@ Windows 上用 PowerShell 执行同样的命令；环境变量写法为
 - SSH 模式必须免密登录；没有终端，密码交互无法工作。
 - 本地模式的「服务日志」只覆盖壳自管进程。
 - Windows 上没有 `lsof` 的廉价等价物，「这个进程是否在用我的 dsh home」改用进程命令行的运行时路径判定；判断不出来时壳保持「不杀」。
-- Linux 复用 Windows 的 `hidden` + `titleBarOverlay` 窗口分支，但 `src/ui/shell.css` 的留白规则只写在 `:root[data-platform="windows"]` 下——Linux 仍套用 macOS 的左侧留白，也没有为右侧原生控件条预留位置。各 Linux 桌面环境的窗口控件表现尚未验证。
+- Linux 包已能构建并通过 CI（AppImage + deb，x64/arm64），但 `titleBarOverlay` 控件条只在构建机上验证过——真实 GNOME/KDE 桌面下的表现仍未确认。

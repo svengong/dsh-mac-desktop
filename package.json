@@ -3,6 +3,16 @@
   "version": "0.10.5",
   "private": true,
   "description": "Desktop shell for the DeepSeek Harness web app on macOS, Windows and Linux: local or SSH-remote connections with an in-menu update flow",
+  "homepage": "https://github.com/svengong/dsh-mac-desktop",
+  "desktopName": "com.deepseek.harness.desktop",
+  "author": {
+    "name": "svengong",
+    "email": "svengong@users.noreply.github.com"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/svengong/dsh-mac-desktop.git"
+  },
   "keywords": [
     "deepseek",
     "deepseek-harness",
@@ -27,8 +37,12 @@
     "dist:win": "node scripts/build-win.js",
     "dist:win:arm64": "node scripts/build-win.js --arm64",
     "dist:win:x64": "node scripts/build-win.js --x64",
+    "dist:linux": "electron-builder --linux AppImage deb",
+    "dist:linux:x64": "electron-builder --linux AppImage deb --x64",
+    "dist:linux:arm64": "electron-builder --linux AppImage deb --arm64",
     "dist:publish": "electron-builder --mac dmg zip --publish always",
-    "dist:publish:win": "node scripts/build-win.js --publish always"
+    "dist:publish:win": "node scripts/build-win.js --publish always",
+    "dist:publish:linux": "electron-builder --linux AppImage deb --publish always"
   },
   "devDependencies": {
     "electron": "^35.0.0",
@@ -104,6 +118,38 @@
     },
     "portable": {
       "artifactName": "dsh-desktop-${version}-windows-${arch}-portable.${ext}"
+    },
+    "linux": {
+      "icon": "build/icon.png",
+      "category": "Development",
+      "executableName": "deepseek-harness",
+      "syncDesktopName": true,
+      "synopsis": "Desktop shell for the DeepSeek Harness web app",
+      "description": "Loads the DeepSeek Harness web UI in a native window and keeps the resident dsh web service deployed and up to date, locally or over SSH.",
+      "maintainer": "svengong <svengong@users.noreply.github.com>",
+      "vendor": "svengong",
+      "target": [
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        },
+        {
+          "target": "deb",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ]
+    },
+    "appImage": {
+      "artifactName": "dsh-desktop-${version}-linux-${arch}.${ext}"
+    },
+    "deb": {
+      "artifactName": "dsh-desktop-${version}-linux-${arch}.${ext}"
     }
   },
   "allowScripts": {
