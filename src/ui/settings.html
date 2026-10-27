@@ -5,10 +5,15 @@
 <title>DSH — 设置</title>
 <script>
   // Boot the panel's theme before first paint (no flash). The main process
-  // injects `theme` as a query param; runtime changes arrive via onTheme.
+  // injects `theme` and `platform` as query params; runtime theme changes
+  // arrive via onTheme. The platform decides which native window chrome the
+  // embedded panel must keep clear of (macOS traffic lights vs Windows
+  // caption buttons), exactly like the workspace frame.
   (function () {
-    var t = new URLSearchParams(location.search).get('theme')
+    var params = new URLSearchParams(location.search)
+    var t = params.get('theme')
     if (t) document.documentElement.dataset.theme = t
+    document.documentElement.dataset.platform = params.get('platform') || 'macos'
   })()
 </script>
 <link rel="stylesheet" href="./shell.css">

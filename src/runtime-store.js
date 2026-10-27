@@ -21,6 +21,9 @@ const path = require('node:path')
 const os = require('node:os')
 const { shellQuote } = require('./ssh')
 const { runtimeIsBuilt } = require('./runtime-layout')
+const {
+  expandHome: expandHomeDir, isPidAlive, killTree, swapCurrentLink,
+} = require('./platform')
 
 const LOCAL_STATE_FILE = 'desktop-web.state.json'
 // Local ssh-tunnel bookkeeping, kept separate from the web-service state so a
@@ -44,20 +47,11 @@ const LOCK_TIMEOUT_MS = 5 * 60 * 1000
 // remote lock after the longest possible pipeline has safely timed out.
 const REMOTE_LOCK_STALE_MS = 2 * 60 * 60 * 1000
 
-function expandHome(dir) {
-  if (dir === '~') return os.homedir()
-  if (dir.startsWith('~/')) return path.join(os.homedir(), dir.slice(2))
-  return dir
-}
+// Platform-aware home expansion (`~/x`, `~\\x`, `~`) and liveness probe.
+const expandHome = expandHomeDir
 
 function pidAlive(pid) {
-  if (!Number.isInteger(pid) || pid <= 0) return false
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch (error) {
-    return error.code === 'EPERM'
-  }
+  return isPidAlive(pid)
 }
 
 /** Parse the CLI's one-line bootstrap URL: `dsh web: http://127.0.0.1:<port>`. */
@@ -176,10 +170,12 @@ function reapLegacyLocalTunnelState(settings) {
   try {
     const state = JSON.parse(fs.readFileSync(file, 'utf8'))
     if (isValidTunnelState(state) && pidAlive(state.pid)) {
-      try {
-        process.kill(state.pid, 'SIGTERM')
-      } catch {
-        // Already gone.
+      if (!killTree(state.pid, 'SIGTERM')) {
+        try {
+          process.kill(state.pid, 'SIGTERM')
+        } catch {
+          // Already gone.
+        }
       }
     }
   } catch {
@@ -339,7 +335,15 @@ function writeLocalRuntimeManifest(settings, version, meta = {}) {
   }
 }
 
-/** Atomically point `current` at a finished local runtime directory. */
+/**
+ * Atomically point `current` at a finished local runtime directory.
+ *
+ * POSIX: a relative symlink renamed over `current` — one atomic swap.
+ * Windows: a directory JUNCTION (a symlink needs admin or Developer Mode,
+ * a junction needs neither) swapped in by `platform.swapCurrentLink`; the
+ * junction stores an absolute target, and everything that reads this runtime
+ * resolves the link rather than parsing it.
+ */
 function activateLocalRuntime(settings, version) {
   const root = localRuntimeRoot(settings)
   const versionDir = localVersionDir(settings, version)
@@ -349,11 +353,9 @@ function activateLocalRuntime(settings, version) {
   const previous = readLocalRootManifest(settings)
   const token = versionToken(version)
   const current = path.join(root, CURRENT_LINK)
-  const tmp = path.join(root, `.${CURRENT_LINK}.tmp`)
   try {
-    fs.rmSync(tmp, { recursive: true, force: true })
-    fs.symlinkSync(token, tmp, 'dir')
-    fs.renameSync(tmp, current)
+    fs.mkdirSync(root, { recursive: true })
+    swapCurrentLink(current, versionDir, token)
   } catch (error) {
     throw new Error(`切换本地运行时 current 失败：${error.message}`)
   }
@@ -940,6 +942,7 @@ module.exports = {
   expandHome,
   isValidState,
   localActiveRuntimeDir,
+  localRuntimeRoot,
   localStatePath,
   localStagingDir,
   localTunnelStatePath,

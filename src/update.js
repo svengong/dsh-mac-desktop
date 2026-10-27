@@ -20,6 +20,8 @@ const { DEFAULT_REGISTRY, queryNpmArtifact, installNpmArtifact } = require('./ar
 const { NPM_PACKAGE, npmArtifactVersion } = require('./runtime-layout')
 const { OFFICIAL_REPO_URL } = require('./settings')
 const runtimeStore = require('./runtime-store')
+const { npmFor } = require('./platform')
+const { downloadFile, ensurePortableNode } = require('./node-bootstrap')
 
 const LONG_TIMEOUT_MS = 45 * 60 * 1000
 const REMOTE_PREFIX = remoteToolchainPrefix()
@@ -37,6 +39,9 @@ function firstLineMatching(lines, predicate) {
   }
   return ''
 }
+
+// `downloadFile` now lives in ./node-bootstrap, because the detached update
+// worker needs it too and it must not depend on anything the shell has.
 
 class Updater {
   constructor({ getSettings, connection, onLine, onBusyChange }) {
@@ -572,43 +577,44 @@ class Updater {
     await this.installLocalPnpm(settings, tools.node)
   }
 
+  /**
+   * Download a portable node into `<repo>/.dsh-tools/node` when no
+   * engine-compatible node resolves.
+   *
+   * The archive is per-platform: a `.tar.gz` on macOS/Linux (its `bin/node`
+   * must be stripped of the archive's leading directory) and a `.zip` on
+   * Windows (`node.exe` sits at the archive root). Both unpack so the
+   * executable lands where that platform expects it; `tools.js` probes BOTH
+   * layouts (`node/bin/node` and `node/node.exe`), so either can serve.
+   *
+   * Windows has no bundled curl before Windows 10 1803, but node itself is
+   * already running here (the shell is Electron), so the download uses node's
+   * own fetch instead of shelling out to a tool that may not exist.
+   */
+  /**
+   * Install the portable node into `.dsh-tools`.
+   *
+   * The download/extract itself lives in `node-bootstrap` so the detached
+   * update WORKER can use the identical code — it must, because on a clean
+   * machine the worker is the one that needs node first. See that module for
+   * the deadlock this avoids.
+   */
   async bootstrapLocalNode(settings) {
     const tools = this.connection.resolvedTools()
-    const version = '22.19.0'
-    const platform = process.platform === 'darwin' ? 'darwin' : 'linux'
-    const arch = process.arch === 'arm64' ? 'arm64' : 'x64'
-    const baseDir = path.join(settings.local.repoDir, '.dsh-tools')
-    const nodeDir = path.join(baseDir, 'node')
-    const archive = path.join(baseDir, 'node.tar.gz')
-    fs.mkdirSync(nodeDir, { recursive: true })
-    const url = `https://nodejs.org/dist/v${version}/node-v${version}-${platform}-${arch}.tar.gz`
-    this.onLine(`未找到兼容的 node，正在下载便携版 node v${version} 到 ${nodeDir} …`)
-    const fetch = await runCommand({
-      cmd: '/usr/bin/curl',
-      args: ['-fsSL', '-o', archive, url],
+    const toolRoot = path.join(settings.local.repoDir, '.dsh-tools')
+    const outcome = await ensurePortableNode({
+      toolRoot,
+      isRunnable: () => this.connection.resolvedTools({ refresh: true }).node !== '',
+      onLine: line => this.onLine(line),
       env: tools.env,
-      timeoutMs: 10 * 60_000,
-      onLine: line => this.onLine(`[curl] ${line}`),
-      owner: this.owner(),
     })
-    if (fetch.code !== 0) throw new Error(`便携版 node 下载失败（${url}）。请检查网络。`)
-    const unpack = await runCommand({
-      cmd: '/usr/bin/tar',
-      args: ['-xzf', archive, '--strip-components=1', '-C', nodeDir],
-      env: tools.env,
-      timeoutMs: 5 * 60_000,
-      onLine: line => this.onLine(`[tar] ${line}`),
-      owner: this.owner(),
-    })
-    fs.rmSync(archive, { force: true })
-    if (unpack.code !== 0) throw new Error('便携版 node 解压失败。')
-    const resolved = this.connection.resolvedTools({ refresh: true })
-    if (resolved.node === '') throw new Error('便携版 node 已就位但仍无法运行。')
+    if (!outcome.ok) throw new Error(outcome.error || '便携版 node 引导失败。')
   }
 
   async installLocalPnpm(settings, nodePath) {
-    const npmPath = path.join(path.dirname(nodePath), 'npm')
-    if (!fs.existsSync(npmPath)) throw new Error('node 目录中没有 npm，无法安装 pnpm。')
+    // npm ships beside node: `npm` on POSIX, `npm.cmd` on Windows.
+    const npmPath = npmFor(nodePath)
+    if (npmPath === '') throw new Error('node 目录中没有 npm，无法安装 pnpm。')
     const version = await this.pnpmVersionFromPackageManager(settings) || '11.7.0'
     const installDir = path.join(settings.local.repoDir, '.dsh-tools')
     this.onLine(`正在把 pnpm@${version} 安装到仓库目录 .dsh-tools（不依赖系统环境）…`)

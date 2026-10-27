@@ -11,6 +11,7 @@
 const path = require('node:path')
 const { WebContentsView, dialog } = require('electron')
 const { focusViewInKeyWindow } = require('./windows')
+const { platformName } = require('./platform')
 
 const PRELOAD = path.join(__dirname, 'dialog-preload.js')
 const SETTINGS_HTML = path.join(__dirname, 'ui', 'settings.html')
@@ -85,9 +86,15 @@ class SetupDialog {
     }
   }
 
-  /** Query params for loading the panel; `section` omitted when it is null. */
+  /**
+   * Query params for loading the panel; `section` omitted when it is null.
+   *
+   * `platform` travels with the theme so the panel can offset its titlebar
+   * from whatever native chrome the host window renders — macOS traffic lights
+   * on the left, Windows caption buttons on the right.
+   */
   loadQuery(section) {
-    const query = { embedded: '1', theme: this.getTheme() }
+    const query = { embedded: '1', theme: this.getTheme(), platform: platformName() }
     if (SECTIONS.includes(section)) query.section = section
     return query
   }

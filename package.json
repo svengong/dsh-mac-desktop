@@ -2,7 +2,7 @@
   "name": "dsh-mac-desktop",
   "version": "0.10.5",
   "private": true,
-  "description": "macOS desktop shell for the DeepSeek Harness web app: local or SSH-remote connections with an in-menu update flow",
+  "description": "Desktop shell for the DeepSeek Harness web app on macOS, Windows and Linux: local or SSH-remote connections with an in-menu update flow",
   "keywords": [
     "deepseek",
     "deepseek-harness",
@@ -12,6 +12,9 @@
     "ai-agents",
     "electron",
     "macos",
+    "windows",
+    "arm64",
+    "x64",
     "ssh"
   ],
   "main": "src/main.js",
@@ -21,11 +24,15 @@
     "icons": "bash scripts/gen-icons.sh",
     "dist": "electron-builder --mac dir",
     "dist:dmg": "electron-builder --mac dmg zip",
-    "dist:publish": "electron-builder --mac dmg zip --publish always"
+    "dist:win": "node scripts/build-win.js",
+    "dist:win:arm64": "node scripts/build-win.js --arm64",
+    "dist:win:x64": "node scripts/build-win.js --x64",
+    "dist:publish": "electron-builder --mac dmg zip --publish always",
+    "dist:publish:win": "node scripts/build-win.js --publish always"
   },
   "devDependencies": {
     "electron": "^35.0.0",
-    "electron-builder": "^26.0.0"
+    "electron-builder": "^26.18.0"
   },
   "build": {
     "appId": "com.deepseek.harness.desktop",
@@ -59,6 +66,44 @@
         "dmg",
         "zip"
       ]
+    },
+    "win": {
+      "icon": "build/icon.png",
+      "artifactName": "dsh-desktop-${version}-windows-${arch}.${ext}",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "shortcutName": "DeepSeek Harness",
+      "artifactName": "dsh-desktop-${version}-windows-${arch}-setup.${ext}",
+      "uninstallDisplayName": "DeepSeek Harness ${version}"
+    },
+    "portable": {
+      "artifactName": "dsh-desktop-${version}-windows-${arch}-portable.${ext}"
     }
   },
   "allowScripts": {

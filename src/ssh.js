@@ -17,6 +17,7 @@
 const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
+const { sshConfigPath } = require('./platform')
 
 // ── ~/.ssh/config parsing ───────────────────────────────────────────────────
 
@@ -121,7 +122,9 @@ function parseSshConfig(configPath) {
 }
 
 function defaultSshConfigPath() {
-  return path.join(os.homedir(), '.ssh', 'config')
+  // `%USERPROFILE%\.ssh\config` on Windows — the OpenSSH client bundled with
+  // Windows 10+ reads exactly that path.
+  return sshConfigPath()
 }
 
 /** A literal (non-pattern) Host alias can be a destination; patterns cannot. */

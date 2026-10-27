@@ -17,6 +17,8 @@ const fs = require('node:fs')
 const path = require('node:path')
 const os = require('node:os')
 const { normalizeUpdate } = require('./components')
+const { IS_WINDOWS } = require('./platform')
+const { defaultLoginShell } = require('./tools')
 
 /**
  * The shell-owned dsh home used for development/desktop service isolation.
@@ -57,7 +59,10 @@ const DEVICE_DEFAULTS = Object.freeze({
 
 const DEFAULTS = Object.freeze({
   activeDeviceId: 'local',
-  toolPaths: Object.freeze({ node: '', git: '', pnpm: '', shell: '/bin/zsh' }),
+  // The login shell is only used to FIND tools (a Finder/Dock launch has a
+  // minimal PATH). Windows has no login shell; tools.js searches PATH,
+  // PowerShell's own resolution and the usual install dirs there instead.
+  toolPaths: Object.freeze({ node: '', git: '', pnpm: '', shell: defaultLoginShell() }),
 })
 
 /**
@@ -123,12 +128,22 @@ function normalizeSsh(raw) {
 
 function normalizeToolPaths(raw) {
   const source = raw !== null && typeof raw === 'object' ? raw : {}
+  const shell = text(source.shell) || DEFAULTS.toolPaths.shell
   return {
     node: text(source.node),
     git: text(source.git),
     pnpm: text(source.pnpm),
-    shell: text(source.shell) || DEFAULTS.toolPaths.shell,
+    // A settings file carried over from another OS can name a shell that does
+    // not exist here (`/bin/zsh` on Windows). Fall back to this platform's
+    // default rather than spawning a path that can never resolve.
+    shell: needsPlatformShell(shell) ? defaultLoginShell() : shell,
   }
+}
+
+/** Whether a persisted shell path belongs to a different OS. */
+function needsPlatformShell(shell) {
+  if (IS_WINDOWS) return shell.startsWith('/')
+  return /^[A-Za-z]:[\\/]/.test(shell) || shell.toLowerCase().endsWith('.exe')
 }
 
 /** A fresh device document with no inherited update state. */

@@ -6,9 +6,15 @@
 <script>
   // Boot the shell theme before first paint (no flash). The main process
   // injects `theme` as a query param; runtime changes arrive via onTheme.
+  // `platform` decides which native window chrome the frame must leave room
+  // for: macOS traffic lights on the LEFT, Windows caption buttons on the
+  // RIGHT. It is applied on <html> so the CSS can switch insets and drag
+  // regions before anything paints.
   (function () {
-    var t = new URLSearchParams(location.search).get('theme')
+    var params = new URLSearchParams(location.search)
+    var t = params.get('theme')
     if (t) document.documentElement.dataset.theme = t
+    document.documentElement.dataset.platform = params.get('platform') || 'macos'
   })()
 </script>
 <link rel="stylesheet" href="./shell.css">
@@ -23,7 +29,7 @@
   <nav class="shell-frame-nav" id="shell-nav" aria-label="工作区栏目">
     <button type="button" data-view="harness" class="active">Harness</button>
     <button type="button" data-view="settings">设置</button>
-    <button type="button" id="new-window" class="shell-frame-new" aria-label="新建窗口" title="新建窗口（⌘N）">＋</button>
+    <button type="button" id="new-window" class="shell-frame-new" aria-label="新建窗口" title="新建窗口">＋</button>
   </nav>
 
   <div class="shell-frame-context">
@@ -69,6 +75,10 @@ for (const button of buttons) {
   })
 }
 
+// Modifier hint per platform: ⌘N on macOS, Ctrl+N elsewhere. Read from the
+// preload's platform value rather than sniffing the UA string.
+const isMac = api.platform === 'macos'
+$('new-window').title = `新建窗口（${isMac ? '⌘N' : 'Ctrl+N'}）`
 $('new-window').addEventListener('click', () => {
   api.newWindow()
 })

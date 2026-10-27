@@ -5,6 +5,10 @@
  * The frame is deliberately tiny: it can navigate between the harness view
  * and the embedded settings sections, and it receives a JSON-only state
  * snapshot so it never needs direct access to the page or main process.
+ *
+ * `platform` is read from the frame's own query string (the main process
+ * appends it at load time) and exposed so the renderer can adjust native
+ * chrome insets and modifier-key hints without an extra IPC round trip.
  */
 
 const { contextBridge, ipcRenderer } = require('electron')
@@ -16,6 +20,8 @@ function subscribe(channel, callback) {
 }
 
 contextBridge.exposeInMainWorld('desktopShell', {
+  // 'macos' | 'windows' | 'linux', injected as a query param at load time.
+  platform: new URLSearchParams(location.search).get('platform') || 'macos',
   navigate: view => ipcRenderer.invoke('shell:navigate', view),
   newWindow: () => ipcRenderer.invoke('shell:new-window'),
   action: (name, payload) => ipcRenderer.invoke('shell:action', name, payload),

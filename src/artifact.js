@@ -21,6 +21,7 @@ const { fetchJson } = require('./update-manager')
 const { runCommand } = require('./runner')
 const { NPM_PACKAGE, npmArtifactVersion } = require('./runtime-layout')
 const { compareVersions } = require('./components')
+const { npmFor } = require('./platform')
 
 const DEFAULT_REGISTRY = 'https://registry.npmjs.org'
 
@@ -137,10 +138,13 @@ async function queryNpmArtifact({ registryUrl = '', timeoutMs = 20_000 } = {}) {
  * @param {object} options - nodeBin, npmBin, runtimeDir, spec, env, onLine, timeoutMs, owner, shouldAbort, registryUrl.
  */
 async function installNpmArtifact({ nodeBin, npmBin, runtimeDir, spec, env, onLine, timeoutMs = 20 * 60_000, owner = null, shouldAbort = null, registryUrl = '' }) {
+  // npm ships beside node: `npm` on POSIX, `npm.cmd` on Windows.
   const npm = npmBin !== '' && npmBin !== null && npmBin !== undefined
     ? npmBin
-    : path.join(path.dirname(nodeBin), 'npm')
-  if (!fs.existsSync(npm)) throw new Error(`npm 不可用：${npm}（便携版 node 应自带 npm）`)
+    : npmFor(nodeBin)
+  if (npm === '' || !fs.existsSync(npm)) {
+    throw new Error(`npm 不可用：${npm === '' ? '(node 目录下没有 npm)' : npm}（便携版 node 应自带 npm）`)
+  }
   const configured = String(registryUrl || DEFAULT_REGISTRY).replace(/\/$/, '')
   const emit = onLine === undefined ? undefined : line => onLine(`[npm] ${line}`)
 

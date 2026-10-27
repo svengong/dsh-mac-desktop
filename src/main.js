@@ -43,6 +43,9 @@ const { SetupDialog, registerDialogIpc } = require('./dialogs')
 const { buildMenu } = require('./menu')
 const { createTray } = require('./tray')
 const { presentWindow, focusViewInKeyWindow } = require('./windows')
+const {
+  IS_MAC, IS_WINDOWS, isPidAlive, killTree, platformName,
+} = require('./platform')
 const { WindowManager } = require('./window-manager')
 const { isExternalUrl, isExternalSubFrameUrl } = require('./external-open')
 const { BOOT_FAILURE_PROBE, shouldReloadAfterBootFailure } = require('./boot-watch')
@@ -73,8 +76,9 @@ const SHELL_FRAME_HEIGHT = 46
  * `electron .` and `npm start` use `~/.dsh-dev` as the Electron userData
  * directory (the same home the local service already uses for its own DSH
  * state), so a shell under development can never overwrite the installed
- * DeepSeek Harness app's `~/Library/Application Support/DeepSeek Harness`
- * or the user's real `~/.dsh`. The directory is created on demand.
+ * DeepSeek Harness app's userData (`~/Library/Application Support/DeepSeek
+ * Harness` on macOS, `%APPDATA%\DeepSeek Harness` on Windows) or the user's
+ * real `~/.dsh`. The directory is created on demand.
  * Packaged builds keep Electron's default unless DSH_DESKTOP_USER_DATA is set.
  */
 function configureUserData() {
@@ -135,6 +139,9 @@ function logSink(line) {
  * closest available signal to a Dock mouse-down.
  */
 function flashDockIconPress(dock = app.dock, delayMs = DOCK_PRESS_MS) {
+  // Windows/Linux have no Dock tile: `app.activate` (the only caller) does not
+  // fire there, but a defensive guard keeps every entry point harmless.
+  if (dock === undefined || dock === null) return
   const setDockIcon = iconPath => {
     try {
       dock.setIcon(iconPath)
@@ -202,8 +209,37 @@ function broadcastTheme(theme) {
   for (const workspace of workspaces.values()) {
     if (workspace.window !== null && !workspace.window.isDestroyed()) {
       workspace.window.webContents.send('shell:theme', theme)
+      // The native caption buttons are OS-drawn, so they do not follow the
+      // CSS theme. Re-tint them here, or a light theme leaves white glyphs on
+      // a light frame (and the reverse) until the next window is created.
+      applyTitleBarOverlay(workspace.window, theme)
     }
     workspace.setupDialog.send('dialog:theme', theme)
+  }
+}
+
+/**
+ * Re-tint the Windows caption-button glyphs to match the shell theme.
+ *
+ * A no-op on macOS (the traffic lights are themed by the OS appearance, which
+ * `applyNativeTheme` already pins) and on any window without an overlay.
+ * @param {import('electron').BrowserWindow} win
+ * @param {string} theme - shell theme id.
+ */
+function applyTitleBarOverlay(win, theme) {
+  if (win === null || win === undefined || win.isDestroyed()) return
+  if (typeof win.setTitleBarOverlay !== 'function') return
+  const appearance = THEME_APPEARANCE[theme] ?? 'system'
+  const dark = appearance === 'dark' || (appearance === 'system' && nativeTheme.shouldUseDarkColors)
+  try {
+    win.setTitleBarOverlay({
+      color: 'rgba(0,0,0,0)',
+      // Same two colours the initial window used: the shell's text tokens.
+      symbolColor: dark ? '#f5f5f7' : '#1c1c1e',
+      height: SHELL_FRAME_HEIGHT,
+    })
+  } catch {
+    // Cosmetic: an unsupported platform or a closing window must not throw.
   }
 }
 
@@ -376,9 +412,37 @@ const TASK_CANCEL_TIMEOUT_MS = 15 * 1000
 function trackSessionTask(session, promise) {
   const tracked = Promise.resolve(promise)
   session.taskPromise = tracked
-  tracked.finally(() => {
-    if (session.taskPromise === tracked) session.taskPromise = null
-  }).catch(() => {})
+  tracked
+    .then(() => {
+      if (session.taskPromise === tracked) session.taskPromise = null
+    })
+    .catch(error => {
+      if (session.taskPromise === tracked) session.taskPromise = null
+      // NEVER swallow silently. Every task routed through here (initial build,
+      // toolchain bootstrap, update pipeline) ends in a UI state the user is
+      // staring at, so an exception that only reaches a no-op catch leaves that
+      // UI waiting forever with no explanation — the classic "stuck on 检查运行
+      // 环境…, no handles pending, nothing in the log" report. Report it.
+      const detail = String((error && error.message) || error)
+      try {
+        routeSessionLine(session, `✗ 任务异常终止：${detail}`)
+        if (session.connection !== null && session.connection !== undefined) {
+          session.connection.log(`✗ 任务异常终止：${detail}`)
+        }
+        const progress = {
+          title: '任务异常终止',
+          status: detail,
+          actions: [{ label: '重试', name: 'run-init', primary: true }, { label: '关闭', name: 'dismiss-progress' }],
+        }
+        for (const workspace of session.windows) {
+          workspace.pendingOpen = false
+          setProgress(workspace, progress)
+        }
+      } catch {
+        // Reporting must never mask the original failure.
+      }
+      console.error('[dsh] task rejected:', error)
+    })
   return tracked
 }
 
@@ -467,13 +531,7 @@ async function abandonSession(session) {
 
 /** Whether a local PID is alive (signal 0 probes without signalling). */
 function pidAliveLocal(pid) {
-  if (!Number.isInteger(pid) || pid <= 0) return false
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch (error) {
-    return error.code === 'EPERM'
-  }
+  return isPidAlive(pid)
 }
 
 /**
@@ -506,6 +564,10 @@ function spawnUpdateWorker(session, view, version) {
   const child = spawnDetached({
     cmd: process.execPath,
     args: [path.join(__dirname, 'update-worker.js'), taskPath],
+    // The worker is a plain node script, not an Electron app: run the Electron
+    // binary as node so it does not boot a GUI main process (whose lifetime
+    // would then depend on window/GPU state).
+    env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
   })
   // The worker writes its own pid into update-status.json immediately, but
   // the poll interval lags; seed with the spawn handle so a cancel that
@@ -603,10 +665,12 @@ function killWorkerPid(session) {
     session.workerPid = null
     return
   }
-  try {
-    process.kill(pid, 'SIGTERM')
-  } catch {
-    // Already gone; the status poll settles it.
+  if (!killTree(pid, 'SIGTERM')) {
+    try {
+      process.kill(pid, 'SIGTERM')
+    } catch {
+      // Already gone; the status poll settles it.
+    }
   }
 }
 
@@ -643,6 +707,23 @@ function cancelSessionWorker(session) {
 }
 
 /**
+ * Free space on the volume holding `dir`, in GB, or null when it cannot be
+ * determined. POSIX asks `df -k`; Windows has no df, but node's statfs does
+ * the same job on both platforms — so this no longer shells out at all.
+ * @param {string} dir
+ * @returns {Promise<number|null>}
+ */
+async function availableDiskGb(dir) {
+  try {
+    const stats = await fs.promises.statfs(dir)
+    const bytes = Number(stats.bavail) * Number(stats.bsize)
+    return Number.isFinite(bytes) && bytes > 0 ? bytes / 1024 / 1024 / 1024 : null
+  } catch {
+    return null
+  }
+}
+
+/**
  * Actionable failure diagnostics for a failed build/update: disk space,
  * toolchain availability, mode — the things that turn a dead-end retry
  * into a decision (free disk, fix toolchain, switch source, use artifact).
@@ -652,10 +733,8 @@ async function diagnoseFailure(session) {
   const view = settingsViewFor(session.key)
   try {
     const dshHome = runtimeStore.expandHome(view.local.dshHome)
-    const df = await runCommand({ cmd: '/bin/df', args: ['-k', dshHome] })
-    const row = (df.lines[1] || '').split(/\s+/)
-    const availBlocks = Number(row[3])
-    lines.push(`磁盘空间：${Number.isFinite(availBlocks) ? `${(availBlocks / 1024 / 1024).toFixed(1)} GB 可用` : '未知'}`)
+    const available = await availableDiskGb(dshHome)
+    lines.push(`磁盘空间：${available === null ? '未知' : `${available.toFixed(1)} GB 可用`}`)
   } catch {
     lines.push('磁盘空间：未知')
   }
@@ -696,7 +775,7 @@ function resumePendingUpdate() {
   const status = runtimeStore.readUpdateStatus(view)
   // An intent written by an SSH-driven install lives in this same local
   // dshHome, but its target was a REMOTE host and its worker records a remote
-  // pid. Resuming it here would silently install that version on this Mac, so
+  // pid. Resuming it here would silently install that version on this machine, so
   // drop it instead. A missing mode is a legacy/local file: keep resuming.
   if (pending !== null && pending.mode !== '' && pending.mode !== 'local') {
     runtimeStore.clearPendingUpdate(view)
@@ -1330,10 +1409,25 @@ function createBrowserWindow(bounds = null) {
     // inactive workspace window only focuses the window and is swallowed, so
     // the harness icon/button the user aimed at needs a second click.
     acceptFirstMouse: true,
-    // The shell frame is the window's only titlebar: hidden native title,
-    // native traffic lights on top of the macOS-style toolbar.
-    titleBarStyle: 'hiddenInset',
-    trafficLightPosition: { x: 18, y: 15 },
+    // The shell frame is the window's only titlebar on both platforms, but
+    // the native chrome it must coexist with differs:
+    //
+    //  macOS    hiddenInset keeps the traffic lights and lets the shell pad
+    //           around them (trafficLightPosition). The frame draws the title.
+    //  Windows  hidden + titleBarOverlay puts the native min/max/close cluster
+    //           in the top-right and keeps the shell's own 46px bar as the
+    //           draggable strip. The overlay takes a transparent background so
+    //           a dark frame never carries a white caption band.
+    ...(IS_MAC
+      ? { titleBarStyle: 'hiddenInset', trafficLightPosition: { x: 18, y: 15 } }
+      : {
+          titleBarStyle: 'hidden',
+          titleBarOverlay: {
+            color: 'rgba(0,0,0,0)',
+            symbolColor: nativeTheme.shouldUseDarkColors ? '#f5f5f7' : '#1c1c1e',
+            height: SHELL_FRAME_HEIGHT,
+          },
+        }),
     webPreferences: {
       preload: SHELL_PRELOAD,
       contextIsolation: true,
@@ -1346,9 +1440,19 @@ function createBrowserWindow(bounds = null) {
       backgroundThrottling: false,
     },
   })
+  // Windows/Linux: keep the application menu (so Ctrl+N / Ctrl+, accelerators
+  // work) but never paint its bar — the frameless shell frame owns the top
+  // edge. Alt still reveals it, which is the platform convention.
+  if (!IS_MAC) {
+    win.setMenuBarVisibility(false)
+    win.setAutoHideMenuBar(true)
+  }
   // The shell owns the title: it shows `DSH-[终端]-地址`, not the page title.
   win.on('page-title-updated', event => event.preventDefault())
-  win.loadFile(SHELL_HTML, { query: { theme: currentTheme() } })
+  // The frame needs to know which native chrome it is padding around: macOS
+  // keeps ~84px clear on the left for the traffic lights, while Windows puts
+  // its window controls on the RIGHT and needs that inset there instead.
+  win.loadFile(SHELL_HTML, { query: { theme: currentTheme(), platform: platformName() } })
   return win
 }
 
@@ -1422,10 +1526,20 @@ function connectSession(session) {
   const task = Promise.resolve(session.connection.connect()).then(
     () => {
       session.connecting = false
+      session.connection.log(`连接流程结束，状态：${session.connection.status.state}`)
       reconcileMachineIdentity(session)
       checkHostCompatibility(session)
     },
-    () => { session.connecting = false },
+    (error) => {
+      session.connecting = false
+      // `connect()` reports its own failures through status + the
+      // 'connect-failed' event, so reaching here means something OUTSIDE that
+      // try block broke (a listener, identity reconciliation, …). Swallowing it
+      // left the UI on "正在连接" with a frozen log and no pending handles —
+      // the exact signature of a hang. Always leave a trace.
+      session.connection.log(`✗ 连接流程异常：${String((error && error.message) || error)}`)
+      session.connecting = false
+    },
   ).finally(() => {
     if (session.connectionTaskPromise === task) session.connectionTaskPromise = null
   })
@@ -1728,7 +1842,7 @@ function createWorkspace(deviceKey = null, options = {}) {
     bootReloadedUrl: '',
     progress: session === null ? null : session.progress,
     // True while the user closed this window with the red button. Closed
-    // windows remain alive for Dock restore, but must NOT count as the
+    // windows remain alive for taskbar/Dock restore, but must NOT count as the
     // terminal's open window for same-terminal save/switch decisions.
     userClosed: false,
   }
@@ -1962,6 +2076,11 @@ function activeUpdateSummary() {
 function refreshMenu() {
   const workspace = activeWorkspace()
   const session = workspace === null ? null : workspace.session
+  // macOS: the application menu IS the menu bar, and it is where 连接/更新
+  // live. Windows/Linux attach the menu to each WINDOW instead (see the
+  // `autoHideMenuBar` + `setMenuBarVisibility(false)` pair in
+  // createBrowserWindow): the commands and their accelerators stay live, but
+  // no menu bar paints over the frameless 46px shell frame.
   Menu.setApplicationMenu(buildMenu({
     actions,
     getStatus: () => session === null ? idleStatus() : session.connection.status,
@@ -1981,7 +2100,10 @@ function refreshMenu() {
  * terminal-only labels).
  */
 function refreshDockMenu() {
+  // macOS only: Windows has no dock, and its taskbar jump list is not a menu
+  // the shell can populate from here.
   if (app.dock === undefined || app.dock === null) return
+  if (!IS_MAC) return
   try {
     app.dock.setMenu(Menu.buildFromTemplate([
       { label: '打开 Harness', click: () => actions.openMain() },
@@ -2045,9 +2167,31 @@ function onSessionStatus(session, status) {
 
 function onSessionConnectFailed(session, error) {
   session.autoReconnectAttempts += 1
+  const detail = String(error.message || error)
+  // ALWAYS say why. The old code retried twice in silence and only then showed
+  // a MODAL dialog, so a first-run failure looked exactly like a hang: the
+  // loading panel kept counting "已等待 Ns" over a log that never mentioned the
+  // error. That is what a clean Windows machine showed when no node was found —
+  // the message existed the whole time but never reached the UI.
+  session.connection.log(`✗ 连接失败：${detail}`)
+  // Surface it in the loading panel too (it renders the ring through
+  // shell:log-dump), so the reason is visible without opening the log file.
+  const progress = {
+    title: '连接失败',
+    status: detail,
+    actions: [{ label: '重试', name: 'reconnect', primary: true }, { label: '关闭', name: 'dismiss-progress' }],
+  }
+  for (const workspace of session.windows) {
+    // `pendingOpen` pins the harness tab on the loading panel. Left set after a
+    // failure it keeps the "正在连接 · 已等待 N 秒" counter running over a connect
+    // that already died — the exact "looks hung forever" symptom. The failure
+    // banner above replaces it.
+    workspace.pendingOpen = false
+    setProgress(workspace, progress)
+  }
   if (session.autoReconnectAttempts <= 2) {
     const delay = session.autoReconnectAttempts * 10_000
-    session.connection.log(`连接失败，${delay / 1000} 秒后自动重试（第 ${session.autoReconnectAttempts}/2 次）…`)
+    session.connection.log(`${delay / 1000} 秒后自动重试（第 ${session.autoReconnectAttempts}/2 次）…`)
     clearTimeout(session.autoReconnectTimer)
     session.autoReconnectTimer = setTimeout(() => {
       session.autoReconnectTimer = null
@@ -2060,10 +2204,14 @@ function onSessionConnectFailed(session, error) {
     }, delay)
     return
   }
-  dialog.showErrorBox('连接失败', String(error.message || error))
+  // Retries exhausted. A modal showErrorBox BLOCKS the main process and, on a
+  // window the user is not looking at (or a minimized one), is indistinguishable
+  // from a freeze. The loading panel above already carries the message and a
+  // retry action, so log the final verdict instead of stealing focus.
+  session.connection.log('自动重试已用尽，请检查上面的原因后手动重试。')
 }
 
-/** Present available updates as a macOS notification (falls back to a dialog). */
+/** Present available updates as a desktop notification (falls back to a dialog). */
 function notifyUpdatesAvailable(session, available) {
   const lines = available.map(row => `· ${row.title}：${row.summary}`).join('\n')
   const title = `DSH-[${terminalLabel(settingsViewFor(session.key))}]-${available.length} 个更新可用`
@@ -2174,8 +2322,14 @@ async function startWithSettingsInner(workspace) {
   // before it there is NO other signal: log the phase so the loading panel's
   // log (and the wait counter) shows life from the first second.
   session.connection.log(`→ 连接 DSH-[${terminalLabel(settingsViewFor(session.key))}]：检查运行环境…`)
+  // Every phase below is logged, because a stall between two of them used to be
+  // completely silent: the loading panel kept counting seconds while the main
+  // process had already finished (or thrown, and had the rejection swallowed).
+  // These lines turn "stuck on 检查运行环境" into an answer.
+  session.connection.log('[1/4] 读取设置…')
   try {
     built = await session.connection.isBuilt()
+    session.connection.log(`[2/4] 环境检查完成：${built ? '已构建' : '未构建'}`)
   } catch (error) {
     // The build check needs connectivity (ssh test for remote mode). When it
     // cannot even reach the host, connect() surfaces the real failure with a
@@ -2187,7 +2341,10 @@ async function startWithSettingsInner(workspace) {
     connectSession(session)
     return
   }
-  if (!alive()) return
+  if (!alive()) {
+    session.connection.log('[诊断] 会话已失效（stopped 或窗口已切换），连接链在此结束。')
+    return
+  }
   if (built === false) {
     const busyMessage = busyTaskMessage(session)
     if (busyMessage !== '') {
@@ -2205,8 +2362,13 @@ async function startWithSettingsInner(workspace) {
     syncWorkspaceHarness(workspace, session, true)
     // Phase 2/3: official artifact first — no checkout, no build, and the
     // worker survives shell quit.
+    session.connection.log('[3/4] 查询官方预构建产物…')
     const usedWorker = await startArtifactUpdateIfPossible(session)
-    if (workspace.session !== session) return
+    session.connection.log(`[3/4] 官方产物结果：${usedWorker ? '已交给后台下载任务' : '不可用，回退到源码构建'}`)
+    if (workspace.session !== session) {
+      session.connection.log('[诊断] 窗口已切换到其他终端，连接链在此结束。')
+      return
+    }
     if (usedWorker) {
       setProgress(workspace, { title: '初始化（官方产物）', status: '正在后台下载官方预构建版…' })
       return
@@ -2215,8 +2377,13 @@ async function startWithSettingsInner(workspace) {
       title: '初始化构建',
       status: '首次使用：确保仓库 → 工具链引导 → pnpm install → pnpm run build → 启动服务',
     })
+    session.connection.log('[4/4] 开始构建流水线…')
     const outcome = await session.updater.runPipeline({ includePull: true, toleratePullFailure: true })
-    if (!alive()) return
+    session.connection.log(`[4/4] 构建流水线结束：${outcome.ok === false ? `失败（${String((outcome.error && outcome.error.message) || outcome.error || '未知')}）` : '成功'}`)
+    if (!alive()) {
+      session.connection.log('[诊断] 构建结束后会话已失效，不再继续连接。')
+      return
+    }
     if (outcome.ok === false) {
       setProgress(workspace, {
         title: '初始化构建',
@@ -2227,7 +2394,11 @@ async function startWithSettingsInner(workspace) {
     }
     setProgress(workspace, null)
   }
-  if (!alive()) return
+  if (!alive()) {
+    session.connection.log('[诊断] 准备连接前会话已失效，连接链在此结束。')
+    return
+  }
+  session.connection.log('环境就绪，开始连接服务…')
   workspace.pendingOpen = true
   syncWorkspaceHarness(workspace, session, true)
   connectSession(session)
@@ -2608,11 +2779,16 @@ const actions = {
   },
 
   showAbout() {
+    const platform = IS_MAC ? 'macOS' : IS_WINDOWS ? 'Windows' : 'Linux'
+    // Spell the architecture the way each platform's users do. process.arch is
+    // already 'arm64' | 'x64' | 'ia32'; only ia32 needs a friendlier name.
+    const arch = process.arch === 'ia32' ? 'x86' : process.arch
     app.setAboutPanelOptions({
-      applicationName: 'dsh-mac-desktop',
+      applicationName: 'DeepSeek Harness',
       applicationVersion: `v${SHELL_VERSION}`,
+      version: `${platform} ${arch}`,
       credits: [
-        'dsh-mac-desktop — DeepSeek Harness 的 macOS 桌面壳',
+        `DeepSeek Harness 桌面壳（${platform} ${arch}）`,
         '',
         '· 本地 / SSH 远程静默部署并自动升级 harness 驻留程序',
         '· 多窗口（VS Code Remote 风格），每个窗口可切换任意 SSH 终端',
@@ -3058,27 +3234,32 @@ async function runSmoke() {
     const args = tunnelArgs('u@h:22', 3080, 3081)
     if (!args.includes('3080:127.0.0.1:3081') || !args.includes('-N')) throw new Error('tunnel failed')
   })
+  // Child probes run THIS process's node with an inline script: /bin/echo and
+  // /bin/sleep do not exist on Windows, and the smoke must cover all platforms.
+  const nodeChild = body => ({ cmd: process.execPath, args: ['-e', body] })
   await check('runner echo', async () => {
-    const result = await runCommand({ cmd: '/bin/echo', args: ['dsh-smoke'] })
+    const result = await runCommand(nodeChild('process.stdout.write("dsh-smoke\\n")'))
     if (result.code !== 0 || result.lines[0] !== 'dsh-smoke') throw new Error('runner failed')
   })
   await check('runner owner cancellation', async () => {
-    const task = runCommand({ cmd: '/bin/sleep', args: ['30'], owner: 'smoke-owner' })
+    const task = runCommand({ ...nodeChild('setTimeout(() => {}, 30000)'), owner: 'smoke-owner' })
     await new Promise(resolve => setTimeout(resolve, 250))
     if (cancelOwnedChildren('smoke-owner', 'SIGTERM') === 0) throw new Error('owner child not tracked')
     const result = await task
-    if (result.code === null && result.signal === 'SIGTERM') return
+    // POSIX reports a signal, Windows reports an exit code: either proves the
+    // child is gone. What must NOT happen is staying alive.
+    if (result.code !== null || result.signal !== null) return
     throw new Error('owner child was not cancelled: ' + JSON.stringify(result))
   })
   await check('session task cancellation', async () => {
     const fakeSession = { key: 'smoke-session', owner: () => 'session:smoke-session', taskPromise: null, connectionTaskPromise: null, windows: new Set(), progress: null }
-    const child = runCommand({ cmd: '/bin/sleep', args: ['30'], owner: fakeSession.owner() })
+    const child = runCommand({ ...nodeChild('setTimeout(() => {}, 30000)'), owner: fakeSession.owner() })
     trackSessionTask(fakeSession, child)
     await new Promise(resolve => setTimeout(resolve, 250))
     await cancelSessionTask(fakeSession)
     if (fakeSession.taskPromise !== null) throw new Error('session task promise did not settle after cancel')
     const result = await child
-    if (result.code === null && result.signal === 'SIGTERM') return
+    if (result.code !== null || result.signal !== null) return
     throw new Error('session child was not cancelled: ' + JSON.stringify(result))
   })
   await check('dock icon press feedback', async () => {
@@ -3149,9 +3330,11 @@ if (!gotLock) {
     }
 
     try {
-      app.dock.setIcon(DOCK_ICON)
+      // macOS only: Windows takes its icon from the build resources and the
+      // BrowserWindow icon option. app.dock is undefined on other platforms.
+      if (app.dock !== undefined && app.dock !== null) app.dock.setIcon(DOCK_ICON)
     } catch {
-      // The dock icon is cosmetic; packaged builds use the icns anyway.
+      // The dock icon is cosmetic; packaged builds use the platform icon anyway.
     }
 
     settingsStore = new SettingsStore(path.join(app.getPath('userData'), 'settings.json'))

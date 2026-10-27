@@ -1,7 +1,12 @@
 name: Release
 
-# 自动发布：推送 v* 标签时构建双架构（arm64/x64）DMG + ZIP 并发布 GitHub Release；
-# 也可手动触发（Actions → Release → Run workflow），此时必须填写要发布的 tag。
+# 自动发布：推送 v* 标签时构建 macOS（arm64/x64）与 Windows（x64/arm64）安装包，
+# 并发布 GitHub Release；也可手动触发（Actions → Release → Run workflow），
+# 此时必须填写要发布的 tag。
+#
+# 平台矩阵刻意分开跑：macOS 用 electron-builder 的 dmg/zip 目标，Windows 用
+# nsis/portable/zip。两边都必须产出 arm64 与 x64 —— Windows on ARM 已进入正式
+# 支持（Snapdragon X 系列），Electron 也从 33 起提供 win32-arm64 产物。
 on:
   push:
     tags:
@@ -27,17 +32,31 @@ concurrency:
 
 jobs:
   build:
-    name: Build ${{ matrix.arch }}
-    # 单台 arm64 runner 交叉构建两种架构：macos-13 (x64) 已退役，勿用。
-    runs-on: macos-14
+    name: Build ${{ matrix.os }} ${{ matrix.arch }}
+    # 单台 arm64 macOS runner 交叉构建两种 macOS 架构（macos-13/x64 已退役，勿用）。
+    # Windows 直接用原生 runner：electron-builder 在那里打包 nsis/portable 最稳，
+    # 且 win32-arm64 的 Electron 产物同样可在 x64 runner 上交叉构建。
     strategy:
       fail-fast: false
       matrix:
         include:
-          - arch: arm64
-            flag: --arm64
-          - arch: x64
-            flag: --x64
+          - os: macos-14
+            label: macos
+            arch: arm64
+            flags: --mac dmg zip --arm64
+          - os: macos-14
+            label: macos
+            arch: x64
+            flags: --mac dmg zip --x64
+          - os: windows-latest
+            label: windows
+            arch: x64
+            flags: --win nsis portable zip --x64
+          - os: windows-latest
+            label: windows
+            arch: arm64
+            flags: --win nsis portable zip --arm64
+    runs-on: ${{ matrix.os }}
     env:
       CSC_IDENTITY_AUTO_DISCOVERY: 'false' # 未签名构建，绝不误选钥匙串身份
     steps:
@@ -52,6 +71,7 @@ jobs:
 
       - name: Resolve and verify version
         id: version
+        shell: bash
         run: |
           PKG="$(node -p "require('./package.json').version")"
           REF="${{ inputs.tag || github.ref_name }}"
@@ -75,20 +95,37 @@ jobs:
       - name: Smoke tests
         run: npm run smoke
 
-      - name: Package DMG + ZIP (${{ matrix.arch }})
-        # --publish never: electron-builder detects the v* tag and would try to
-        # upload to GitHub itself; publishing is done by the publish job via
-        # action-gh-release, and no GH_TOKEN is available here.
-        run: npm run dist:dmg -- ${{ matrix.flag }} --publish never
+      # --publish never: electron-builder detects the v* tag and would try to
+      # upload to GitHub itself; publishing is done by the publish job via
+      # action-gh-release, and no GH_TOKEN is available here.
+      # Call electron-builder directly with the matrix flags instead of an
+      # npm script: the scripts are per-platform (dist:dmg is --mac only) and
+      # would silently ignore a --win flag.
+      - name: Package installers (macOS)
+        if: matrix.label == 'macos'
+        run: npx electron-builder ${{ matrix.flags }} --publish never
+
+      # Windows MUST go through scripts/build-win.js, never electron-builder
+      # directly. The wrapper pins ELECTRON_BUILDER_7Z_FILTER=BCJ: without it
+      # the NSIS payload is packed with BCJ2, which the installer's own
+      # extractor cannot decode and therefore SILENTLY SKIPS every PE file —
+      # the app installs with no "DeepSeek Harness.exe" and no DLLs, while
+      # still exiting 0. Reproduced on Windows 11 ARM64 (68 files/71.3MB/no exe
+      # vs 75 files/287.7MB/6 dlls/exe). The wrapper also re-verifies the
+      # payload method after building and fails the job if BCJ2 comes back.
+      - name: Package installers (Windows, BCJ-pinned)
+        if: matrix.label == 'windows'
+        run: node scripts/build-win.js --${{ matrix.arch }} --publish never
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: dsh-desktop-macos-${{ matrix.arch }}
+          name: dsh-desktop-${{ matrix.label }}-${{ matrix.arch }}
           path: |
             dist/*.dmg
             dist/*.zip
-            dist/latest-mac.yml
+            dist/*.exe
+            dist/latest-*.yml
           if-no-files-found: error
 
   publish:
@@ -120,5 +157,9 @@ jobs:
           tag_name: ${{ steps.tag.outputs.ref }}
           draft: ${{ inputs.draft }}
           generate_release_notes: true
+          # fail_on_unmatched_files is the REAL input name (fail_on_unmatched_globs
+          # does not exist and Actions only warns about unknown inputs, so the
+          # gate silently never ran).
           fail_on_unmatched_files: true
           files: release-assets/*
+

@@ -464,8 +464,11 @@ body.shell-workspace {
   display: flex;
   align-items: center;
   gap: 14px;
-  /* Leave room for the native traffic lights rendered by titleBarStyle:
-     macOS toolbar controls sit around x=18–70 in a 46px hiddenInset bar. */
+  /* Leave room for the native window chrome rendered by titleBarStyle.
+     Default (macOS): the traffic lights sit around x=18–70 in a 46px
+     hiddenInset bar, so the frame starts at 84px. Windows puts its caption
+     buttons (minimise/restore/close) on the RIGHT — the
+     [data-platform="windows"] block below moves the inset there instead. */
   padding: 0 12px 0 84px;
   background: color-mix(in srgb, var(--ds-sidebar-bg) 86%, var(--ds-bg));
   border-bottom: var(--ds-border-width) solid var(--ds-border);
@@ -478,6 +481,35 @@ body.shell-workspace {
 
 .shell-frame button {
   -webkit-app-region: no-drag;
+}
+
+/* ── Windows chrome ─────────────────────────────────────────────────────────
+   titleBarStyle:'hidden' + titleBarOverlay keeps the native caption buttons
+   in the top-RIGHT corner. The frame therefore reserves that strip and drops
+   the macOS left inset, so the two never overlap. The reserved height matches
+   SHELL_FRAME_HEIGHT, which is also the overlay height handed to Electron —
+   the shell's 46px bar IS the titlebar on both platforms. */
+:root[data-platform="windows"] .shell-frame {
+  padding: 0 152px 0 12px;
+}
+
+/* Windows paints no traffic-light reservation, so the brand sits at the true
+   leading edge and the settings rail needs no top inset above it. */
+:root[data-platform="windows"] .shell-frame-brand {
+  margin-left: 2px;
+}
+
+/* The embedded panel has no native chrome above it, so the 46px traffic-light
+   reservation would leave a dead strip under the Windows shell frame. */
+:root[data-platform="windows"] body.embedded .settings-sidebar {
+  padding-top: 10px;
+}
+
+/* Embedded settings titlebar: same reasoning as .shell-frame — on Windows the
+   native caption buttons own the top-right, so the panel's own close button
+   must not sit underneath them. */
+:root[data-platform="windows"] body.embedded .settings-titlebar {
+  padding-right: 152px;
 }
 
 .shell-frame-brand {

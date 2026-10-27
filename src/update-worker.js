@@ -34,6 +34,7 @@ const fs = require('node:fs')
 const path = require('node:path')
 const { normalizeSettings } = require('./settings')
 const { resolveTools } = require('./tools')
+const { ensurePortableNode } = require('./node-bootstrap')
 const { installNpmArtifact } = require('./artifact')
 const { NPM_PACKAGE } = require('./runtime-layout')
 
@@ -101,9 +102,28 @@ async function main() {
     if (shouldAbort()) throw cancelError()
     status({ phase: 'starting', version })
     log(`更新任务开始：${NPM_PACKAGE}@${version}`)
-    const tools = resolveTools(settings)
+    // A CLEAN machine has no node at all (no system Node, no checkout tooling),
+    // and installing the official artifact needs one. The shell's connect chain
+    // hands off to this worker BEFORE it would ever bootstrap a toolchain, so
+    // failing here used to dead-end the very first connect: the worker wrote
+    // phase 'error', the shell had already stopped watching the log, and the
+    // user saw an endless "正在连接". Bootstrap in-place instead — the download
+    // itself needs no node.
+    let tools = resolveTools(settings)
     if (tools.node === '') {
-      throw new Error('未找到兼容的 node（需 22.19+ 或 24+），官方产物无法安装。')
+      log('未找到兼容的 node，尝试自动下载便携版 node…')
+      status({ phase: 'toolchain', version })
+      const toolRoot = path.join(settings.local.repoDir, '.dsh-tools')
+      const bootstrapped = await ensurePortableNode({
+        toolRoot,
+        isRunnable: () => resolveTools(settings).node !== '',
+        onLine: line => log(line),
+        env: tools.env,
+      })
+      if (!bootstrapped.ok) throw new Error(bootstrapped.error || '便携版 node 引导失败。')
+      tools = resolveTools(settings)
+      if (tools.node === '') throw new Error('便携版 node 已就位但仍无法运行。')
+      log(`便携版 node 已就位：${tools.node}`)
     }
     if (shouldAbort()) throw cancelError()
     status({ phase: 'downloading', version })

@@ -1,19 +1,32 @@
 'use strict'
 
 /**
- * The macOS application menu.
+ * The application menu template.
  *
  * Layout is deliberately app-first and terminal-aware:
  *
- *   DSH-[终端]             standard application menu (about/settings/windows/quit)
+ *   DSH-[终端]             application menu (about/settings/windows/quit)
  *   编辑                    standard text roles (the web app needs paste etc.)
  *   连接 · [终端]           active device + live status + reconnect
  *   更新 · [终端]           upgrade surface for the active device only
- *   窗口                    standard macOS window list
+ *   窗口                    standard window list
  *   帮助                    project links + developer tools
  *
  * The active device prefix on the application/连接/更新 menus keeps two
- * windows on different terminals distinguishable from the menu bar.
+ * windows on different terminals distinguishable.
+ *
+ * How each platform consumes it:
+ *
+ *  - macOS: installed as the application menu, i.e. the menu bar. That is the
+ *    only place a macOS app can put commands.
+ *  - Windows/Linux: installed as the WINDOW menu but kept hidden
+ *    (`setAutoHideMenuBar(true)` + `setMenuBarVisibility(false)` in
+ *    createBrowserWindow) so the frameless 46px shell frame owns the top edge
+ *    while the accelerators (Ctrl+N, Ctrl+,, Ctrl+U) stay live. The same
+ *    actions are also on the tray.
+ *
+ * Accelerators use `CmdOrCtrl`, which Electron maps to ⌘ on macOS and Ctrl
+ * elsewhere — never hardcode one or the other.
  */
 
 const { Menu } = require('electron')

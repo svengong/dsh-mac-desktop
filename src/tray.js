@@ -1,15 +1,27 @@
 'use strict'
 
 /**
- * The menu-bar tray: a status anchor that works without the main window.
- * The icon is a template image (black + alpha), so macOS adapts it to the
- * light/dark menu bar automatically. Tooltip and context menu carry the
- * same `DSH-[终端]` prefix as the window title and application menu.
+ * The status-area icon: a status anchor that works without the main window.
+ *
+ * Platform differences:
+ *
+ *  - macOS renders a TEMPLATE image (black + alpha) and tints it for the menu
+ *    bar, so the black glyph is correct there in both appearances.
+ *  - Windows/Linux draw the icon as-is in the notification area. A black
+ *    template glyph on a dark taskbar is invisible, so those platforms use the
+ *    coloured app icon (`build/icon.png`) resized to 16px, which carries its
+ *    own contrast against either taskbar colour.
+ *
+ * Tooltip and context menu carry the same `DSH-[终端]` prefix as the window
+ * title and application menu.
  */
 
 const path = require('node:path')
 const { Tray, Menu, nativeImage } = require('electron')
 const { terminalLabel } = require('./labels')
+const { IS_MAC } = require('./platform')
+
+const BUILD_DIR = path.join(__dirname, '..', 'build')
 
 /** Suffix naming the dist-tag a version came from, empty for stable/latest. */
 function channelSuffix(channel) {
@@ -17,11 +29,28 @@ function channelSuffix(channel) {
   return value === '' || value === 'latest' ? '' : `（${value}）`
 }
 
+/**
+ * The status-area image for this platform.
+ *
+ * macOS keeps the template pair (`trayTemplate.png` + `@2x`), which Electron
+ * picks up automatically and tints for the menu bar. Elsewhere the coloured
+ * `icon.png` is downscaled to the 16px logical size Windows' notification
+ * area wants; Electron scales it again for the display's DPI factor, so no
+ * extra asset per scale is needed.
+ * @returns {import('electron').NativeImage}
+ */
+function trayImage() {
+  if (IS_MAC) {
+    const image = nativeImage.createFromPath(path.join(BUILD_DIR, 'trayTemplate.png'))
+    image.setTemplateImage(true)
+    return image
+  }
+  const image = nativeImage.createFromPath(path.join(BUILD_DIR, 'icon.png'))
+  return image.isEmpty() ? image : image.resize({ width: 16, height: 16 })
+}
+
 function createTray({ actions, getStatus, getSettings, getUpdateSummary, isBusy, isUpdating }) {
-  const iconPath = path.join(__dirname, '..', 'build', 'trayTemplate.png')
-  const image = nativeImage.createFromPath(iconPath)
-  image.setTemplateImage(true)
-  const tray = new Tray(image)
+  const tray = new Tray(trayImage())
 
   const update = (status, settings = null) => {
     const terminal = settings !== null && settings.detached === true ? '待连接' : terminalLabel(settings)
@@ -56,4 +85,4 @@ function createTray({ actions, getStatus, getSettings, getUpdateSummary, isBusy,
   return { tray, update }
 }
 
-module.exports = { createTray }
+module.exports = { createTray, trayImage }

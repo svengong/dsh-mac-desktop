@@ -9,7 +9,11 @@
  * tree (the pnpm/node child included) with one group kill.
  */
 
+const path = require('node:path')
 const { spawn } = require('node:child_process')
+const {
+  IS_WINDOWS, killTree, spawnInvocation, spawnOptions,
+} = require('./platform')
 
 const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000
 
@@ -49,9 +53,21 @@ function linePump(onLine) {
  * @returns {object} {code, signal, timedOut, aborted, lines} - resolves for any
  * exit; rejects only when the binary cannot be spawned.
  *
- * The child runs in its own process group (`detached: true`) so the timeout
- * can SIGKILL the whole tree (pnpm/npm installs spawn grandchildren) instead
- * of leaving orphans behind. `shouldAbort` is a cooperative cancellation
+ * The child runs in its own process group (`detached: true`) on POSIX so the
+ * timeout can SIGKILL the whole tree (pnpm/npm installs spawn grandchildren)
+ * instead of leaving orphans behind.
+ *
+ * Windows does NOT get `detached` here, even though `taskkill /T` would still
+ * reach the tree: a detached child loses its inherited stdout when the parent
+ * is itself a console-less process (an app launched from Explorer, or any
+ * child of one). Reproduced on Windows 11 ARM64 — the same PowerShell command
+ * returned `MARKER` with `detached: false` and `""` with `detached: true`,
+ * exit code 0 either way, so the failure is SILENT: every CIM/PowerShell query
+ * (`Get-CimInstance Win32_Process` for process discovery, the WebContents
+ * probe, the toolchain lookup) came back empty and the shell concluded there
+ * were no processes at all. `windowsHide` alone is what a background helper
+ * needs; `netstat`, `where` and `taskkill` are console programs whose output
+ * is unaffected either way, but PowerShell is the one that matters here. `shouldAbort` is a cooperative cancellation
  * poll (default 200ms): when it flips true the whole group is SIGTERM'd and
  * the result resolves with `aborted: true` — callers that care about
  * cancellation (the update pipeline, the detached worker) can then clean up
@@ -62,14 +78,24 @@ function linePump(onLine) {
  */
 function runCommand({ cmd, args = [], cwd, env, timeoutMs = DEFAULT_TIMEOUT_MS, onLine, owner = null, shouldAbort = null }) {
   const ABORT_POLL_MS = 200
+  // `detached` on Windows is what steals a console-less parent's ability to
+  // read the child's stdout (see the doc block above). Every Windows helper the
+  // shell runs is short-lived and is killed by `taskkill /T`, which does not
+  // need a new process group, so the flag buys nothing there and costs output.
+  const detached = !IS_WINDOWS
   return new Promise((resolve, reject) => {
     let child
     try {
-      child = spawn(cmd, args, {
+      // On Windows npm/pnpm are .cmd shims that node cannot exec directly;
+      // spawnInvocation reroutes them through cmd.exe with a correctly quoted
+      // command line (and is a no-op everywhere else).
+      const invocation = spawnInvocation(cmd, args)
+      child = spawn(invocation.cmd, invocation.args, {
         cwd,
         env: env === undefined ? process.env : env,
         stdio: ['ignore', 'pipe', 'pipe'],
-        detached: true,
+        ...spawnOptions({ detached }),
+        ...invocation.options,
       })
     } catch (error) {
       reject(new Error(`无法启动 ${cmd}: ${error.message}`))
@@ -86,10 +112,10 @@ function runCommand({ cmd, args = [], cwd, env, timeoutMs = DEFAULT_TIMEOUT_MS, 
     })
     child.stdout.on('data', pump)
     child.stderr.on('data', pump)
+    // POSIX kills the process GROUP (grandchildren of an npm/pnpm install);
+    // Windows walks the child tree with taskkill. One helper, both OSes.
     const killGroup = signal => {
-      try {
-        process.kill(-child.pid, signal)
-      } catch {
+      if (!killTree(child.pid, signal)) {
         try {
           child.kill(signal)
         } catch {
@@ -148,43 +174,43 @@ function spawnService({ cmd, args, cwd, env, onLine, watchParent = false }) {
   let child
   if (watchParent) {
     // 父进程监护（防孤儿实例）：detached 子进程在壳（父进程）死亡后不会
-    // 自动退出，会变成孤儿实例。macOS 无 PDEATHSIG，故用 shell wrapper
-    // 记住父 pid 并循环探测——父进程消失则 kill 服务进程；服务进程自行
-    // 退出则 shell 透传其退出码退出，保证 close 事件照常触发。
-    // The wrapper and the service are TWO processes: `"$@" &` backgrounds the
-    // real service, so child.pid (the wrapper) is NOT the service pid. The
-    // guard echoes SERVICE_PID_PREFIX with the real one — the local dsh web
-    // state file must record THAT pid, or a keepPid sweep "protecting" the
-    // wrapper kills the service it meant to protect.
-    const guard = [
-      'ppid=$PPID',
-      '"$@" & child=$!',
-      `echo "${SERVICE_PID_PREFIX}$child"`,
-      // A dead child that has not been reaped is a ZOMBIE: `kill -0` keeps
-      // succeeding against its pid, so a `while kill -0 "$child"` loop spins
-      // forever and the wrapper never reaches its `wait` (the only thing
-      // that reaps the zombie and lets the wrapper exit). Poll the process
-      // STATE instead: gone or zombie both end the loop, then `wait` reaps.
-      'while :; do',
-      '  if ! kill -0 "$ppid" 2>/dev/null; then kill "$child" 2>/dev/null; break; fi',
-      '  state=$(ps -o stat= -p "$child" 2>/dev/null | tr -d " ")',
-      '  case "$state" in ""|Z*) break ;; esac',
-      '  sleep 1',
-      'done',
-      'wait "$child" 2>/dev/null',
-    ].join('\n')
-    child = spawn('sh', ['-c', guard, 'sh', cmd, ...args], {
+    // 自动退出，会变成孤儿实例。macOS 无 PDEATHSIG，Windows 更没有任何等价
+    // 物，因此统一用一个 node 监护进程（service-guard.js）记住父 pid 并循环
+    // 探测——父进程消失则杀掉服务整棵树；服务自行退出则透传其退出码退出，
+    // 保证 close 事件照常触发。
+    //
+    // The guard and the service are TWO processes, so child.pid (the guard)
+    // is NOT the service pid. The guard echoes SERVICE_PID_PREFIX with the
+    // real one — the local dsh web state file must record THAT pid, or a
+    // keepPid sweep "protecting" the guard kills the service meant to be kept.
+    //
+    // node, not sh: the old wrapper was a POSIX shell script that relied on
+    // "$@" backgrounding and `ps -o stat=`, and Windows has neither. node is
+    // the one runtime the shell is guaranteed to have, so one guard covers
+    // both platforms instead of three shell dialects.
+    child = spawn(process.execPath, [
+      path.join(__dirname, 'service-guard.js'),
+      String(process.pid),
+      cmd,
+      ...args,
+    ], {
       cwd,
-      env: env === undefined ? process.env : env,
+      // ELECTRON_RUN_AS_NODE: `process.execPath` is the ELECTRON binary, which
+      // would otherwise treat the guard script as an app entry and boot a whole
+      // (invisible) Electron main process for every service. As plain node the
+      // guard costs a few MB instead of ~100MB.
+      env: { ...(env === undefined ? process.env : env), ELECTRON_RUN_AS_NODE: '1' },
       stdio: ['ignore', 'pipe', 'pipe'],
-      detached: true,
+      ...spawnOptions(),
     })
   } else {
-    child = spawn(cmd, args, {
+    const invocation = spawnInvocation(cmd, args)
+    child = spawn(invocation.cmd, invocation.args, {
       cwd,
       env: env === undefined ? process.env : env,
       stdio: ['ignore', 'pipe', 'pipe'],
-      detached: true,
+      ...spawnOptions(),
+      ...invocation.options,
     })
   }
   // Also register services so app quit kills them even when a session
@@ -194,17 +220,21 @@ function spawnService({ cmd, args, cwd, env, onLine, watchParent = false }) {
   child.stdout.on('data', pump)
   child.stderr.on('data', pump)
   child.on('error', error => {
-    if (onLine) onLine(`[spawn] ${error.message}`)
+    if (onLine) onLine('[spawn] ' + error.message)
   })
   let stopped = false
   const stop = () => {
     if (stopped) return
     stopped = true
     if (child.exitCode !== null || child.signalCode !== null) return
-    try {
-      process.kill(-child.pid, 'SIGTERM')
-    } catch {
-      child.kill('SIGTERM')
+    // Group kill on POSIX, tree kill on Windows. The guard forwards the stop
+    // to the service either way.
+    if (!killTree(child.pid, 'SIGTERM')) {
+      try {
+        child.kill('SIGTERM')
+      } catch {
+        // Already gone.
+      }
     }
   }
   return { child, stop }
@@ -216,11 +246,14 @@ function spawnService({ cmd, args, cwd, env, onLine, watchParent = false }) {
  * kill it. Returns the unref'd child.
  */
 function spawnDetached({ cmd, args = [], cwd, env }) {
-  const child = spawn(cmd, args, {
+  const invocation = spawnInvocation(cmd, args)
+  const child = spawn(invocation.cmd, invocation.args, {
     cwd,
     env: env === undefined ? process.env : env,
     stdio: 'ignore',
     detached: true,
+    windowsHide: true,
+    ...invocation.options,
   })
   child.unref()
   return child
@@ -267,9 +300,7 @@ function cancelOwnedChildren(owner, signal = 'SIGTERM') {
   for (const child of [...owned]) {
     if (child.exitCode !== null || child.signalCode !== null) continue
     killed += 1
-    try {
-      process.kill(-child.pid, signal)
-    } catch {
+    if (!killTree(child.pid, signal)) {
       try {
         child.kill(signal)
       } catch {
@@ -283,9 +314,7 @@ function cancelOwnedChildren(owner, signal = 'SIGTERM') {
 function killActiveChildren() {
   for (const child of activeChildren) {
     if (child.exitCode !== null || child.signalCode !== null) continue
-    try {
-      process.kill(-child.pid, 'SIGTERM')
-    } catch {
+    if (!killTree(child.pid, 'SIGTERM')) {
       try {
         child.kill('SIGTERM')
       } catch {

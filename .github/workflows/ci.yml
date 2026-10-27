@@ -1,6 +1,8 @@
 name: CI
 
 # 日常检查：PR 与 main 分支推送时跑冒烟测试 + 打包预检，防止合并前破坏打包链路。
+# macOS 与 Windows 各跑一遍：两条打包链路完全不同（dmg/zip vs nsis/portable），
+# 只在一条上验证会让另一条静默腐化。
 on:
   push:
     branches: [main]
@@ -15,8 +17,12 @@ concurrency:
 
 jobs:
   smoke:
-    name: Smoke tests
-    runs-on: macos-14
+    name: Smoke tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -39,8 +45,25 @@ jobs:
         run: npm run smoke
 
   package:
-    name: Package check (arm64)
-    runs-on: macos-14
+    name: Package check (${{ matrix.label }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Cross-build both macOS architectures from one arm64 runner
+          # (macos-13/x64 is retired — do not use it).
+          - os: macos-14
+            label: macos
+            arch: arm64
+            bundle: dist/mac-arm64/DeepSeek Harness.app
+          # Windows ships x64 AND arm64; the NSIS/portable targets are
+          # architecture-agnostic, so one job with an explicit --x64 --arm64
+          # pair proves both.
+          - os: windows-latest
+            label: windows
+            arch: arm64
+            bundle: dist/win-arm64-unpacked/DeepSeek Harness.exe
+    runs-on: ${{ matrix.os }}
     env:
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
     steps:
@@ -56,13 +79,25 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Build app bundle (dir)
-        # --publish never: a v* tag on HEAD makes electron-builder try to
-        # upload to GitHub; CI has no GH_TOKEN and only checks the build.
-        run: npm run dist -- --arm64 --publish never
+      # --publish never: a v* tag on HEAD makes electron-builder try to
+      # upload to GitHub; CI has no GH_TOKEN and only checks the build.
+      - name: Build app bundle (macOS)
+        if: matrix.label == 'macos'
+        run: npm run dist -- --mac dir --publish never
 
-      - name: Assert versioned artifact naming
+      # Windows goes through scripts/build-win.js, which pins
+      # ELECTRON_BUILDER_7Z_FILTER=BCJ. Calling electron-builder directly packs
+      # the NSIS payload with BCJ2, and the installer's extractor then SILENTLY
+      # SKIPS every PE file — the app installs with no main .exe and no DLLs
+      # but still exits 0. This job is the guard that would have caught it.
+      - name: Build app bundle (Windows, BCJ-pinned)
+        if: matrix.label == 'windows'
+        run: node scripts/build-win.js --${{ matrix.arch }} --publish never
+
+      - name: Assert artifact naming and bundle
+        shell: bash
         run: |
           VERSION="$(node -p "require('./package.json').version")"
-          ls "dist/mac-arm64/DeepSeek Harness.app" >/dev/null
-          echo "bundle ok for v${VERSION}"
+          test -e "${{ matrix.bundle }}"
+          echo "bundle ok for v${VERSION} (${{ matrix.label }})"
+          ls -1 dist | sed 's/^/  /'
