@@ -40,6 +40,7 @@ const runtimeStore = require('./runtime-store')
 const { Updater } = require('./update')
 const { UpdateManager } = require('./update-manager')
 const { SetupDialog, registerDialogIpc } = require('./dialogs')
+const { pickDirectory } = require('./picker')
 const { buildMenu } = require('./menu')
 const { createTray } = require('./tray')
 const { presentWindow, focusViewInKeyWindow } = require('./windows')
@@ -69,6 +70,13 @@ const DOCK_ICON_PRESSED = path.join(BUILD_DIR, 'iconPressed.png')
 const DOCK_PRESS_MS = 150
 const SHELL_HTML = path.join(__dirname, 'ui', 'shell.html')
 const SHELL_PRELOAD = path.join(__dirname, 'shell-preload.js')
+/**
+ * Preload of the harness view. It exposes exactly one thing — the
+ * `__DSH_DIRECTORY_PICKER__` bridge — because the harness's native
+ * directory-picker client row uses that global when present and otherwise
+ * opens a Host-side panel that is not the frontmost app (first click eaten).
+ */
+const HARNESS_PRELOAD = path.join(__dirname, 'harness-preload.js')
 const SHELL_FRAME_HEIGHT = 46
 
 /**
@@ -1475,20 +1483,38 @@ function activeWorkspace() {
   return workspaces.values().next().value ?? null
 }
 
-/** Resolve the workspace that owns an IPC sender (frame, settings, or progress). */
-function workspaceForEvent(event) {
-  const win = BrowserWindow.fromWebContents(event.sender)
-  if (win !== null && !win.isDestroyed()) {
+/**
+ * Resolve the workspace that OWNS an IPC sender, with no fallback.
+ *
+ * A `WebContentsView`'s sender may or may not resolve through
+ * `BrowserWindow.fromWebContents` (it returns `null` for a view's contents on
+ * some Electron builds), so the two embedded views are matched on their own
+ * webContents as well. Returns null when nothing matches, which lets the caller
+ * decide how to degrade.
+ * @param {import('electron').WebContents} sender
+ * @returns {object|null} the owning workspace, or null.
+ */
+function workspaceOwning(sender) {
+  if (sender === null || sender === undefined) return null
+  const win = BrowserWindow.fromWebContents(sender)
+  if (win !== null && win !== undefined && !win.isDestroyed()) {
     for (const workspace of workspaces.values()) {
       if (workspace.window === win) return workspace
     }
   }
-  // WebContentsView senders can resolve to the owner window as well; keep an
-  // explicit fallback so embedded-settings IPC never falls through to focus.
   for (const workspace of workspaces.values()) {
-    if (workspace.setupDialog.webContents === event.sender) return workspace
+    if (workspace.setupDialog.webContents === sender) return workspace
+    if (workspace.harnessView !== null
+      && workspace.harnessView !== undefined
+      && !workspace.harnessView.webContents.isDestroyed()
+      && workspace.harnessView.webContents === sender) return workspace
   }
-  return activeWorkspace()
+  return null
+}
+
+/** Resolve the workspace that owns an IPC sender (frame, settings, or harness view). */
+function workspaceForEvent(event) {
+  return workspaceOwning(event.sender) ?? activeWorkspace()
 }
 
 /** Return `workspace`, or the focused workspace, or a fresh local window. */
@@ -1810,6 +1836,12 @@ function createWorkspace(deviceKey = null, options = {}) {
   const win = createBrowserWindow(bounds)
   const harnessView = new WebContentsView({
     webPreferences: {
+      // The only desktop bridge the web app may see: the directory-picker
+      // seam. The harness prefers THIS over its Host-side osascript chooser
+      // whenever `__DSH_DIRECTORY_PICKER__` exists; without it the panel is
+      // owned by a non-frontmost helper app and the first click is swallowed
+      // by activation. See harness-preload.js / picker.js.
+      preload: HARNESS_PRELOAD,
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
@@ -2826,6 +2858,14 @@ const actions = {
 
 function registerIpc() {
   registerDialogIpc({
+    // Parent window of the settings panel that asked. Resolved from the
+    // workspace table (never from focus): the panel is a WebContentsView, whose
+    // contents are not guaranteed to resolve to their host window.
+    ownerWindow(event) {
+      const workspace = workspaceOwning(event.sender)
+      return workspace === null ? null : workspace.window
+    },
+
     getState(event) {
       const workspace = workspaceForEvent(event) ?? withWorkspace(null)
       const detached = workspace.session === null
@@ -3040,6 +3080,29 @@ function registerIpc() {
     const workspace = workspaceForEvent(event) ?? withWorkspace(null)
     setWorkspaceView(workspace, view)
     return { ok: true }
+  })
+
+  // The harness view's ONLY desktop bridge (harness-preload.js): the
+  // directory-picker seam. Answering it here — instead of letting the Host's
+  // osascript chooser open — is what makes the panel a KEY SHEET on the DSH
+  // app, so the first click selects a folder instead of only activating DSH.
+  // See picker.js for the measured failure.
+  ipcMain.handle('picker:directory', async event => {
+    // Parent the panel to the window that asked. Resolution is explicit
+    // (never focus-based): a wrong owner would either sheet the dialog onto a
+    // window the user is not looking at, or fall back to app-modal, which is
+    // the non-key state that swallows the first click.
+    const workspace = workspaceOwning(event.sender)
+    const owner = workspace === null ? null : workspace.window
+    try {
+      return await pickDirectory(owner, dialog)
+    } finally {
+      // A closed sheet hands key status back to the WINDOW, not to the view
+      // inside it, so typing/keys in the harness would need an extra click.
+      // Re-hand the keyboard to the view that asked — through the guard, so a
+      // window that is no longer key is never activated.
+      focusViewInKeyWindow(owner, event.sender)
+    }
   })
 
   // Replay the session log history into a freshly shown loading panel: the

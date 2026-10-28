@@ -113,10 +113,15 @@ src/
 ├── labels.js         全局一致的 DSH-[终端] 标签
 ├── external-open.js  harness 导航 URL 分类（主框架根路径 / 子框架跨源）
 ├── menu.js / tray.js / windows.js  菜单、托盘、窗口呈现（按平台挂载，见 §7.1）
+├── picker.js         统一目录选择器（窗口 sheet 父窗口解析 / 取消语义归一）
 └── ui/
     ├── shell.html / shell.css / shell-preload.js   主窗口 46px 壳边框
     └── settings.html / dialog-preload.js           设置面板（定位菜单 + 居中内容）
 ```
+
+harness 视图的 preload 是 `src/harness-preload.js`（不在 `ui/` 下）：它只暴露一个
+`__DSH_DIRECTORY_PICKER__` 桥，供 harness 的 native directory-picker 行使用，
+避免回退到 Host 侧非前台的 `osascript` 面板（见 `docs/architecture.md` §3.3）。
 
 数据流：
 

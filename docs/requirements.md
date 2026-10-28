@@ -2,7 +2,7 @@
 
 > 状态：已实现（macOS / Windows / Linux 三平台；macOS、Windows 由发布流水线产出双架构产物，Linux 在同一份源码的 Linux 主机上构建）
 > 版本：跟随 `package.json#version`
-> 更新日期：2026-10-27
+> 更新日期：2026-10-28
 
 ## 1. 产品目标
 
@@ -83,6 +83,7 @@ VS Code Remote——用户可以选择本机或 SSH 远程主机运行 Harness�
 | FR-1.9 | 窗口 bounds、active view、最近活跃 workspace/设备要持久化到 `window-state.json`，启动时恢复上次设备与 bounds。 |
 | FR-1.10 | Harness 页仅在终端连接 ready 且页面加载完成时显示 WebView；待连接/连接中/重启中/任务中/错误均由壳加载面板接管，不出现白屏。 |
 | FR-1.11 | 每个终端的已绑定窗口全局唯一；保存/连接到已打开终端时，仅聚焦已有窗口，当前窗口保持原状态；其他情况均在当前窗口操作，不跳转。 |
+| FR-1.12 | 目录选择框必须是 DSH 应用自己的窗口 sheet：harness 页与设置面板的「选择…」都走壳的统一选择器（`picker.js`），父窗口为发起请求的那个 workspace 窗口。弹出后第一下点击即可选中目录，无需先点一下 DSH 窗口来激活应用。 |
 
 ### FR-2 连接与端口
 

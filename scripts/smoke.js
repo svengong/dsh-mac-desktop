@@ -573,6 +573,82 @@ async function main() {
   )
   assert.deepStrictEqual(focusCalls, [], 'destroyed surfaces are never focused')
 
+  // The directory chooser must be a WINDOW SHEET, every time.
+  //
+  // Reported symptom on macOS 26.6: opening a workspace popped the Finder-style
+  // folder panel, but the panel refused the first click — the user had to click
+  // the DSH window before the dialog could be operated. Cause: the harness's
+  // native picker row had no desktop bridge, so the `dsh web` Host process ran
+  // its own osascript NSOpenPanel from a throwaway Accessory app that is not
+  // frontmost, leaving that panel non-key. The shell now answers the bridge
+  // itself with showOpenDialog(parented to the asking window). These assertions
+  // pin the parts that are invisible at the call site.
+  {
+    const { pickedPath, pickDirectory, DIRECTORY_PROPERTIES } = require('../src/picker')
+    const owner = { isDestroyed: () => false }
+    const shown = []
+    const fakeDialog = {
+      showOpenDialog: async (...args) => {
+        shown.push(args)
+        return { canceled: false, filePaths: ['/Users/x/workspace'] }
+      },
+    }
+    assert.deepStrictEqual(
+      await pickDirectory(owner, fakeDialog),
+      '/Users/x/workspace',
+      'a picked directory resolves to its absolute path',
+    )
+    assert.strictEqual(shown[0].length, 2, 'the owner window must be passed: that is what makes it a key sheet')
+    assert.strictEqual(shown[0][0], owner, 'the sheet parent is the window the user clicked in')
+    assert.deepStrictEqual(shown[0][1].properties, [...DIRECTORY_PROPERTIES])
+    assert.ok(DIRECTORY_PROPERTIES.includes('openDirectory'), 'directories, not files')
+    assert.ok(DIRECTORY_PROPERTIES.includes('createDirectory'), 'a new workspace folder is not an error path')
+
+    // Cancel must stay cancel even though a cancelled macOS panel still reports
+    // the highlighted directory in filePaths.
+    assert.strictEqual(pickedPath({ canceled: true, filePaths: ['/Users/x/highlighted'] }), null,
+      'a cancelled panel must never yield its highlighted path')
+    assert.strictEqual(pickedPath({ canceled: false, filePaths: [] }), null)
+    assert.strictEqual(pickedPath({ canceled: false }), null)
+    assert.strictEqual(pickedPath(null), null)
+    assert.strictEqual(pickedPath(undefined), null)
+    assert.strictEqual(pickedPath({ canceled: false, filePaths: [''] }), null)
+
+    // A destroyed window (closed mid-pick) still gets a chooser, app-modal.
+    const orphanShown = []
+    const orphanDialog = { showOpenDialog: async (...args) => {
+      orphanShown.push(args)
+      return { canceled: true, filePaths: [] }
+    } }
+    assert.strictEqual(await pickDirectory({ isDestroyed: () => true }, orphanDialog), null)
+    assert.strictEqual(orphanShown[0].length, 1, 'no dead parent: fall back to an app-modal chooser, never no dialog')
+    assert.strictEqual(await pickDirectory(null, orphanDialog), null)
+
+    // The harness view must actually carry the bridge preload, and the preload
+    // must define the exact global the harness client row probes for. A silent
+    // regression here restores the swallowed-first-click bug with no error.
+    //
+    // The block is delimited by the NEXT top-level statement, not by a fixed
+    // character count: Windows checkouts may carry CRLF, and a byte budget
+    // would then slice mid-expression and fail for a reason unrelated to the
+    // bug (this test runs on windows-latest in CI).
+    const mainSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'main.js'), 'utf8')
+    const harnessViewAt = mainSource.indexOf('const harnessView = new WebContentsView(')
+    assert.ok(harnessViewAt !== -1, 'the harness view construction must exist')
+    const blockEnd = mainSource.indexOf('win.contentView.addChildView(harnessView)', harnessViewAt)
+    assert.ok(blockEnd > harnessViewAt, 'the harness view block must end at its addChildView call')
+    const harnessViewBlock = mainSource.slice(harnessViewAt, blockEnd)
+    assert.ok(harnessViewBlock.includes('preload: HARNESS_PRELOAD'),
+      'the harness view must load the desktop bridge preload')
+    const preloadSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'harness-preload.js'), 'utf8')
+    assert.ok(preloadSource.includes("exposeInMainWorld('__DSH_DIRECTORY_PICKER__'"),
+      "the bridge must expose the harness's own global name")
+    assert.ok(preloadSource.includes("ipcRenderer.invoke('picker:directory')"),
+      'the bridge must reach the shell handler that opens the parented sheet')
+    assert.ok(mainSource.includes("ipcMain.handle('picker:directory'"),
+      'the bridge channel must have a main-process handler')
+  }
+
   // harness navigation classification: the shell renders only the ROOT of the
   // loopback harness service; public web pages (search citations, web-search
   // results, window.open targets) are external and belong in the OS default

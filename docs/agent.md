@@ -40,6 +40,7 @@ npm 产物渠道（`@deepseek-ai/dsh`）与 `dsh plugin` 命令。
 | Windows 窗口外壳 | `src/main.js#createBrowserWindow`、`src/ui/shell.css` | macOS 用 `hiddenInset`+`trafficLightPosition`（左侧留 84px）；Windows 用 `hidden`+`titleBarOverlay`（右侧留 152px，overlay 高度 = 46px）。平台信息经 query param 传给 shell.html / settings.html，落到 `:root[data-platform]` |
 | 菜单/托盘按平台 | `src/menu.js`、`src/tray.js`、`src/main.js#refreshMenu` | macOS 装应用菜单 + Dock 菜单；Windows/Linux 装窗口菜单但 `setMenuBarVisibility(false)`（保留 `CmdOrCtrl` 加速键），操作入口靠托盘。托盘图标 macOS 用模板图、其它平台用彩色图标缩到 16px |
 | Linux 支持 | `src/platform.js`、`src/ui/shell.css`、`package.json#build`、`.github/workflows/*.yml` | 与 macOS 共用 POSIX 实现；AppImage/deb 双架构进 CI 与 release；窗口留白已覆盖 `data-platform="linux"`；架构名按格式不同（见不变量 35） |
+| 目录选择器 | `src/picker.js`、`src/harness-preload.js`、`src/main.js#picker:directory`、`src/dialogs.js` | harness 页与设置面板都走同一个窗口 sheet 选择器；父窗口按 webContents 显式解析，不按焦点 |
 
 ## 3. 必须遵守的不变量
 
@@ -150,6 +151,15 @@ npm 产物渠道（`@deepseek-ai/dsh`）与 `dsh plugin` 命令。
 37. **deb 目标无 `homepage` / `author` 会直接构建失败。** `computeFpmMetaInfoOptions()`
     在两者缺失时抛错（`Please specify project homepage` / `author 'email'`）。这两个
     字段在 `package.json` 顶层，删掉之前先确认没有 Linux 打包任务。
+38. **目录选择框必须是「发起窗口的 sheet」，父窗口按 sender 显式解析。**
+    harness 自带的 native picker 行只要发现 `globalThis.__DSH_DIRECTORY_PICKER__` 存在就走桌面桥，
+    否则回退 Host 的 `osascript` 面板——那是个非前台 Accessory 应用开的 `NSOpenPanel`，
+    面板不是 key window，第一下点击只用来激活 DSH。所以：harness view 必须挂
+    `harness-preload.js`，`picker:directory` 必须 `dialog.showOpenDialog(owner, …)` 传父窗口。
+    **别用 `BrowserWindow.fromWebContents(event.sender)` 当唯一来源**：对 `WebContentsView`
+    的 sender 它不保证返回宿主窗口，退回 app-modal 就复现原症状。用
+    `workspaceOwning(sender)`（workspace 表里按 webContents 匹配）。设置面板同理走
+    `handlers.ownerWindow`。
 ## 4. 验收命令
 
 ```sh
@@ -306,6 +316,12 @@ for f in /tmp/settings.html.js /tmp/shell.html.js; do node --check "$f"; done
 35. **`getBounds()` 在 Windows 上可能返回负的 y**（窗口最大化/多显示器）。
     `window-manager.normalizeBounds` 只校验尺寸下限，不夹取坐标——改这块前先想清楚
     多显示器下「恢复到哪里」的语义。
+36. **弹出选择框后第一下点击被吃掉，是「面板不是 key window」而不是壳的点透问题。**
+    症状：打开工作区弹出文件框，但无法直接选中，得先点一下 DSH 窗口。别去改
+    `acceptFirstMouse` 或视图层级——那是壳自身的点击路径，与系统面板无关。真因是面板由
+    Host 的 `osascript` 在非前台进程里打开（见不变量 38）。自查两件事：harness view 是否挂了
+    `harness-preload.js`，以及 `dialog.showOpenDialog` 第一个参数是不是发起请求的窗口。
+
 ## 7. 文档同步要求
 
 完成新功能后，更新三份文档：

@@ -58,6 +58,8 @@ desktop-shell/
 │   ├── labels.js          shared DSH-[终端] labels for titles/menus/tray
 │   ├── shell-preload.js   preload for the local workspace frame
 │   ├── dialog-preload.js  preload for the embedded settings panel
+│   ├── harness-preload.js preload for the harness view: the only desktop bridge (`__DSH_DIRECTORY_PICKER__`)
+│   ├── picker.js          统一目录选择器：窗口 sheet 父窗口解析 + 取消语义归一
 │   ├── external-open.js   URL classification for harness navigation (main/sub frame)
 │   ├── menu.js            application menu
 │   ├── tray.js            menu-bar tray (status + terminal actions)
@@ -126,6 +128,27 @@ BrowserWindow (shell.html 边框)
 - 分区定位：滚动动画结束前锁住 scroll-spy（`scrollend` + 定时兜底），否则长距离跳转途中高亮会从目标分区跳到下一分区。滚到底时高亮取「顶部探针线之上最后一个分区」，而不是无条件取最后一节——页面滚到底不等于已看到最后一节。
 - 入口焦点：只有「连接」语义的入口（终端启动器／⌘,／终端徽标／失败页「连接设置」）锚定「连接」；顶栏「设置」等普通入口锚点为 `null`，停在顶部。初始焦点在 boot 状态与 `updates.getState()` 两次渲染都完成后施加。
 - 定位目标夹取到最大可滚动位置（底部不留垫层，滚到底就是日志本身）。
+
+### 3.3 目录选择器（`picker.js` + `harness-preload.js`）
+
+harness 页与设置面板都会请求「选一个工作区目录」。两者必须走**同一个**壳内选择器，原因是一个已复现的
+macOS 缺陷：
+
+- harness 自带的 `dsh-client-ui-directory-picker-native` 行会先探测 `globalThis.__DSH_DIRECTORY_PICKER__`。
+  没有它就回退到 **Host 选择器**：`dsh web` 进程在独立子进程里跑 `osascript -l JavaScript`，
+  用一次性的 Accessory `NSApplication` + `activateIgnoringOtherApps` 打开 `NSOpenPanel`。
+  这个面板的宿主不是最前台应用，于是面板虽被画出却**不是 key window**，
+  用户第一下点击被「激活应用」吃掉——必须先点一下 DSH 窗口才能操作文件框。
+- 壳的做法：`harness-preload.js` 暴露 `__DSH_DIRECTORY_PICKER__.pick()`，
+  `main.js` 的 `picker:directory` 用 `dialog.showOpenDialog(<发起窗口>, …)` 回答。
+  面板成为**该窗口的 sheet**，归属已经在前台的 DSH 应用 ⇒ 第一下点击就能选中。
+- 父窗口必须显式解析（`workspaceOwning(sender)`，按 webContents 匹配，**不按焦点**）：
+  `BrowserWindow.fromWebContents` 对 `WebContentsView` 的 sender 不保证返回宿主窗口；
+  退回 app-modal 就等于又回到非 key 状态。
+- 取消语义：`canceled` 为真时一律返回 `null`。取消的 macOS 面板仍会在 `filePaths` 里报告高亮目录，
+  直接读数组会把「取消」变成「选中了当时高亮的那个」。
+- 选择框关闭后，按键焦点交还在**窗口**而不是其中的 view，因此 handler 结束时用
+  `focusViewInKeyWindow()` 把键盘还给发起的 view（仍受「仅 key window 才聚焦」守卫约束）。
 
 ## 4. 端口与进程策略
 

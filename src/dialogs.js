@@ -9,9 +9,10 @@
  */
 
 const path = require('node:path')
-const { WebContentsView, dialog } = require('electron')
+const { BrowserWindow, WebContentsView, dialog } = require('electron')
 const { focusViewInKeyWindow } = require('./windows')
 const { platformName } = require('./platform')
+const { pickDirectory } = require('./picker')
 
 const PRELOAD = path.join(__dirname, 'dialog-preload.js')
 const SETTINGS_HTML = path.join(__dirname, 'ui', 'settings.html')
@@ -249,9 +250,20 @@ class SetupDialog {
 function registerDialogIpc(handlers) {
   const { ipcMain } = require('electron')
   ipcMain.handle('dialog:get-state', event => handlers.getState(event))
-  ipcMain.handle('dialog:pick-directory', async () => {
-    const result = await dialog.showOpenDialog({ properties: ['openDirectory', 'createDirectory'] })
-    return result.canceled ? null : result.filePaths[0]
+  // The settings panel's 「选择…」 button. Routed through the shared picker so
+  // BOTH desktop surfaces (settings panel and harness view) open the same
+  // window-parented sheet — an unparented panel is app-modal, and on macOS it
+  // can arrive non-key, where the first click only activates the app.
+  //
+  // The owner comes from `handlers.ownerWindow` when supplied: this panel IS a
+  // WebContentsView, and `BrowserWindow.fromWebContents` is not guaranteed to
+  // resolve a view's contents to its host window. main.js resolves it from the
+  // workspace table instead.
+  ipcMain.handle('dialog:pick-directory', async event => {
+    const owner = typeof handlers.ownerWindow === 'function'
+      ? handlers.ownerWindow(event)
+      : BrowserWindow.fromWebContents(event.sender)
+    return pickDirectory(owner, dialog, { title: '选择仓库目录' })
   })
   ipcMain.handle('dialog:test-ssh', (event, target) => handlers.testSsh(event, target))
   ipcMain.handle('dialog:save', (event, rawSettings) => handlers.save(event, rawSettings))
