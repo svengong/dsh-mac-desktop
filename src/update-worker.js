@@ -32,7 +32,7 @@
 
 const fs = require('node:fs')
 const path = require('node:path')
-const { normalizeSettings } = require('./settings')
+const { normalizeSettings, DEFAULT_DSH_HOME } = require('./settings')
 const { resolveTools } = require('./tools')
 const { ensurePortableNode } = require('./node-bootstrap')
 const { installNpmArtifact } = require('./artifact')
@@ -58,7 +58,7 @@ async function main() {
     local: {
       repoDir: task.repoDir ?? '',
       repoUrl: task.repoUrl ?? '',
-      dshHome: task.dshHome ?? '~/.dsh-dev',
+      dshHome: task.dshHome ?? DEFAULT_DSH_HOME,
     },
     toolPaths: task.toolPaths ?? {},
   })

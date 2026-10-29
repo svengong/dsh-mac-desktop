@@ -76,7 +76,8 @@ npm run dist:linux:x64    # 或 dist:linux:arm64
   `app.setPath('userData', '~/.dsh-dev')`，settings.json、logs、单实例锁都在这里；
   目录不存在时启动即自动创建（约定：开发过程中一律使用 `~/.dsh-dev`，
   防止与用户空间 `~/.dsh` 或已安装应用数据冲突）。
-- 本地服务的 `DSH_HOME` 默认也是 `~/.dsh-dev`，与用户常规 `~/.dsh` 分离。
+- 本地服务的 `DSH_HOME` 默认也是 `~/.dsh-dev`（已安装应用默认是官方 `~/.dsh`），
+  开发时与用户常规 `~/.dsh` 分离。
 - 需要特殊隔离时设置环境变量：
 
 ```sh

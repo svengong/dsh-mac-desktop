@@ -101,7 +101,7 @@
               </div>
               <div class="field">
                 <label class="field-label" for="local-home">数据目录 <small>（dsh home，会话与运行数据）</small></label>
-                <input id="local-home" class="input" type="text" value="~/.dsh-dev">
+                <input id="local-home" class="input" type="text" value="">
               </div>
             </section>
 
@@ -665,7 +665,7 @@ api.getState().then(state => {
   if (!state.sshHosts.some(entry => entry.alias === current)) $('ssh-custom').value = current
   for (const button of document.querySelectorAll('#mode-switch button')) button.classList.toggle('active', button.dataset.mode === s.mode)
   $('local-repo').value = s.local?.repoDir ?? ''; $('local-url').value = s.local?.repoUrl ?? ''
-  $('local-home').value = s.local?.dshHome ?? '~/.dsh-dev'
+  $('local-home').value = s.local?.dshHome ?? state.defaultDshHome ?? ''
   $('ssh-url').value = s.ssh?.remoteRepoUrl ?? ''; $('ssh-dir').value = s.ssh?.remoteRepoDir ?? '~/deepseek-harness'
   const update = s.update ?? {}
   updateState.autoCheckOnLaunch = update.autoCheckOnLaunch !== false

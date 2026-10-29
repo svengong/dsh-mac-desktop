@@ -185,7 +185,7 @@ macOS 缺陷：
 ## 7. 数据与进程隔离
 
 - 开发态（`app.isPackaged === false`）userData 固定为 `~/.dsh-dev`（不存在时自动创建），不触碰已安装应用的 `~/Library/Application Support/DeepSeek Harness`；`DSH_DESKTOP_USER_DATA` 可覆盖。
-- 本地服务 `DSH_HOME` 默认 `~/.dsh-dev`（或设置里的 dshHome），与终端用户常用 `~/.dsh` 完全分离；首次使用时从 `~/.dsh` 播种 settings/凭据。
+- 本地服务 `DSH_HOME`：已安装应用默认 `~/.dsh`，与终端 `dsh` 共用同一工作区（会话/设置/凭据）；开发态默认 `~/.dsh-dev`。设置里的 dshHome 可改为任意路径，自定义目录首次使用时从 `~/.dsh` 播种 settings/凭据。
 - 已安装应用与开发应用使用不同的单实例锁，允许同时运行。
 - 本地子进程 `PATH = node 目录 + .dsh-tools + 仓库 node_modules/.bin + 系统基础目录`，与登录环境无关；远程在 `~/.dsh-tools` 做同样的自包含引导。
 

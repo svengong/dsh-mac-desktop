@@ -45,6 +45,19 @@ const {
 
 const PROBE_INTERVAL_MS = 750
 const READY_TIMEOUT_MS = 90 * 1000
+/**
+ * How long to wait for `dsh web` to announce its listening port.
+ *
+ * This is a COLD START budget, not a steady-state one: the CLI prints its URL
+ * only after the plugin loader settles AND the startup audit finishes, so a
+ * first boot on a slow machine (a Windows arm64 VM, a cold antivirus scan, a
+ * fresh runtime whose caches are empty) can legitimately take far longer than a
+ * warm restart. At 30s a still-booting service was killed and immediately
+ * respawned, which produced the reported "✗ 连接失败 … 10 秒后自动重试 … ready"
+ * sequence: the second, warmer spawn made it inside the budget and reported
+ * ready, so the shell looked broken on the first try and healthy right after.
+ */
+const PORT_ANNOUNCE_TIMEOUT_MS = 90 * 1000
 const SERVICE_RETRIES = 3
 const TUNNEL_RETRIES = 5
 const LOG_RING_LINES = 300
@@ -376,15 +389,35 @@ class ConnectionManager extends EventEmitter {
   }
 
   /**
-   * The harness's own package version (apps/cli package.json `version`), read
-   * from the checkout the shell manages — locally from disk, remotely over
-   * ssh. Best-effort: returns '' on any read/parse failure. `host.describe`
-   * is deliberately NOT used because its `version` field is an upstream
-   * placeholder (`0.0.1`) that does not track the real package version.
+   * The version of the harness this connection is actually SERVING.
+   *
+   * It must come from the active runtime, never from a source checkout: the
+   * shell no longer builds or clones a repo (see connectLocal — the runtime is
+   * installed from the official npm artifact), so `settings.local.repoDir`
+   * frequently does not exist at all. Reading it produced a parse failure that
+   * the `catch` below swallowed into `''`, and `''` makes checkHostCompatibility
+   * return early — the "harness is newer than this shell" warning therefore
+   * never fired on any artifact-based install. Measured on a Windows guest
+   * serving npm0.2.2-alpha.2: repoDir was absent, hostVersion() was '', and the
+   * ceiling (SHELL_COMPAT.maxHarness 0.2.0) was silently never enforced.
+   *
+   * Best-effort: returns '' when the version cannot be established, so an
+   * unreadable runtime degrades to "no warning" rather than a false alarm.
+   * `host.describe` is deliberately NOT used because its `version` field is an
+   * upstream placeholder (`0.0.1`) that does not track the real package version.
    */
   async hostVersion() {
     const settings = this.getSettings()
     try {
+      // `serviceVersion` already knows every way a runtime can be resolved —
+      // the activated runtime store locally, the official artifact remotely —
+      // and is what the connect path itself trusts. `unknown` is its explicit
+      // "could not tell" answer, not a version.
+      const version = await this.serviceVersion(settings)
+      if (typeof version === 'string' && version !== 'unknown' && version !== '') return version
+      // Legacy fallback: a source checkout that predates the runtime store
+      // still carries the CLI manifest. Keep it so an old setup does not lose
+      // the check entirely.
       if (settings.mode === 'local') {
         const manifest = JSON.parse(fs.readFileSync(
           path.join(settings.local.repoDir, 'apps', 'cli', 'package.json'), 'utf8',
@@ -1131,11 +1164,11 @@ class ConnectionManager extends EventEmitter {
   }
 
   /**
-   * Prepare the instance's OWN dsh home: create it and seed settings and
-   * credentials from `~/.dsh` on first use. Two dsh processes on one machine
-   * must never share a session store — this home keeps the shell's local
-   * instance fully isolated from any other harness instance (sessions,
-   * settings, profiles, credentials all live under it).
+   * Prepare this instance's dsh home: create it and seed settings and
+   * credentials from `~/.dsh` on first use. The packaged default IS `~/.dsh`
+   * (shared with a terminal `dsh`); a dev or custom home is separate from any
+   * other harness instance (sessions, settings, profiles, credentials all
+   * live under it) and is seeded once so it starts with the user's identity.
    */
   prepareLocalHome(settings) {
     const home = expandHome(settings.local.dshHome)
@@ -1212,8 +1245,11 @@ class ConnectionManager extends EventEmitter {
       rejectPort = reject
     })
     const portTimer = setTimeout(() => {
-      rejectPort(new Error('等待 dsh web 报告实际端口超时。请打开服务日志排查。'))
-    }, 30_000)
+      rejectPort(new Error(
+        `已等待 ${Math.round(PORT_ANNOUNCE_TIMEOUT_MS / 1000)} 秒，dsh web 仍未报告监听端口。`
+        + '请打开服务日志排查（首启动可能在建索引/装插件，较慢的机器可稍后点「重试」）。',
+      ))
+    }, PORT_ANNOUNCE_TIMEOUT_MS)
 
     const service = spawnService({
       cmd: tools.node,
@@ -2131,4 +2167,5 @@ module.exports = {
   waitReady,
   rehostUrl,
   processGroupOf,
+  PORT_ANNOUNCE_TIMEOUT_MS,
 }

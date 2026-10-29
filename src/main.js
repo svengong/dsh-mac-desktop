@@ -27,7 +27,7 @@ const {
 } = require('electron')
 
 const {
-  SettingsStore, normalizeSettings, deviceKeyOf, DEV_DEFAULT_DSH_HOME, DEFAULT_THEME, normalizeTheme, THEME_APPEARANCE,
+  SettingsStore, normalizeSettings, deviceKeyOf, DEV_DEFAULT_DSH_HOME, DEFAULT_DSH_HOME, DEFAULT_THEME, normalizeTheme, THEME_APPEARANCE,
 } = require('./settings')
 const { mergeUpdates } = require('./device-merge')
 const { terminalLabel } = require('./labels')
@@ -65,6 +65,16 @@ const SHELL_VERSION = require('../package.json').version
  * the shell upgrades it through the existing update pipeline instead.
  */
 const SHELL_COMPAT = Object.freeze({ maxHarness: '0.2.0' })
+/**
+ * Identity tag of the connect-failure banner.
+ *
+ * Every progress banner shares one slot (`workspace.progress`), so a later
+ * status transition has to be able to tell a failed CONNECT — a UI artefact of
+ * a finished attempt, stale the moment the service answers — apart from a
+ * genuinely blocking task (an init build, an artifact update). Tagging the
+ * banner at the source is what lets `onSessionStatus` clear exactly this one.
+ */
+const CONNECT_FAILED_BANNER = 'connect-failed'
 const DOCK_ICON = path.join(BUILD_DIR, 'icon.png')
 const DOCK_ICON_PRESSED = path.join(BUILD_DIR, 'iconPressed.png')
 const DOCK_PRESS_MS = 150
@@ -2169,6 +2179,25 @@ function broadcastSession(session) {
 function onSessionStatus(session, status) {
   for (const workspace of session.windows) {
     if (workspace.window === null || workspace.window.isDestroyed()) continue
+    // Drop a stale CONNECT-FAILURE banner as soon as the terminal stops being
+    // in the error state. The banner is installed by onSessionConnectFailed and
+    // pinned on the workspace; nothing used to remove it, so a successful
+    // automatic retry (status → ready) left it on screen permanently.
+    // `updateHarnessVisibility` requires `progress === null` before it will show
+    // the web view and the shell frame prefers `progress` over `connState`, so
+    // the harness tab kept rendering "连接失败" over a perfectly live service
+    // while the settings panel — which reads the connection status, not the
+    // banner — correctly reported 已连接. Two surfaces of one session
+    // contradicted each other. Keyed by `kind` on purpose: an init/update
+    // banner is a real blocking task and must NOT be cleared by a status
+    // transition.
+    if (status.state !== 'error' && workspace.progress !== null
+      && workspace.progress.kind === CONNECT_FAILED_BANNER) {
+      if (session.progress !== null && session.progress.kind === CONNECT_FAILED_BANNER) {
+        session.progress = null
+      }
+      workspace.progress = null
+    }
     workspace.window.setTitle(workspaceTitle(workspace))
     sendWorkspaceState(workspace)
     workspace.setupDialog.send('dialog:live', {
@@ -2176,11 +2205,17 @@ function onSessionStatus(session, status) {
       url: status.url,
       detail: status.detail,
     })
-    if (status.state === 'ready' && workspace.pendingOpen) {
+    if (status.state === 'ready' && (workspace.pendingOpen || workspace.loadedUrl === '')) {
       // Do not yank the user out of connection/settings and do not raise a
       // background window: sync the harness URL in the current view context.
+      //
+      // `loadedUrl === ''` matters as much as `pendingOpen` here. A connect
+      // that FAILED left the tab with nothing loaded, and onSessionConnectFailed
+      // clears `pendingOpen`; when the automatic retry then succeeded, this
+      // branch was skipped entirely and the shell never pointed the harness
+      // view at the (now live) URL — it sat on the failure panel forever.
       syncWorkspaceHarness(workspace, session)
-    } else if (status.state === 'ready' && workspace.loadedUrl !== '' && workspace.loadedUrl !== status.url) {
+    } else if (status.state === 'ready' && workspace.loadedUrl !== status.url) {
       // A restarted service may report a new OS-chosen port. Reload in place
       // without yanking focus from the window the user is actually using.
       loadHarnessUrl(workspace, status.url)
@@ -2209,9 +2244,15 @@ function onSessionConnectFailed(session, error) {
   // Surface it in the loading panel too (it renders the ring through
   // shell:log-dump), so the reason is visible without opening the log file.
   const progress = {
+    kind: CONNECT_FAILED_BANNER,
     title: '连接失败',
     status: detail,
-    actions: [{ label: '重试', name: 'reconnect', primary: true }, { label: '关闭', name: 'dismiss-progress' }],
+    // `retry-connect` is the action the shell actually handles (see the
+    // 'retry-connect' case): it rebinds the terminal and resumes the connect
+    // journey on the harness tab. This used to say `reconnect`, which no case
+    // matches, so the failure banner's 重试 button did nothing at all — the
+    // user saw a dead button over an error whose own auto-retry had a 10s delay.
+    actions: [{ label: '重试', name: 'retry-connect', primary: true }, { label: '关闭', name: 'dismiss-progress' }],
   }
   for (const workspace of session.windows) {
     // `pendingOpen` pins the harness tab on the loading panel. Left set after a
@@ -2875,6 +2916,9 @@ function registerIpc() {
       const live = detached ? idleStatus() : workspace.session.connection.status
       return {
         settings: view,
+        // The build's default dsh home (`~/.dsh` packaged, `~/.dsh-dev` in
+        // dev), so the settings form never shows a stale hardcoded value.
+        defaultDshHome: DEFAULT_DSH_HOME,
         terminal: detached ? '待连接' : terminalLabel(view),
         sshHosts: listSshHosts(),
         theme: currentTheme(),

@@ -21,15 +21,37 @@ const { IS_WINDOWS } = require('./platform')
 const { defaultLoginShell } = require('./tools')
 
 /**
- * The shell-owned dsh home used for development/desktop service isolation.
- *
- * Development launches always use `~/.dsh-dev` (created on demand) so a dev
- * shell never touches the user's real `~/.dsh` or the installed app's data.
+ * Development launches keep their own dsh home so a dev shell never touches
+ * the installed app's data or the user's real `~/.dsh`.
  */
 const DEV_DEFAULT_DSH_HOME = '~/.dsh-dev'
 
-/** Packaged builds must never point at a read-only path inside the .app. */
-const IS_PACKAGED = typeof process.resourcesPath === 'string' && process.resourcesPath !== ''
+/**
+ * Installed builds default to the official CLI's home, so the desktop app and
+ * a terminal `dsh` share one workspace (sessions, settings, profiles,
+ * credentials). `~/.dsh` is created on demand by the harness.
+ */
+const PACKAGED_DEFAULT_DSH_HOME = '~/.dsh'
+
+/**
+ * Whether this process runs inside a PACKAGED Electron app.
+ *
+ * `process.resourcesPath` exists in dev too (it points into
+ * `node_modules/electron/dist`), so it cannot distinguish the two. Electron
+ * sets `process.defaultApp` only when the app is passed as a parameter to the
+ * stock executable (`electron .`); a packaged bundle leaves it undefined.
+ * Plain node (tests, scripts) is treated as dev.
+ */
+const IS_ELECTRON = typeof process.versions === 'object' && typeof process.versions.electron === 'string'
+const IS_PACKAGED = IS_ELECTRON && process.defaultApp !== true
+
+/** The default dsh home for a build kind (packaged vs development). */
+function defaultDshHome(packaged) {
+  return packaged ? PACKAGED_DEFAULT_DSH_HOME : DEV_DEFAULT_DSH_HOME
+}
+
+/** The dsh home this build starts from, before any persisted setting. */
+const DEFAULT_DSH_HOME = defaultDshHome(IS_PACKAGED)
 
 /** The harness checkout lives inside the shell product directory in dev. */
 const DEFAULT_LOCAL_REPO_DIR = IS_PACKAGED
@@ -47,7 +69,7 @@ const DEFAULT_LOCAL_REPO_URL = IS_PACKAGED
 /** Defaults every device entry is normalized against. */
 const DEVICE_DEFAULTS = Object.freeze({
   mode: 'local',
-  local: Object.freeze({ repoDir: DEFAULT_LOCAL_REPO_DIR, repoUrl: '', dshHome: DEV_DEFAULT_DSH_HOME, port: 3080 }),
+  local: Object.freeze({ repoDir: DEFAULT_LOCAL_REPO_DIR, repoUrl: '', dshHome: DEFAULT_DSH_HOME, port: 3080 }),
   ssh: Object.freeze({
     host: '',
     remoteRepoUrl: '',
@@ -105,9 +127,11 @@ function normalizeLocal(raw) {
     repoDir: text(source.repoDir) || DEFAULT_LOCAL_REPO_DIR,
     // Optional git URL: cloned into repoDir when it is missing or not a git repo.
     repoUrl: text(source.repoUrl).trim() || DEFAULT_LOCAL_REPO_URL,
-    // The instance's OWN dsh home: completely separate from any other dsh
-    // process on the machine (no shared sessions/settings/profiles), so two
-    // live instances can never corrupt each other's session store.
+    // The instance's dsh home. Packaged builds default to the official
+    // `~/.dsh` so desktop and terminal share one workspace; dev builds and
+    // custom values stay separate from any other dsh process on the machine
+    // (no shared sessions/settings/profiles), so instances cannot corrupt
+    // each other's session store.
     dshHome: text(source.dshHome).trim() || DEVICE_DEFAULTS.local.dshHome,
     port: portOf(source.port, DEVICE_DEFAULTS.local.port),
   }
@@ -291,6 +315,9 @@ class SettingsStore {
 
 module.exports = {
   DEV_DEFAULT_DSH_HOME,
+  PACKAGED_DEFAULT_DSH_HOME,
+  DEFAULT_DSH_HOME,
+  defaultDshHome,
   DEFAULT_LOCAL_REPO_URL,
   OFFICIAL_REPO_URL,
   DEFAULTS,

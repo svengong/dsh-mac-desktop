@@ -34,12 +34,12 @@ launch. The Android client is a separate native app — see
 
 ## Features
 
-- **Local mode**: serves the harness from a shell-owned dsh home with its own isolated data directory.
+- **Local mode**: serves the harness from the official `~/.dsh` by default (the same workspace as a terminal `dsh`), or any isolated directory set in the preferences.
 - **SSH remote mode**: pick a host from `~/.ssh/config` (HostName/User/Port/IdentityFile/ProxyJump/Include all apply) or enter `[user@]host[:port]`; keeps the `ssh -N -L` tunnel alive with reconnection, starts/stops the remote service over ssh. Requires passwordless key login.
 - **In-shell loading panel**: live status and logs while connecting/building/updating, with retry actions on failure.
 - **Tray/status area**: status, pending update count, and update management without opening a window.
 - **Native-feeling UI per platform**: macOS traffic lights or Windows caption buttons integrated into a single 46px shell frame; embedded settings panels, light/dark appearance, per-device settings and update sources.
-- **Data isolation**: the harness runs under its own dsh home; your real `~/.dsh` and the installed app's data are never touched.
+- **Data isolation**: development builds and custom dsh homes stay independent, and the shell's own settings/logs never touch the installed app's data.
 - **Startup auto-check**: notifies when updates are available (deduplicated per launch, per device).
 
 ## Android (phone and tablet)

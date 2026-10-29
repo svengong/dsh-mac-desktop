@@ -103,7 +103,7 @@ VS Code Remote——用户可以选择本机或 SSH 远程主机运行 Harness�
 |---|---|
 | FR-3.1 | 开发态（`electron .` / `npm start`）Electron userData 固定为 `~/.dsh-dev`（不存在时自动创建），不读写已安装应用的 `~/Library/Application Support/DeepSeek Harness`。 |
 | FR-3.2 | 可通过 `DSH_DESKTOP_USER_DATA` 覆盖 userData（支持 `~/...`）。 |
-| FR-3.3 | 本地服务默认 `DSH_HOME=~/.dsh-dev`，与终端用户常用 `~/.dsh` 完全分离。 |
+| FR-3.3 | 本地服务 `DSH_HOME`：已安装应用默认 `~/.dsh`，与官方 CLI 共用同一工作区；开发态默认 `~/.dsh-dev`，与用户 `~/.dsh` 完全分离。设置里的 dshHome 可覆盖为任意目录。 |
 | FR-3.4 | 每次启动写入独立日志文件到 `<userData>/logs/desktop-<时间戳>.log`。 |
 | FR-3.5 | 已安装应用与开发应用使用不同的单实例锁，允许同时运行。 |
 
@@ -168,7 +168,7 @@ VS Code Remote——用户可以选择本机或 SSH 远程主机运行 Harness�
 | 场景 | 处理 |
 |---|---|
 | 两个窗口同时连接不同 SSH 设备，均配置 3080 本地转发 | 转发端口通过进程内预留顺延，远端服务本身由 OS 分配端口。 |
-| 开发版与已安装版同时运行 | 开发版 userData 与 DSH_HOME 均在 `~/.dsh-dev`，web 服务使用 `--port 0`，无固定端口争用。 |
+| 开发版与已安装版同时运行 | 开发版 userData 与 DSH_HOME 均在 `~/.dsh-dev`（已安装版 DSH_HOME 默认 `~/.dsh`），web 服务使用 `--port 0`，无固定端口争用。 |
 | Harness 更新/服务重启期间新建窗口 | 新窗口未绑定终端，默认连接页，不加载旧端口，不会白屏；工具栏仍可切换页面。 |
 | harness 因外部因素重启（插件安装、进程内重载、外部托管服务换端口、远端服务崩溃） | 自管服务退出由 close watcher 自动重启并发布新端口；其余场景由健康看门狗连续两次探测失败后自动 `connect()` 重连，窗口无缝刷新到新 URL，无需手动重连。 |
 | 终端 B 更新中，用户切到已打开的 A 或新终端 | 不弹锁：取消 B 任务，关闭/重绑 B 窗口，聚焦目标窗口；旧服务继续运行，更新可重试。 |

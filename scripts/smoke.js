@@ -13,7 +13,7 @@ const os = require('node:os')
 const net = require('node:net')
 const http = require('node:http')
 const path = require('node:path')
-const { normalizeSettings } = require('../src/settings')
+const { normalizeSettings, defaultDshHome, DEV_DEFAULT_DSH_HOME, PACKAGED_DEFAULT_DSH_HOME } = require('../src/settings')
 const { terminalLabel, terminalPrefix } = require('../src/labels')
 const {
   compareVersions, isNewerVersion, versionOf, versionToken,
@@ -78,6 +78,15 @@ async function main() {
   assert.strictEqual(normalizeSettings(null).local.port, 3080)
   const defaultLocal = normalizeSettings(null)
   assert.strictEqual(defaultLocal.local.repoDir, path.resolve(__dirname, '..', 'deepseek-harness'))
+  // Data-home default is build-kind specific: an installed app must land on
+  // the official `~/.dsh`; only development runs stay on `~/.dsh-dev`.
+  assert.strictEqual(PACKAGED_DEFAULT_DSH_HOME, '~/.dsh')
+  assert.strictEqual(DEV_DEFAULT_DSH_HOME, '~/.dsh-dev')
+  assert.strictEqual(defaultDshHome(true), '~/.dsh')
+  assert.strictEqual(defaultDshHome(false), '~/.dsh-dev')
+  // This suite runs under plain node, i.e. the development default.
+  assert.strictEqual(defaultLocal.local.dshHome, '~/.dsh-dev')
+  assert.strictEqual(normalizeSettings({ local: { dshHome: '~/custom' } }).local.dshHome, '~/custom')
   assert.strictEqual(terminalLabel(defaultLocal), '本地')
   assert.strictEqual(terminalPrefix(defaultLocal), 'DSH-[本地]')
   assert.strictEqual(terminalLabel({ mode: 'ssh', ssh: { host: 'ubuntu' } }), 'ubuntu')
@@ -2007,6 +2016,84 @@ async function main() {
     assert.ok(
       /setProgress\(workspace,\s*progress\)/u.test(body),
       'a failed connect must install a visible failure banner',
+    )
+    // The banner's 重试 button must name an action the shell actually handles.
+    // It said `reconnect` for a while, which no `case` matches, so the most
+    // prominent button on the error card did nothing.
+    assert.ok(
+      !/name:\s*'reconnect'/u.test(body),
+      "the failure banner must not use the unhandled 'reconnect' action",
+    )
+    assert.ok(
+      /name:\s*'retry-connect'/u.test(body),
+      "the failure banner's 重试 must use the handled 'retry-connect' action",
+    )
+    // The banner must be TAGGED, so a later status transition can tell it apart
+    // from a genuinely blocking init/update banner and clear exactly this one.
+    assert.ok(
+      /kind:\s*CONNECT_FAILED_BANNER/u.test(body),
+      'the connect-failure banner must be tagged with its kind',
+    )
+    for (const [label, name] of [['retry-connect', 'retry-connect'], ['dismiss-progress', 'dismiss-progress']]) {
+      assert.ok(
+        new RegExp(`case '${name}':`, 'u').test(source),
+        `the failure banner action ${label} must have a handler`,
+      )
+    }
+  }
+
+  // A recovered connection must never keep showing the failure card.
+  //
+  // The reported symptom: the harness tab sat on "连接失败 / 等待 dsh web 报告
+  // 实际端口超时" over a service that was up and serving, while the settings
+  // page — reading the connection status instead of the banner — correctly said
+  // 已连接. Two surfaces of one session disagreed, so nothing looked broken
+  // enough to investigate. The banner lives in `workspace.progress`, which
+  // updateHarnessVisibility treats as a hard "do not show the web view", and
+  // nothing removed it after a successful retry.
+  {
+    const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'main.js'), 'utf8')
+    const start = source.indexOf('function onSessionStatus(')
+    assert.ok(start !== -1, 'onSessionStatus must exist')
+    const rest = source.slice(start)
+    const nextFn = rest.slice(1).search(/\n(?:async )?function /u)
+    const body = nextFn === -1 ? rest : rest.slice(0, nextFn + 1)
+    // Locate the clear statement and read BACKWARDS to the condition guarding
+    // it. Asserting on the whole function body would pass even with the guard
+    // removed, because the assignment itself would still be there.
+    const clearAt = body.indexOf('workspace.progress = null')
+    assert.ok(clearAt !== -1, 'a status update must clear the stale connect-failure banner')
+    const guard = body.slice(Math.max(0, clearAt - 800), clearAt)
+    assert.ok(
+      /CONNECT_FAILED_BANNER/u.test(guard),
+      'the guard must clear ONLY the connect-failure banner — init/update banners are real tasks',
+    )
+    assert.ok(
+      /status\.state !== 'error'/u.test(guard),
+      'the banner must be cleared on a non-error status (a recovered connect)',
+    )
+    // A failed connect leaves the tab with no URL loaded AND pendingOpen false,
+    // so gating the harness sync on pendingOpen alone never pointed the view at
+    // the live service after the auto-retry succeeded.
+    assert.ok(
+      /status\.state === 'ready' && \(workspace\.pendingOpen \|\| workspace\.loadedUrl === ''\)/u.test(body),
+      'a ready status must sync the harness view even when the failure cleared pendingOpen',
+    )
+  }
+
+  // The port-announce wait is a COLD-START budget.
+  //
+  // `dsh web` prints its URL only after the plugin loader settles and the
+  // startup audit finishes. At 30s a slow first boot (Windows arm64 VM, cold
+  // antivirus scan, empty caches) was killed mid-boot and immediately
+  // respawned; the warm second spawn then reported ready, producing the
+  // reported "连接失败 → 10 秒后自动重试 → ready" sequence that made a healthy
+  // service look broken on its first attempt.
+  {
+    const { PORT_ANNOUNCE_TIMEOUT_MS } = require('../src/connection')
+    assert.ok(
+      Number.isInteger(PORT_ANNOUNCE_TIMEOUT_MS) && PORT_ANNOUNCE_TIMEOUT_MS >= 90_000,
+      `the port-announce budget must fit a cold boot, got ${String(PORT_ANNOUNCE_TIMEOUT_MS)}`,
     )
   }
 
