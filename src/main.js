@@ -35,7 +35,6 @@ const { resolveTools } = require('./tools')
 const { runCommand, killActiveChildren, cancelOwnedChildren, spawnDetached } = require('./runner')
 const { sshCommandArgs, parseTarget, listSshHosts, isSshConfigAlias } = require('./ssh')
 const { ConnectionManager } = require('./connection')
-const { compareVersions } = require('./components')
 const runtimeStore = require('./runtime-store')
 const { Updater } = require('./update')
 const { UpdateManager } = require('./update-manager')
@@ -55,27 +54,21 @@ const BUILD_DIR = path.join(__dirname, '..', 'build')
 // Single source of truth: the shell version always follows package.json (and
 // therefore the bundled Info.plist CFBundleShortVersionString). Never hardcode.
 const SHELL_VERSION = require('../package.json').version
-/**
- * The highest harness version this shell is known to be compatible with,
- * keyed on the harness's own `@deepseek-ai/dsh` package version. The shell is a
- * thin client over the harness, so a harness that outruns this range may have
- * changed its launch contract (bin path, boot marker, state file, runtime
- * layout). When the connected harness reports a version above this, the shell
- * warns — it never blocks — that an upgrade is due. An older harness is not
- * flagged: the shell upgrades it through the existing update pipeline.
- *
- * Keep this CURRENT. It was pinned to 0.2.0 in 2026-08 (when the shell was
- * 0.1.0 and the harness was pre-0.2.0) and never revisited while the harness
- * moved on to 0.2.2-alpha.2 — the warning was dead for months only because
- * hostVersion() could not read a version at all. The moment that was fixed,
- * every artifact-based install started showing a stale "upgrade the shell"
- * dialog. A ceiling nobody updates is worse than no ceiling: it turns a real
- * signal into noise the user learns to ignore.
- *
- * Raise it only after connecting this shell to that harness version once and
- * seeing the connect/restart/update paths work.
- */
-const SHELL_COMPAT = Object.freeze({ maxHarness: '0.2.2' })
+// There is deliberately NO harness-version ceiling in this shell any more. The
+// one that used to live here was wrong in both directions:
+//
+//  - It was pinned to 0.2.0 in 2026-08 and never updated while the harness moved
+//    through 0.2.1 and 0.2.2-alpha.2 — so it flagged installations that work.
+//  - It could not even be READ for months (the version lookup pointed at a
+//    source checkout that no longer exists on artifact installs), so it was
+//    silently dead. The one time it finally spoke, it was wrong.
+//
+// A curated ceiling assumes somebody keeps it in sync with a fast-moving
+// harness, and that assumption already failed once. The shell's real
+// compatibility surface — bin path, boot marker, state file, runtime layout —
+// is exercised on every connect by the connect/restart/update paths themselves:
+// if the harness breaks one of them, that surfaces as a concrete error with a
+// log line, not as a guess derived from a version number.
 /**
  * Identity tag of the connect-failure banner.
  *
@@ -1575,7 +1568,6 @@ function connectSession(session) {
       session.connecting = false
       session.connection.log(`连接流程结束，状态：${session.connection.status.state}`)
       reconcileMachineIdentity(session)
-      checkHostCompatibility(session)
     },
     (error) => {
       session.connecting = false
@@ -1594,46 +1586,6 @@ function connectSession(session) {
   return task
 }
 
-/**
- * After a successful connect, compare the connected harness's own version
- * against the shell's known-compatible ceiling. A too-new harness means the
- * shell may no longer understand its launch contract, so warn the user to
- * upgrade the shell. An older harness is not flagged — the shell upgrades it
- * through the existing update pipeline instead. Best-effort: an unreadable
- * version degrades to no-op.
- *
- * This is a WARNING, never a gate: the connection has already succeeded, so
- * blocking the user with a modal over it is wrong. It used to call
- * showErrorBox, which on a machine that reconnects on every launch meant a
- * dialog to dismiss before reaching an app that was in fact working. It now
- * logs the line (always) and raises at most one desktop notification per
- * harness version per app run — noticeable, never in the way.
- */
-const hostCompatibilityWarned = new Set()
-
-async function checkHostCompatibility(session) {
-  if (session.connection.status.state !== 'ready') return
-  let version = ''
-  try {
-    version = await session.connection.hostVersion()
-  } catch {
-    return
-  }
-  if (version === '') return
-  session.hostVersion = version
-  if (compareVersions(version, SHELL_COMPAT.maxHarness) <= 0) return
-  const message = `守护进程版本 ${version} 高于本壳已知兼容范围（≤ ${SHELL_COMPAT.maxHarness}）。请升级桌面壳后再连接，否则可能无法正常启动/管理该守护进程。`
-  routeSessionLine(session, `⚠ 壳版本过低：${message}`)
-  if (hostCompatibilityWarned.has(version)) return
-  hostCompatibilityWarned.add(version)
-  // Never a modal fallback: with no notification host the log line plus the
-  // version shown in settings is the record, and the app stays usable.
-  if (!Notification.isSupported()) return
-  new Notification({
-    title: `DSH-[${terminalLabel(settingsViewFor(session.key))}]-桌面壳版本偏低`,
-    body: message,
-  }).show()
-}
 
 
 /**

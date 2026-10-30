@@ -2003,49 +2003,30 @@ async function main() {
   }
 
 
-  // The shell's harness-compatibility ceiling must stay current, and must
-  // never be enforced with a modal.
+  // There must be NO harness-version ceiling.
   //
-  // It sat at 0.2.0 from 2026-08 while the harness moved to 0.2.2-alpha.2. The
-  // warning was dead the whole time only because hostVersion() could not read a
-  // version; fixing that turned a stale constant into an "upgrade the desktop
-  // shell" dialog on every launch. A ceiling nobody revisits is worse than no
-  // ceiling, so pin the CURRENT behaviour and the non-blocking delivery here.
+  // One existed (SHELL_COMPAT.maxHarness) and failed twice over: it was pinned
+  // to 0.2.0 in 2026-08 and never updated while the harness moved through 0.2.1
+  // and 0.2.2-alpha.2, and it could not even be read for months (hostVersion()
+  // pointed at a source checkout absent from artifact installs), so it was
+  // silently dead. The one time it spoke it wrongly told the user to upgrade a
+  // working install. A curated ceiling needs someone to keep it in sync with a
+  // fast-moving harness; that already failed, so the check is gone rather than
+  // merely retuned. Real incompatibilities surface as concrete connect errors.
   {
     const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'main.js'), 'utf8')
-    const ceiling = /const SHELL_COMPAT = Object\.freeze\(\{\s*maxHarness:\s*'([^']+)'/u.exec(source)
-    assert.ok(ceiling !== null, 'SHELL_COMPAT.maxHarness must be declared')
-    const maxHarness = ceiling[1]
-    // A harness release that this shell has actually been run against must not
-    // warn. Bump this alongside maxHarness when a newer one is verified.
-    for (const known of ['0.2.0', '0.2.1', '0.2.2-alpha.2']) {
-      assert.ok(
-        compareVersions(known, maxHarness) <= 0,
-        `the ceiling ${maxHarness} must not flag the verified harness ${known}`,
-      )
-    }
-    // Genuinely newer harnesses must still warn — the check has to keep teeth.
     assert.ok(
-      compareVersions('0.3.0', maxHarness) > 0,
-      'the ceiling must still flag a harness well beyond it',
-    )
-    // Warning, never a gate: the connection already succeeded by this point.
-    const start = source.indexOf('async function checkHostCompatibility(')
-    assert.ok(start !== -1, 'checkHostCompatibility must exist')
-    const rest = source.slice(start)
-    const nextFn = rest.slice(1).search(/\n(?:async )?function /u)
-    const body = nextFn === -1 ? rest : rest.slice(0, nextFn + 1)
-    assert.ok(
-      !/dialog\.showErrorBox/u.test(body),
-      'a compatible-but-newer harness must not block the user with a modal',
+      !/SHELL_COMPAT/u.test(source),
+      'no harness-version ceiling may come back — it cannot be kept current',
     )
     assert.ok(
-      /new Notification\(/u.test(body),
-      'the compatibility warning must use a desktop notification',
+      !/checkHostCompatibility/u.test(source),
+      'the compatibility check must stay removed',
     )
+    // The dialog title the user reported must not be reachable any more.
     assert.ok(
-      /hostCompatibilityWarned/u.test(body),
-      'the warning must be deduplicated so a reconnect loop does not spam it',
+      !/桌面壳版本过低/u.test(source),
+      'the "桌面壳版本过低" warning must be gone',
     )
   }
 
