@@ -1,8 +1,9 @@
 name: CI
 
 # 日常检查：PR 与 main 分支推送时跑冒烟测试 + 打包预检，防止合并前破坏打包链路。
-# macOS、Windows、Linux 各跑一遍：三条打包链路完全不同（dmg/zip、nsis/portable、
-# AppImage/deb），只在一条上验证会让另外两条静默腐化。
+# macOS（dmg）、Windows（NSIS setup，x64 + arm64）、Android（APK）各跑一遍：
+# 三条打包链路完全不同（electron-builder dmg、BCJ 钉住的 NSIS、Gradle），
+# 只在一条上验证会让另外两条静默腐化。
 on:
   push:
     branches: [main]
@@ -50,31 +51,30 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Cross-build both macOS architectures from one arm64 runner
-          # (macos-13/x64 is retired — do not use it).
+          # macOS: arm64 only. The release surface no longer ships x64, so CI
+          # must not spend a job proving a target nobody downloads.
           - os: macos-14
             label: macos
             arch: arm64
             bundle: dist/mac-arm64/DeepSeek Harness.app
-          # Windows ships x64 AND arm64; the NSIS/portable targets are
-          # architecture-agnostic, so one job with an explicit --x64 --arm64
-          # pair proves both.
+          # Windows ships x64 AND arm64 as NSIS setup, so CI proves both. This
+          # job is also the guard that catches the BCJ2 payload bug; checking
+          # only one arch would leave the other installer unverified while
+          # still publishing it.
           - os: windows-latest
             label: windows
             arch: arm64
             bundle: dist/win-arm64-unpacked/DeepSeek Harness.exe
-          # Linux ships AppImage AND deb, which share one packaging chain but
-          # NOT one arch spelling: ${arch} expands to x86_64 for AppImage and
-          # amd64 for deb (arm64 is arm64 in both). The assertion below checks
-          # the real filenames, so a rename regression fails the job instead of
-          # shipping mislabelled artifacts.
-          - os: ubuntu-24.04
-            label: linux
+          - os: windows-latest
+            label: windows
             arch: x64
-            # x64 has no arch suffix, so the unpacked dir is plain linux-unpacked.
-            # The binary name comes from build.linux.executableName (NOT the
-            # package name or productName) — verified against a real build.
-            bundle: dist/linux-unpacked/deepseek-harness
+            bundle: dist/win-unpacked/DeepSeek Harness.exe
+          # Android ships a single arm64 APK. Gradle compiles offline, so it
+          # runs on a plain ubuntu runner.
+          - os: ubuntu-24.04
+            label: android
+            arch: arm64
+            bundle: android/app/build/outputs/apk/release/app-release.apk
     runs-on: ${{ matrix.os }}
     env:
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
@@ -106,32 +106,60 @@ jobs:
         if: matrix.label == 'windows'
         run: node scripts/build-win.js --${{ matrix.arch }} --publish never
 
-      # Linux uses the same electron-builder chain as macOS/Windows, but the
-      # deb target additionally requires homepage + author (electron-builder
-      # hard-fails without them) — that is why package.json carries both.
-      # --publish never for the same reason as the other two jobs.
-      - name: Build installers (Linux)
-        if: matrix.label == 'linux'
-        run: npm run dist:linux:${{ matrix.arch }} -- --publish never
+      # Android: Gradle, not electron-builder. The release APK is signed with
+      # the checked-in debug key (see android/app/build.gradle.kts) so the
+      # artifact is installable; an unsigned APK would build "fine" and then be
+      # unusable on a device.
+      - name: Setup JDK (Android)
+        if: matrix.label == 'android'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK
+        if: matrix.label == 'android'
+        uses: android-actions/setup-android@v3
+
+      - name: Build APK (Android, arm64)
+        if: matrix.label == 'android'
+        working-directory: android
+        env:
+          GRADLE_USER_HOME: ${{ github.workspace }}/android/.gradle-home
+        run: |
+          chmod +x ./gradlew
+          ./gradlew :app:assembleRelease --no-daemon
 
       - name: Assert artifact naming and bundle
         shell: bash
         run: |
           VERSION="$(node -p "require('./package.json').version")"
-          test -e "${{ matrix.bundle }}"
+          test -e "${{ matrix.bundle }}" || { echo "::error::missing ${{ matrix.bundle }}"; exit 1; }
           echo "bundle ok for v${VERSION} (${{ matrix.label }})"
-          ls -1 dist | sed 's/^/  /'
+          ls -1 dist 2>/dev/null | sed 's/^/  /' || true
 
-      # Guard the Linux artifact names explicitly: ${arch} expands per format
-      # (x86_64 for AppImage, amd64 for deb), so a casual rename would produce
-      # mislabelled downloads that still "build fine".
-      - name: Assert Linux artifact names
-        if: matrix.label == 'linux'
+      # Guard the shipped file names explicitly. A silent target drop (an
+      # electron-builder default changing, a Gradle task renaming its output)
+      # would otherwise publish a release page missing a platform.
+      - name: Assert installer names
         shell: bash
         run: |
           VERSION="$(node -p "require('./package.json').version")"
-          test -f "dist/dsh-desktop-${VERSION}-linux-x86_64.AppImage" \
-            || { echo "::error::AppImage missing or misnamed"; ls -1 dist; exit 1; }
-          test -f "dist/dsh-desktop-${VERSION}-linux-amd64.deb" \
-            || { echo "::error::deb missing or misnamed"; ls -1 dist; exit 1; }
-          echo "linux artifact names ok"
+          case '${{ matrix.label }}' in
+            windows)
+              # setup ONLY: portable/zip are not published for any platform.
+              f="dist/dsh-desktop-${VERSION}-windows-${{ matrix.arch }}-setup.exe"
+              test -f "$f" || { echo "::error::missing $f"; ls -1 dist; exit 1; }
+              ;;
+            macos)
+              # dmg ONLY: zip is no longer published for any platform.
+              f="dist/dsh-mac-desktop-${VERSION}-macos-arm64.dmg"
+              test -f "$f" || { echo "::error::missing $f"; ls -1 dist; exit 1; }
+              ;;
+            android)
+              apk="android/app/build/outputs/apk/release/app-release.apk"
+              test -f "$apk" || { echo "::error::missing $apk"; exit 1; }
+              case "$apk" in *unsigned*) exit 1 ;; esac
+              ;;
+          esac
+          echo "installer names ok (${{ matrix.label }} ${{ matrix.arch }})"

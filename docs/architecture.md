@@ -192,10 +192,13 @@ macOS 缺陷：
 ## 8. 打包与发布
 
 - 产物命名遵循 GitHub Release 约定 `<name>-<version>-<os>-<arch>.<ext>`。版本号唯一来源 `package.json#version`。
-  - macOS：`dsh-mac-desktop-<ver>-macos-<arch>.{dmg,zip}`（`build.artifactName`，**保持不变**以免既有下载链接失效）。
-  - Windows：`dsh-desktop-<ver>-windows-<arch>.{zip,exe}`、`…-windows-<arch>-setup.exe`（NSIS）、`…-windows-<arch>-portable.exe`。
+  - macOS：`dsh-mac-desktop-<ver>-macos-arm64.dmg`（仅 arm64；`build.artifactName`）。
+  - Windows：`dsh-desktop-<ver>-windows-<arch>-setup.exe`（NSIS）。安装程序是唯一的
+    Windows 产物——没有 portable、没有 zip，`build.win.artifactName` 显式覆盖顶层命名。
+  - Android：`dsh-android-<ver>-arm64.apk`（workflow 重命名）。
+  - Linux：不再发布。
 - 构建脚本：
-  - `npm run dist`（app 目录）/ `npm run dist:dmg`（DMG+ZIP）/ `npm run dist:publish`（`GH_TOKEN=<token>` 直发 GitHub）。
+  - `npm run dist`（app 目录）/ `npm run dist:dmg`（DMG）/ `npm run dist:publish`（`GH_TOKEN=<token>` 直发 GitHub）。
   - `npm run dist:win`（NSIS+便携版，双架构）/ `dist:win:x64` / `dist:win:arm64` / `dist:publish:win`。
   - Windows 目标为 `nsis`、`portable`、`zip`，`arch` 均为 `["x64","arm64"]`（Windows on ARM 是一方支持目标）。
 - 图标：`build/icon.png`（512px）会被 electron-builder 自动转成多分辨率 `.ico`，无需手工维护 ICO 文件；macOS 用 `build/icon.icns`。

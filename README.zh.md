@@ -10,15 +10,12 @@
 
 | 平台 | 架构 | 安装包 |
 |---|---|---|
-| macOS 11+ | Apple Silicon（`arm64`）、Intel（`x64`） | `.dmg`、`.zip`、`.app` |
-| Windows 10/11 | `x64`、Windows on ARM（`arm64`） | NSIS 安装程序 `.exe`、便携版 `.exe`、`.zip` |
-| Linux（Chromium 与发行版都仍在支持期内的版本，如当前 Ubuntu/Fedora/Debian） | `x64`、`arm64` | `.AppImage`、`.deb` |
-| **Android 8.0+** | `arm64-v8a`、`armeabi-v7a`、`x86_64` | `.apk`（手机竖屏 + 平板横屏） |
+| macOS 11+ | Apple Silicon（`arm64`） | `.dmg` |
+| Windows 10/11 | `x64`、Windows on ARM（`arm64`） | NSIS 安装程序 `-setup.exe` |
+| **Android 8.0+** | `arm64-v8a` | `.apk`（手机竖屏 + 平板横屏） |
 
-三个桌面平台共用同一份源码：所有平台差异只在 `src/platform.js` 与
-`src/process-scan.js` 里，Linux 是**一方支持目标**，不是「顺带能跑」。macOS 与
-Windows 安装包由发布流水线产出；Linux 包需在同一份源码的 Linux 主机上构建（见
-[快速开始](#快速开始)）——AppImage/deb 无法跨平台交叉构建。
+发布流水线只产出上表这一组产物，每个架构一个安装包——不提供 zip、便携版或
+Intel Mac 构建。Linux 仍可从源码构建和运行，但不再出现在发布产物里。
 
 桌面产物均未签名，首次启动时系统可能要求确认；Android 版为独立原生客户端，见 [android/README.md](android/README.md)。
 
@@ -69,30 +66,36 @@ open '/Applications/DeepSeek Harness.app'
 ### Windows
 
 ```powershell
-# 同时构建 x64 与 arm64（安装程序 + 便携版 + zip）
+# 同时构建 x64 与 arm64 安装程序
 powershell -ExecutionPolicy Bypass -File scripts\build-win.ps1
 
 # 或只构建单个架构
 npm run dist:win:x64        # Windows on ARM 用 dist:win:arm64
 ```
 
-安装用 `dist\dsh-desktop-<版本>-windows-<arch>-setup.exe`；免安装用
-`-portable.exe`。
+安装用 `dist\dsh-desktop-<版本>-windows-<arch>-setup.exe`。安装程序是 Windows
+唯一的发布产物，不再提供便携版或 zip。
 
-### Linux
+### Android
 
 ```sh
-npm install
-npm run dist:linux          # AppImage + deb，本机架构
-npm run dist:linux:x64      # 或 :arm64
+cd android
+./gradlew :app:assembleRelease   # → app/build/outputs/apk/release/app-release.apk
 ```
 
-Linux 包必须在 Linux 主机上构建（AppImage/deb 不能从 macOS 或 Windows 交叉构建）；
-`npm start` 三个平台都能跑。
+需要 JDK 17 与 Android SDK，详见 [android/README.md](android/README.md)。
 
-注意架构名按格式不同：`${arch}` 在 AppImage 下展开成 `x86_64`、在 deb 下是
-`amd64`（`arm64` 两者都是 `arm64`）。所以 x64 产物是
-`…-linux-x86_64.AppImage` 与 `…-linux-amd64.deb`。
+### 发布面
+
+每个平台每个受支持架构只发布一个可安装产物：
+
+| 平台 | 架构 | 产物 |
+|---|---|---|
+| macOS | arm64 | `.dmg` |
+| Windows | x64、arm64 | `-setup.exe`（NSIS） |
+| Android | arm64 | `.apk` |
+
+推送 `v*` 标签即构建并发布这一组产物；Linux 不再发布。
 
 ### 任意平台（开发态）
 

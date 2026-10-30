@@ -3,9 +3,9 @@
 #   powershell -ExecutionPolicy Bypass -File scripts\build-win.ps1
 #   powershell -ExecutionPolicy Bypass -File scripts\build-win.ps1 -Arch arm64
 #
-# Produces an NSIS installer, a portable .exe and a .zip for the chosen
-# architecture. Both x64 and arm64 are first-class targets: Windows on ARM
-# runs the arm64 build natively.
+# Produces the NSIS installer for the chosen architecture. Both x64 and arm64
+# are first-class targets: Windows on ARM runs the arm64 build natively.
+# The installer is the only published Windows artifact — no portable, no zip.
 param(
   [ValidateSet('x64', 'arm64', 'both')]
   [string]$Arch = 'both'
@@ -19,10 +19,14 @@ if (-not (Test-Path 'node_modules')) {
   npm install
 }
 
-# NSIS/portable packaging downloads helper binaries; point electron-builder at
+# NSIS packaging downloads helper binaries; point electron-builder at
 # a workspace-local cache so a locked-down profile dir cannot break the build.
 $env:ELECTRON_BUILDER_CACHE = (Join-Path (Get-Location) '.cache\electron-builder')
 $env:CSC_IDENTITY_AUTO_DISCOVERY = 'false'
+# Pin the 7z filter: the default auto-filter picks BCJ2, which the NSIS
+# extractor cannot decode and therefore silently skips every PE file. See
+# scripts/build-win.js for the full story.
+$env:ELECTRON_BUILDER_7Z_FILTER = 'BCJ'
 
 # Go through scripts/build-win.js rather than calling electron-builder here.
 # It pins ELECTRON_BUILDER_7Z_FILTER=BCJ — without it the NSIS payload is packed
@@ -43,9 +47,8 @@ if ($LASTEXITCODE -ne 0) { throw "Windows packaging failed with exit code $LASTE
 
 Write-Host ''
 Write-Host 'Built:'
-Get-ChildItem dist -Filter '*windows*' |
-  Where-Object { $_.Extension -in '.exe', '.zip' } |
+Get-ChildItem dist -Filter '*windows*-setup.exe' |
   ForEach-Object { Write-Host ("  " + $_.Name + "  (" + [math]::Round($_.Length / 1MB, 1) + " MB)") }
 Write-Host ''
-Write-Host 'Run the *-setup.exe to install, or *-portable.exe for a no-install build.'
+Write-Host 'Run the *-setup.exe to install.'
 Write-Host 'ALWAYS verify on real Windows that the installed app has "DeepSeek Harness.exe".'

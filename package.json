@@ -33,16 +33,12 @@
     "smoke": "node scripts/smoke.js",
     "icons": "bash scripts/gen-icons.sh",
     "dist": "electron-builder --mac dir",
-    "dist:dmg": "electron-builder --mac dmg zip",
+    "dist:dmg": "electron-builder --mac dmg",
     "dist:win": "node scripts/build-win.js",
     "dist:win:arm64": "node scripts/build-win.js --arm64",
     "dist:win:x64": "node scripts/build-win.js --x64",
-    "dist:linux": "electron-builder --linux AppImage deb",
-    "dist:linux:x64": "electron-builder --linux AppImage deb --x64",
-    "dist:linux:arm64": "electron-builder --linux AppImage deb --arm64",
-    "dist:publish": "electron-builder --mac dmg zip --publish always",
-    "dist:publish:win": "node scripts/build-win.js --publish always",
-    "dist:publish:linux": "electron-builder --linux AppImage deb --publish always"
+    "dist:publish": "electron-builder --mac dmg --publish always",
+    "dist:publish:win": "node scripts/build-win.js --publish always"
   },
   "devDependencies": {
     "electron": "^35.0.0",
@@ -76,9 +72,12 @@
         "NSLocalNetworkUsageDescription": "DeepSeek Harness 需要访问局域网设备以建立 SSH 隧道并连接远程 harness 服务。"
       },
       "target": [
-        "dir",
-        "dmg",
-        "zip"
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64"
+          ]
+        }
       ]
     },
     "win": {
@@ -87,20 +86,6 @@
       "target": [
         {
           "target": "nsis",
-          "arch": [
-            "x64",
-            "arm64"
-          ]
-        },
-        {
-          "target": "portable",
-          "arch": [
-            "x64",
-            "arm64"
-          ]
-        },
-        {
-          "target": "zip",
           "arch": [
             "x64",
             "arm64"
@@ -115,41 +100,6 @@
       "shortcutName": "DeepSeek Harness",
       "artifactName": "dsh-desktop-${version}-windows-${arch}-setup.${ext}",
       "uninstallDisplayName": "DeepSeek Harness ${version}"
-    },
-    "portable": {
-      "artifactName": "dsh-desktop-${version}-windows-${arch}-portable.${ext}"
-    },
-    "linux": {
-      "icon": "build/icon.png",
-      "category": "Development",
-      "executableName": "deepseek-harness",
-      "syncDesktopName": true,
-      "synopsis": "Desktop shell for the DeepSeek Harness web app",
-      "description": "Loads the DeepSeek Harness web UI in a native window and keeps the resident dsh web service deployed and up to date, locally or over SSH.",
-      "maintainer": "svengong <svengong@users.noreply.github.com>",
-      "vendor": "svengong",
-      "target": [
-        {
-          "target": "AppImage",
-          "arch": [
-            "x64",
-            "arm64"
-          ]
-        },
-        {
-          "target": "deb",
-          "arch": [
-            "x64",
-            "arm64"
-          ]
-        }
-      ]
-    },
-    "appImage": {
-      "artifactName": "dsh-desktop-${version}-linux-${arch}.${ext}"
-    },
-    "deb": {
-      "artifactName": "dsh-desktop-${version}-linux-${arch}.${ext}"
     }
   },
   "allowScripts": {

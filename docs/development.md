@@ -16,21 +16,20 @@ npm run smoke
 DSH_DESKTOP_SMOKE=1 npx electron .            # macOS / Linux
 $env:DSH_DESKTOP_SMOKE=1; npx electron .      # Windows PowerShell
 
-# 构建 macOS 应用目录 / DMG + ZIP（产物带版本号，见「9. 打包与发布」）
+# 构建 macOS 应用目录 / DMG（产物带版本号，见「9. 打包与发布」）
 npm run dist
 npm run dist:dmg
 
-# 构建 Windows 安装包（NSIS + 便携版 + zip）
-npm run dist:win          # 双架构
+# 构建 Windows 安装程序（NSIS setup）
+npm run dist:win          # 双架构（x64 + arm64）
 npm run dist:win:x64
 npm run dist:win:arm64    # Windows on ARM
 
-# 构建 Linux 安装包（AppImage + deb，必须在 Linux 主机上跑）
-npm run dist:linux        # 本机架构
-npm run dist:linux:x64    # 或 dist:linux:arm64
+# 构建 Android APK（arm64）
+cd android && ./gradlew :app:assembleRelease
 ```
 
-> **三条打包链路互不相同**（dmg/zip、nsis/portable、AppImage/deb）。改了
+> **三条打包链路互不相同**（dmg、NSIS setup、Gradle APK）。改了
 > `package.json#build` 或壳里任何与平台有关的东西，三个平台都要跑一次；CI 与
 > release 流水线都已覆盖三个平台。
 
@@ -52,11 +51,10 @@ npm run dist:linux:x64    # 或 dist:linux:arm64
 > **0**，装出来的目录里 `locales/`、`*.pak`、`resources/` 一应俱全，看着像装好了，
 > 但那个能启动应用的可执行文件不在。
 >
-> **受影响的产物是 `-setup.exe` 和 `-portable.exe` 两种**：portable 也是 NSIS
-> 自解压包，解压走的是同一个 Nsis7z 解码器（解到 `%TEMP%` 再启动），所以它和
-> 安装器一样会丢文件 —— 而且更容易被误判成"架构不支持"，因为它双击后什么都不发生。
-> `.zip` 不受影响（用户自己的解压工具解，不经过 Nsis7z），但仍由同一条命令产出，
-> 保证三个渠道产物一致。
+> **受影响的产物是 NSIS 自解压包**：安装器 `-setup.exe` 与（历史产物）`-portable.exe`
+> 解压时都走同一个 Nsis7z 解码器，所以两者一样会丢文件 —— 而且 portable 更容易被
+> 误判成"架构不支持"，因为它双击后什么都不发生。现在只发布 `-setup.exe`，
+> 校验逻辑仍会检查 `dist/` 里残留的旧 `-portable.exe`。
 >
 > Windows 11 ARM64 实测对比（同一个包，只改滤镜）：
 >
@@ -394,19 +392,14 @@ DSH_DESKTOP_SMOKE=1 npx electron .       # Electron 冒烟（菜单/Dock/actions
 
 - 产物命名遵循 GitHub Release 约定 `<name>-<version>-<os>-<arch>.<ext>`
   （`package.json#build.artifactName`，小写连字符、无空格、含版本与架构）：
-  - macOS：`dsh-mac-desktop-<ver>-macos-{arm64,x64}.{dmg,zip}` —— **保持不变**，
-    避免既有下载链接与 `latest-mac.yml` 失效。
-  - Windows：`dsh-desktop-<ver>-windows-{x64,arm64}-setup.exe`（NSIS）、
-    `…-portable.exe`、`…-windows-{x64,arm64}.zip`。
-  - Linux：`dsh-desktop-<ver>-linux-{x86_64,arm64}.AppImage`、
-    `…-linux-{amd64,arm64}.deb`。**架构名按格式不同**（AppImage 用 `x86_64`，deb 用
-    `amd64`），由 `build.appImage` / `build.deb` 各自的 `artifactName` 决定；
-    `build.linux.executableName` 固定为 `deepseek-harness`（unpacked 目录里的
-    二进制名，CI 靠它做断言）。
+  - macOS：`dsh-mac-desktop-<ver>-macos-arm64.dmg`（仅 arm64，无 zip）。
+  - Windows：`dsh-desktop-<ver>-windows-{x64,arm64}-setup.exe`（NSIS，仅此一种）。
+  - Android：`dsh-android-<ver>-arm64.apk`（发布时由 workflow 重命名）。
+  - Linux：不再发布（源码仍可构建，见上）。
 - 版本号唯一来源是 `package.json#version`（semver）；打包时请先 `npm version`
   或手工提升版本，再打 `v<version>` 标签推送，GitHub Actions 自动构建并发布。
 - 本地打包：
-  - macOS：`npm run dist`（app 目录，供 install.sh 安装）、`npm run dist:dmg`（DMG + ZIP）。
+  - macOS：`npm run dist`（app 目录，供 install.sh 安装）、`npm run dist:dmg`（仅 DMG，arm64）。
   - Windows：`powershell -ExecutionPolicy Bypass -File scripts\build-win.ps1`（一键双架构），
     或 `npm run dist:win` / `dist:win:x64` / `dist:win:arm64`。
   - 直接发布到 GitHub Releases：`GH_TOKEN=<token> npm run dist:publish` / `dist:publish:win`。

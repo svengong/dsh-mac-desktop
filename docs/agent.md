@@ -174,9 +174,11 @@ node --check <改动的 .js>
 走的是完全不同实现，只在一个平台上绿等于没验证。Linux 与 macOS 同属 POSIX 分支，
 通常跟着 macOS 一起过；CI 已在 `ubuntu-24.04` 上跑同一套冒烟。
 
-改了打包配置（`package.json#build` / 工作流）后，Linux 侧**必须真跑一次**
-`npm run dist:linux`：架构名、`executableName`、desktop 文件名都只在真实产物里
-才看得见，配置校验不会替你发现 `…-macos-` 这种错名。
+改了打包配置（`package.json#build` / 工作流）后**必须真跑一次目标平台**：
+架构名、`executableName`、产物文件名都只在真实产物里才看得见，配置校验不会替你
+发现 `…-macos-` 这种错名。当前发布面是 macOS `dmg`（arm64）、Windows
+`-setup.exe`（x64/arm64）、Android `apk`（arm64）；Linux 不再发布，改打包配置时
+不必再跑 `dist:linux`（源码仍可构建）。
 
 UI 改动额外检查：
 

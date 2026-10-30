@@ -1,13 +1,22 @@
 name: Release
 
-# 自动发布：推送 v* 标签时构建 macOS（arm64/x64）、Windows（x64/arm64）与
-# Linux（x64/arm64）安装包，并发布 GitHub Release；也可手动触发
+# 自动发布：推送 v* 标签时构建 macOS（arm64）、Windows（x64 + arm64）与
+# Android（arm64）安装包，并发布 GitHub Release；也可手动触发
 # （Actions → Release → Run workflow），此时必须填写要发布的 tag。
 #
-# 平台矩阵刻意分开跑：macOS 用 electron-builder 的 dmg/zip 目标，Windows 用
-# nsis/portable/zip，Linux 用 AppImage/deb。三个平台都必须产出 arm64 与 x64 ——
-# Windows on ARM 已进入正式支持（Snapdragon X 系列），Electron 也从 33 起提供
-# win32-arm64 产物；Linux arm64 同样是一方支持目标。
+# 发布面刻意收窄：
+#
+#  - macOS 只出 arm64，且只出 dmg。macos-14 本身就是 arm64 runner，交叉构建
+#    x64 只会多一个没人验证的产物；zip 与 dmg 是同一份 .app 的另一种封装，
+#    发布页上并存只会让人犹豫装哪个。
+#  - Windows 出 x64 与 arm64，但只出 NSIS setup。portable/zip 同理是同一份
+#    载荷的另两种封装；setup 带升级与卸载，是唯一有安装语义的形态。
+#  - Android 只出 arm64。应用是纯 Kotlin/Compose、没有 jniLibs，APK 天然与
+#    ABI 无关；显式钉住 arm64 是为了让「只发 64 位」在配置里可见，而不是靠
+#    「反正没有原生库」侥幸成立。
+#  - Linux 不再发布。
+#
+# 一句话：每个平台只留「该架构的安装包」，不留 zip/portable 这类并列封装。
 on:
   push:
     tags:
@@ -34,14 +43,10 @@ concurrency:
 jobs:
   build:
     name: Build ${{ matrix.os }} ${{ matrix.arch }}
-    # 单台 arm64 macOS runner 交叉构建两种 macOS 架构（macos-13/x64 已退役，勿用）。
-    # Windows 直接用原生 runner：electron-builder 在那里打包 nsis/portable 最稳，
+    # macOS：macos-14 是 arm64 runner，一次原生构建即可，不再交叉出 x64。
+    # Windows：直接用原生 runner，electron-builder 在那里打包 NSIS 最稳，
     # 且 win32-arm64 的 Electron 产物同样可在 x64 runner 上交叉构建。
-    #
-    # Linux 不能用交叉构建的省事路径：deb 走 fpm，arm64 需要 aarch64 的
-    # 打包工具链，x64 runner 上装不出来；AppImage 还要下载对应架构的
-    # appimage 运行库。所以这里用原生架构 runner（ubuntu-24.04-arm 是
-    # GitHub 官方 arm64 runner），各打各的架构。
+    # Android：APK 与宿主架构无关，单跑一个 ubuntu runner 即可。
     strategy:
       fail-fast: false
       matrix:
@@ -49,27 +54,20 @@ jobs:
           - os: macos-14
             label: macos
             arch: arm64
-            flags: --mac dmg zip --arm64
-          - os: macos-14
-            label: macos
-            arch: x64
-            flags: --mac dmg zip --x64
+            flags: --mac dmg --arm64
           - os: windows-latest
             label: windows
             arch: x64
-            flags: --win nsis portable zip --x64
+            flags: --win nsis --x64
           - os: windows-latest
             label: windows
             arch: arm64
-            flags: --win nsis portable zip --arm64
+            flags: --win nsis --arm64
           - os: ubuntu-24.04
-            label: linux
-            arch: x64
-            flags: --linux AppImage deb --x64
-          - os: ubuntu-24.04-arm
-            label: linux
+            label: android
             arch: arm64
-            flags: --linux AppImage deb --arm64
+            # APK 是单个文件，不按架构命名：下面按固定的 app-release.apk 断言。
+            flags: ''
     runs-on: ${{ matrix.os }}
     env:
       CSC_IDENTITY_AUTO_DISCOVERY: 'false' # 未签名构建，绝不误选钥匙串身份
@@ -131,29 +129,74 @@ jobs:
         if: matrix.label == 'windows'
         run: node scripts/build-win.js --${{ matrix.arch }} --publish never
 
-      # Linux shares electron-builder with macOS, so it can be called directly
-      # (unlike Windows, which needs the BCJ pin). The deb target hard-fails
-      # without homepage + author in package.json — both are present.
-      - name: Package installers (Linux)
-        if: matrix.label == 'linux'
-        run: npx electron-builder ${{ matrix.flags }} --publish never
+      # Android is a Gradle build, not electron-builder. JDK 17 + the
+      # platforms;android-35 / build-tools;35.0.0 packages are what
+      # android/README.md requires; setup-java and setup-gradle cache the
+      # wrapper distribution so the job does not re-download Gradle 8.9 every
+      # release.
+      #
+      # GRADLE_USER_HOME is pointed into the checkout on purpose: the runner's
+      # ~/.gradle is writable, but keeping it local makes this job behave the
+      # same way as the documented sandboxed build in android/README.md.
+      - name: Setup JDK
+        if: matrix.label == 'android'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
 
-      # ${arch} expands per format on Linux (x86_64 for AppImage, amd64 for
-      # deb), so assert the real names here instead of trusting the config.
-      - name: Assert Linux artifact names
-        if: matrix.label == 'linux'
+      - name: Setup Android SDK
+        if: matrix.label == 'android'
+        uses: android-actions/setup-android@v3
+
+      - name: Package APK (Android, arm64)
+        if: matrix.label == 'android'
+        working-directory: android
+        env:
+          GRADLE_USER_HOME: ${{ github.workspace }}/android/.gradle-home
+        run: |
+          chmod +x ./gradlew
+          ./gradlew :app:assembleRelease --no-daemon
+          # Name the artifact after the version so the release page shows it.
+          # release is signed with the checked-in debug key (see
+          # app/build.gradle.kts), so the output is app-release.apk rather than
+          # an unsigned APK nobody could install.
+          VERSION="$(node -p "require('../package.json').version")"
+          APK="app/build/outputs/apk/release/app-release.apk"
+          if [ ! -f "$APK" ]; then
+            APK="$(ls app/build/outputs/apk/release/*.apk 2>/dev/null | head -1)"
+          fi
+          test -n "$APK" && test -f "$APK" || { echo "::error::no APK produced"; ls -R app/build/outputs 2>/dev/null; exit 1; }
+          case "$APK" in
+            *unsigned*) echo "::error::APK is unsigned and cannot be installed: $APK"; exit 1 ;;
+          esac
+          mkdir -p ../dist
+          cp "$APK" "../dist/dsh-android-${VERSION}-arm64.apk"
+          echo "apk: dist/dsh-android-${VERSION}-arm64.apk"
+
+      # Assert the exact file names instead of trusting the build config: a
+      # silent target drop (an electron-builder default changing, a Gradle task
+      # renaming its output) otherwise ships a release page missing a platform.
+      - name: Assert release artifacts
         shell: bash
         run: |
-          case '${{ matrix.arch }}' in
-            x64)   ARCH_APPIMAGE=x86_64; ARCH_DEB=amd64 ;;
-            arm64) ARCH_APPIMAGE=arm64;  ARCH_DEB=arm64 ;;
-          esac
           VERSION="$(node -p "require('./package.json').version")"
-          for f in "dsh-desktop-${VERSION}-linux-${ARCH_APPIMAGE}.AppImage" \
-                   "dsh-desktop-${VERSION}-linux-${ARCH_DEB}.deb"; do
-            test -f "dist/$f" || { echo "::error::missing $f"; ls -1 dist; exit 1; }
-          done
-          echo "linux artifacts ok (${{ matrix.arch }})"
+          case '${{ matrix.label }}' in
+            macos)
+              f="dsh-mac-desktop-${VERSION}-macos-arm64.dmg"
+              test -f "dist/$f" || { echo "::error::missing $f"; ls -1 dist; exit 1; }
+              ;;
+            windows)
+              # setup ONLY — portable/zip are not published for any platform.
+              f="dsh-desktop-${VERSION}-windows-${{ matrix.arch }}-setup.exe"
+              test -f "dist/$f" || { echo "::error::missing $f"; ls -1 dist; exit 1; }
+              ;;
+            android)
+              f="dsh-android-${VERSION}-arm64.apk"
+              test -f "dist/$f" || { echo "::error::missing $f"; ls -1 dist; exit 1; }
+              ;;
+          esac
+          echo "artifacts ok (${{ matrix.label }} ${{ matrix.arch }})"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -161,10 +204,8 @@ jobs:
           name: dsh-desktop-${{ matrix.label }}-${{ matrix.arch }}
           path: |
             dist/*.dmg
-            dist/*.zip
-            dist/*.exe
-            dist/*.AppImage
-            dist/*.deb
+            dist/*-setup.exe
+            dist/*.apk
             dist/latest-*.yml
           if-no-files-found: error
 

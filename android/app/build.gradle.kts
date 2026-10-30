@@ -35,6 +35,18 @@ android {
         release {
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            // Sign with the checked-in debug key so the released APK is
+            // INSTALLABLE. Without a signingConfig the release build emits
+            // `app-release-unsigned.apk`, which Android refuses to install —
+            // a sideload-only app has no Play signing step to fall back on, so
+            // an unsigned artifact would be a download that cannot be opened.
+            //
+            // This is not a secret: the key is the well-known AOSP debug
+            // keystore, already gitignored-adjacent in android/.keystore/ and
+            // deliberately shared so builds are reproducible anywhere. It
+            // provides no security and MUST be replaced with a real upload key
+            // the day this app is distributed through a store.
+            signingConfig = signingConfigs.getByName("debug")
         }
     }
 

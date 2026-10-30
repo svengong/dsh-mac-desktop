@@ -10,17 +10,14 @@ The shell is a **thin wrapper**: it loads a fixed URL and only ever runs git/pnp
 
 | Platform | Architectures | Installers |
 |---|---|---|
-| macOS 11+ | Apple Silicon (`arm64`), Intel (`x64`) | `.dmg`, `.zip`, `.app` |
-| Windows 10/11 | `x64`, Windows on ARM (`arm64`) | NSIS `.exe` installer, portable `.exe`, `.zip` |
-| Linux (distros still supported by Chromium & vendor — e.g. current Ubuntu/Fedora/Debian) | `x64`, `arm64` | `.AppImage`, `.deb` |
-| **Android 8.0+** | `arm64-v8a`, `armeabi-v7a`, `x86_64` | `.apk` (phone portrait + tablet landscape) |
+| macOS 11+ | Apple Silicon (`arm64`) | `.dmg` |
+| Windows 10/11 | `x64`, Windows on ARM (`arm64`) | NSIS `-setup.exe` |
+| **Android 8.0+** | `arm64-v8a` | `.apk` (phone portrait + tablet landscape) |
 
-The three desktop platforms share one source tree: every OS-specific difference
-lives in `src/platform.js` and `src/process-scan.js`, so Linux is a first-class
-target rather than a "happens to run" one. macOS and Windows installers are
-produced by the release workflow; Linux packages are built from the same source
-on a Linux host (see [Quick start](#quick-start)), since AppImage/deb cannot be
-cross-built.
+The release workflow publishes exactly that set — one installable artifact per
+architecture, with no zip or portable variants and no Intel Mac build. Linux
+still builds and runs from the same source tree (see [Quick start](#quick-start))
+but is no longer a published target.
 
 Every desktop build is unsigned, so the OS may ask for confirmation on first
 launch. The Android client is a separate native app — see
@@ -79,27 +76,39 @@ open '/Applications/DeepSeek Harness.app'
 ### Windows
 
 ```powershell
-# builds x64 AND arm64 (installer + portable + zip)
+# builds the x64 AND arm64 installers
 powershell -ExecutionPolicy Bypass -File scripts\build-win.ps1
 
 # or one architecture only
 npm run dist:win:x64        # dist:win:arm64 for Windows on ARM
 ```
 
-Then run `dist\dsh-desktop-<version>-windows-<arch>-setup.exe` to install, or
-the `-portable.exe` for a no-install build.
+Then run `dist\dsh-desktop-<version>-windows-<arch>-setup.exe` to install.
+The installer is the only Windows artifact published — there is no portable or
+zip variant.
 
-### Linux
+### Android
 
 ```sh
-npm install
-npm run dist:linux          # AppImage + deb, host architecture
-npm run dist:linux:x64      # or :arm64
+cd android
+./gradlew :app:assembleRelease   # → app/build/outputs/apk/release/app-release.apk
 ```
 
-Linux packages must be built on a Linux host (AppImage/deb cannot be
-cross-built from macOS or Windows); `npm start` works on all three platforms
-for development.
+Requires JDK 17 and the Android SDK; see [android/README.md](android/README.md).
+
+### Release surface
+
+Each platform ships exactly one installable artifact per supported
+architecture:
+
+| Platform | Architectures | Artifact |
+|---|---|---|
+| macOS | arm64 | `.dmg` |
+| Windows | x64, arm64 | `-setup.exe` (NSIS) |
+| Android | arm64 | `.apk` |
+
+Pushing a `v*` tag builds and publishes exactly that set; Linux is not
+published.
 
 Note the arch spelling differs per format: `${arch}` expands to `x86_64` for
 AppImage and `amd64` for deb (`arm64` is `arm64` in both), so an x64 build

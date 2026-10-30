@@ -95,6 +95,38 @@ async function main() {
   assert.strictEqual(migrated.ssh.host, 'legacy-host')
   assert.strictEqual(migrated.activeDeviceId, 'ssh:legacy-host')
 
+  // The release surface is deliberately narrow: macOS arm64 only, Windows
+  // NSIS setup for x64 + arm64, Android arm64. Asserting it here keeps a
+  // future edit from quietly re-adding a target nobody downloads (or, worse,
+  // dropping one that is published).
+  {
+    const pkg = require('../package.json')
+    const winTargets = pkg.build.win.target
+    assert.deepStrictEqual(
+      winTargets, [{ target: 'nsis', arch: ['x64', 'arm64'] }],
+      'Windows must ship NSIS setup only, for x64 and arm64',
+    )
+    const macTargets = pkg.build.mac.target
+    const macNames = macTargets.map(t => (typeof t === 'string' ? t : t.target)).sort()
+    assert.deepStrictEqual(macNames, ['dmg'], 'macOS ships the dmg installer only')
+    for (const t of macTargets) {
+      if (typeof t === 'object' && t.arch !== undefined) {
+        assert.deepStrictEqual(t.arch, ['arm64'], `macOS ${t.target} must be arm64 only`)
+      }
+    }
+    // No zip on any platform: one installable artifact per arch.
+    assert.deepStrictEqual(
+      winTargets.filter(t => /zip|portable/i.test(t.target)), [],
+      'Windows must not ship a zip or portable build',
+    )
+    assert.strictEqual(pkg.build.linux, undefined, 'Linux is no longer published')
+    assert.strictEqual(pkg.build.appImage, undefined, 'Linux is no longer published')
+    assert.strictEqual(pkg.build.deb, undefined, 'Linux is no longer published')
+    for (const script of ['dist:linux', 'dist:linux:x64', 'dist:linux:arm64', 'dist:publish:linux']) {
+      assert.strictEqual(pkg.scripts[script], undefined, `${script} must be gone with Linux`)
+    }
+  }
+
   // machine identity: a device carrying a machineId keys under machine:<id>;
   // without one it falls back to the ssh alias until the first connect.
   const machineId = '11111111-2222-3333-4444-555555555555'

@@ -39,11 +39,12 @@ if (!env.ELECTRON_BUILDER_CACHE) env.ELECTRON_BUILDER_CACHE = path.join(root, '.
 if (!env.CSC_IDENTITY_AUTO_DISCOVERY) env.CSC_IDENTITY_AUTO_DISCOVERY = 'false'
 
 const passthrough = process.argv.slice(2)
-// All three Windows targets: the NSIS installer, the no-install portable, and
-// the plain zip. Only nsis/portable embed an app-*.7z; the zip is extracted by
-// the user's own unzip, so it is immune to the BCJ2 installer bug but is still
-// built here so every distribution channel comes from one command.
-const args = ['--win', 'nsis', 'portable', 'zip', ...passthrough]
+// NSIS setup ONLY. The portable and zip targets are the same payload in other
+// wrappers; the release surface was narrowed to the one artifact that has
+// install/upgrade/uninstall semantics. Narrowing here (not just in the release
+// workflow) keeps every Windows entry point consistent — the workflow, the npm
+// scripts and a manual run all produce the same set.
+const args = ['--win', 'nsis', ...passthrough]
 const bin = path.join(root, 'node_modules', '.bin', process.platform === 'win32' ? 'electron-builder.cmd' : 'electron-builder')
 const command = fs.existsSync(bin) ? bin : 'electron-builder'
 
@@ -90,9 +91,10 @@ function inspectPayloadMethod(setup) {
 }
 
 const dist = path.join(root, 'dist')
-// BOTH the installer and the portable are NSIS self-extractors that decompress
-// an embedded app-*.7z through the same Nsis7z decoder, so both can silently
-// drop the main executable. They must both be checked.
+// The NSIS setup is a self-extractor that decompresses an embedded app-*.7z
+// through the Nsis7z decoder, so it can silently drop the main executable.
+// `-portable` is still matched: a dist/ left over from an older build must not
+// slip past the guard just because this run no longer produces that target.
 const setups = fs.existsSync(dist)
   ? fs.readdirSync(dist).filter(name => /^dsh-desktop-.*-windows-.*(-setup|-portable)\.exe$/i.test(name))
   : []

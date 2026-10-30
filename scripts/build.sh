@@ -21,4 +21,4 @@ echo
 # to dodge the safe-delete guard) and `.old` sorts first, so the printed path
 # pointed at a days-old bundle — see scripts/install.sh.
 echo "Built: $(find dist -mindepth 2 -maxdepth 2 -name 'DeepSeek Harness.app' -print -quit)"
-echo "Versioned DMG/ZIP (GitHub Release artifacts): npm run dist:dmg"
+echo "Versioned DMG (GitHub Release artifact): npm run dist:dmg"

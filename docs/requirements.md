@@ -160,8 +160,8 @@ VS Code Remote——用户可以选择本机或 SSH 远程主机运行 Harness�
 | FR-7.8 | 窗口外壳按平台使用不同原生控件：macOS `hiddenInset` + `trafficLightPosition`（左侧红黄绿，壳边框留 84px）；Windows/Linux `hidden` + `titleBarOverlay`（右侧最小化/最大化/关闭，留白改到右侧）。壳边框高度恒为 46px 且等于 overlay 高度。 |
 | FR-7.9 | 菜单与托盘按平台挂载：macOS 用应用菜单承载 连接/更新，并提供 Dock 右键菜单；Windows/Linux 用窗口菜单但默认隐藏菜单栏（保留 `CmdOrCtrl` 加速键），操作入口同时出现在托盘菜单。快捷键文案按平台显示 ⌘ 或 Ctrl。 |
 | FR-7.10 | 托盘图标按平台选取：macOS 用模板图（黑 + alpha，随菜单栏自动着色）；Windows/Linux 用彩色应用图标缩放到 16px（黑色模板图在深色任务栏不可见）。 |
-| FR-7.11 | 三个平台均覆盖双架构：release 工作流产出 macOS `arm64`/`x64` 与 Windows `arm64`/`x64`（含 Windows on ARM）；Linux `arm64`/`x64` 在同一份源码的 Linux 主机上构建（AppImage/deb 不能交叉构建）。CI 在 macOS 与 Windows runner 上分别跑冒烟与打包预检。 |
-| FR-7.12 | 安装包命名按平台区分：macOS 保持 `dsh-mac-desktop-<ver>-macos-<arch>.<ext>`（向后兼容既有下载链接）；Windows 为 `dsh-desktop-<ver>-windows-<arch>-setup.exe` / `-portable.exe` / `.zip`；Linux 为 `dsh-desktop-<ver>-linux-<arch>.<ext>`，但**架构名按格式不同**——AppImage 用 `x86_64`、deb 用 `amd64`（`arm64` 两者一致），由 `build.appImage` / `build.deb` 各自的 `artifactName` 决定。**顶层 `artifactName` 是 macOS 命名**，只依赖它会产出带 `-macos-` 后缀的错误文件名。 |
+| FR-7.11 | 发布面按平台收窄：release 工作流产出 macOS `arm64`（仅）、Windows `x64`/`arm64`（含 Windows on ARM）、Android `arm64`；Linux 不再发布（仍可由源码构建）。**每个架构只发布一个安装包**，不提供 zip / 便携版。CI 在 macOS、Windows、Ubuntu runner 上分别跑冒烟与打包预检。 |
+| FR-7.12 | 安装包命名按平台区分：macOS 为 `dsh-mac-desktop-<ver>-macos-arm64.dmg`；Windows 为 `dsh-desktop-<ver>-windows-{x64,arm64}-setup.exe`（NSIS）；Android 为 `dsh-android-<ver>-arm64.apk`。**顶层 `artifactName` 是 macOS 命名**，Windows 的 `build.win.artifactName` 必须显式覆盖，否则会产出带 `-macos-` 后缀的错误文件名。 |
 | FR-7.13 | 冒烟测试必须跨平台：不得依赖 `/bin/sh`、`/bin/echo`、`/bin/sleep`、`/bin/zsh` 等 POSIX 路径；子进程测试统一用当前 node 执行内联脚本。当宿主拒绝进程枚举（沙箱、无 Full Disk Access）时，依赖枚举的断言降级跳过并显式提示，而不是报失败。 |
 ## 4. 关键边缘场景
 
@@ -191,8 +191,8 @@ VS Code Remote——用户可以选择本机或 SSH 远程主机运行 Harness�
   可执行文件命名、home 展开、node 分发归档形状、`current` 指针原子切换、
   netstat/CIM 解析、npm 定位、ssh 配置路径、干净子进程 PATH、killTree 幂等）。
 - `DSH_DESKTOP_SMOKE=1 npx electron .` 输出 `ok:true`。
-- `npm run dist:win:x64` 与 `npm run dist:win:arm64` 各产出一份 NSIS 安装包、
-  一份便携版与一份 zip，命名符合 FR-7.12。
+- `npm run dist:win:x64` 与 `npm run dist:win:arm64` 各产出一份 NSIS 安装包
+  （`-setup.exe`），不再产出便携版或 zip，命名符合 FR-7.12。
 - `npm start` 后 `~/.dsh-dev/settings.json` 与 `~/.dsh-dev/logs/` 正常生成，不触碰
   `~/Library/Application Support/DeepSeek Harness`。
 - 主窗口顶部 46px 工具栏：macOS 可见红黄绿按钮且未与品牌区重叠；Windows
