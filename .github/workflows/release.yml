@@ -152,6 +152,21 @@ jobs:
           packages: 'platforms;android-35 build-tools;35.0.0'
           log-accepted-android-sdk-licenses: true
 
+      # android/.keystore/ is gitignored (it holds the AOSP debug key), so a
+      # fresh checkout has none and the release type — which signs with it so
+      # the APK is installable — would fail to build. Generate it here.
+      - name: Generate debug keystore
+        if: matrix.label == 'android'
+        working-directory: android
+        run: |
+          mkdir -p .keystore
+          keytool -genkeypair -v \
+            -keystore .keystore/debug.keystore \
+            -storepass android -keypass android \
+            -alias androiddebugkey \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=Android Debug,O=Android,C=US"
+
       - name: Package APK (Android, arm64)
         if: matrix.label == 'android'
         working-directory: android
