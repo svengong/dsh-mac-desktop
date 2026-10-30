@@ -114,6 +114,29 @@ async function main() {
         assert.deepStrictEqual(t.arch, ['arm64'], `macOS ${t.target} must be arm64 only`)
       }
     }
+    // The macOS bundle MUST be ad-hoc signed (`identity: '-'`).
+    //
+    // With `identity: null` electron-builder skips signing entirely ("skipped
+    // macOS code signing reason=identity explicitly is set to null"), leaving
+    // only the Electron binary's own linker signature: INFO.PLIST NOT BOUND,
+    // SEALED RESOURCES NONE, and `codesign --verify` fails with "code has no
+    // resources but signature indicates they must be present". Gatekeeper then
+    // reports a downloaded copy as "damaged and can't be opened" — a dead end
+    // with no UI escape, forcing `xattr -cr` on every user. Ad-hoc signing
+    // seals the bundle so the app at least reaches the ordinary "unidentified
+    // developer" prompt, which right-click → Open clears.
+    assert.strictEqual(
+      pkg.build.mac.identity, '-',
+      "macOS must be ad-hoc signed (identity: '-'), not skipped (identity: null)",
+    )
+    // Hardened runtime is only meaningful for notarization, which needs a paid
+    // Apple account. Combined with ad-hoc signing it makes library validation
+    // reject Electron's own frameworks unless an extra entitlement is added,
+    // so it must stay off while we ship ad-hoc.
+    assert.strictEqual(
+      pkg.build.mac.hardenedRuntime, false,
+      'hardenedRuntime must be off for an ad-hoc signed build',
+    )
     // No zip on any platform: one installable artifact per arch.
     assert.deepStrictEqual(
       winTargets.filter(t => /zip|portable/i.test(t.target)), [],

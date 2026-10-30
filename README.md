@@ -19,8 +19,31 @@ architecture, with no zip or portable variants and no Intel Mac build. Linux
 still builds and runs from the same source tree (see [Quick start](#quick-start))
 but is no longer a published target.
 
-Every desktop build is unsigned, so the OS may ask for confirmation on first
-launch. The Android client is a separate native app — see
+### macOS: the first launch
+
+The `.dmg` is **ad-hoc signed, not notarized** (notarization needs a paid Apple
+Developer account). Ad-hoc signing is what makes the bundle self-consistent:
+without it the app is only linker-signed, and Gatekeeper then reports a
+downloaded copy as *"DeepSeek Harness is damaged and can't be opened"* — a dead
+end with no way forward through the UI.
+
+With ad-hoc signing the verdict is the usual *"unidentified developer"* one,
+which you can clear yourself. Either:
+
+- **Right-click the app → 打开 / Open**, then confirm — the recommended way,
+  one time only; or
+- drag it to `/Applications` and run:
+
+  ```sh
+  xattr -cr "/Applications/DeepSeek Harness.app"
+  ```
+
+  which strips the quarantine flag so the app launches normally. Skip this if
+  you already installed via right-click → Open; it is a workaround for the
+  damaged-bundle case, not a required step.
+
+Other desktop builds are unsigned for the same reason, so Windows SmartScreen
+may also ask for confirmation. The Android client is a separate native app — see
 [android/README.md](android/README.md).
 
 ## Highlights

@@ -17,7 +17,28 @@
 发布流水线只产出上表这一组产物，每个架构一个安装包——不提供 zip、便携版或
 Intel Mac 构建。Linux 仍可从源码构建和运行，但不再出现在发布产物里。
 
-桌面产物均未签名，首次启动时系统可能要求确认；Android 版为独立原生客户端，见 [android/README.md](android/README.md)。
+### macOS 首次启动
+
+`.dmg` 里的 app 是 **ad-hoc 签名，未做公证**（公证需要付费的 Apple 开发者账号）。
+ad-hoc 签名解决的是「app 包自身是否自洽」：不做这一步，Electron 产物只有二进制自带的
+链接器签名，包内资源没有封存，Gatekeeper 对下载来的副本会直接报
+**「DeepSeek Harness 已损坏，无法打开」**——那是个没有出路的死胡同，界面上没有任何
+按钮能继续。
+
+ad-hoc 签名之后，系统给的是常见的「无法验证开发者」，可以自行放行。二选一：
+
+- **右键点 app → 打开**，再确认一次。推荐这条，只需一次；或
+- 拖进 `/Applications` 后执行：
+
+  ```sh
+  xattr -cr "/Applications/DeepSeek Harness.app"
+  ```
+
+  它会清掉 quarantine 标记，之后正常双击即可。已经用右键「打开」装过的**不需要**
+  再执行——这条是给「已损坏」提示的兜底手段，不是必须步骤。
+
+Windows 版同样未签名，SmartScreen 可能要求确认。Android 版为独立原生客户端，
+见 [android/README.md](android/README.md)。
 
 ## 核心特色
 
