@@ -154,7 +154,20 @@ async function main() {
     newTag = 'v' + newVersion.replace(/^v/, '')
     console.log('\n已创建版本 ' + newVersion + ' 与标签 ' + newTag + '。')
   } else {
-    console.log('\n将发布当前版本 ' + currentTag + '。')
+    // publish-current must CREATE the tag before pushing it. `npm version` is
+    // what normally makes one; without that step the old code went straight to
+    // `git push origin v<version>` and always failed with
+    //   error: src refspec v0.10.7 does not match any
+    // leaving the release half-done: main pushed, tag missing, no workflow run.
+    newTag = currentTag
+    const existing = sh('git tag -l ' + newTag, { allowFail: true })
+    if (existing === '') {
+      sh('git tag -a ' + newTag + ' -m "' + newTag + '"')
+      console.log('\n已创建标签 ' + newTag + '。')
+    } else {
+      console.log('\n标签 ' + newTag + ' 已存在（本地）。')
+    }
+    console.log('将发布当前版本 ' + currentTag + '。')
   }
 
   if (!yes) {
