@@ -2550,10 +2550,17 @@ const actions = {
       presentWindow(target.window)
       return target
     }
-    if (target.session.connection.status.state !== 'ready') {
-      dialog.showErrorBox('尚未连接', '当前状态：' + target.session.connection.status.detail + '\n\n可在「连接 → 重新连接」或「连接设置」中处理。')
-      return target
-    }
+    // Never gate this on a MODAL. "打开 Harness" is reachable from the tray
+    // icon (a single click), the app menu and the dock. During startup the
+    // connection is legitimately `connecting` for many seconds, so a user who
+    // clicks the tray to see what is happening got a blocking dialog saying
+    // "尚未连接 · 正在连接…" — which is not an error at all, and on Windows it
+    // arrived repeatedly for a connection that then went on to succeed.
+    //
+    // Showing the harness tab is always the right answer: the shell frame
+    // renders the loading panel (with live log and a cancel action) while
+    // connecting, and the terminal launcher when idle. The window itself is
+    // the status surface; no dialog is needed.
     setWorkspaceView(target, 'harness')
     presentWindow(target.window)
     return target

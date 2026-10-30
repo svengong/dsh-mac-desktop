@@ -223,10 +223,23 @@ function defaultLoginShell() {
  * command path instead: a shortcut launch still gets `%LOCALAPPDATA%`-style
  * per-user installs that Explorer's PATH may omit.
  */
+/**
+ * Short timeout for the PROBE spawns inside resolveTools.
+ *
+ * Probing a tool that is not installed must be cheap. These are `spawnSync`
+ * calls on the main process, so every millisecond they take is a millisecond
+ * the whole UI is frozen — and 15s per candidate (the old value) meant a cold
+ * Windows start with antivirus scanning powershell.exe could block the main
+ * process for the entire budget, which is exactly the "settings panel is white
+ * for a long time" symptom. A tool that cannot answer `--version` in a couple
+ * of seconds is not usable for our purposes anyway.
+ */
+const PROBE_TIMEOUT_MS = 4000
+
 function findViaLoginShell(name, shellPath) {
   if (IS_WINDOWS) return findViaPowerShell(name)
   const shell = shellPath || defaultLoginShell()
-  const result = spawnSync(shell, ['-l', '-c', `command -v ${name}`], { env: process.env, encoding: 'utf8', timeout: 15_000 })
+  const result = spawnSync(shell, ['-l', '-c', `command -v ${name}`], { env: process.env, encoding: 'utf8', timeout: PROBE_TIMEOUT_MS })
   if (result.status !== 0 || !result.stdout) return ''
   return firstPathLine(result.stdout)
 }
@@ -237,7 +250,7 @@ function findViaPowerShell(name) {
     const result = spawnSync(exe, ['-NoProfile', '-NonInteractive', '-Command', script], {
       env: process.env,
       encoding: 'utf8',
-      timeout: 15_000,
+      timeout: PROBE_TIMEOUT_MS,
       windowsHide: true,
     })
     if (result.status !== 0 || !result.stdout) continue
@@ -354,8 +367,38 @@ function childEnv(settings, nodePath) {
   return env
 }
 
+/**
+ * Memoised resolveTools results, keyed by the settings that actually affect
+ * resolution (the explicit tool paths) plus the PATH the probe would see.
+ *
+ * Without this the settings panel re-ran every probe on each open: open it
+ * twice and you pay the whole cost twice, which is why the panel felt slower
+ * the second time rather than warm.
+ */
+const toolsCache = new Map()
+
 /** Resolve the tools the shell needs; a missing tool is an empty string. */
 function resolveTools(settings) {
+  const toolPaths = settings.toolPaths ?? {}
+  // `PATH` is part of the key because the probes resolve through it: a shell
+  // started from a different parent can legitimately see different tools.
+  const cacheKey = JSON.stringify([
+    toolPaths.node ?? '', toolPaths.git ?? '', toolPaths.pnpm ?? '', toolPaths.shell ?? '',
+    settings.local?.repoDir ?? '', process.env[PATH_KEY] ?? '',
+  ])
+  const cached = toolsCache.get(cacheKey)
+  if (cached !== undefined) return cached
+  const resolved = resolveToolsUncached(settings)
+  toolsCache.set(cacheKey, resolved)
+  return resolved
+}
+
+/** Drop memoised results (tests, and a refresh after installing a tool). */
+function forgetResolvedTools() {
+  toolsCache.clear()
+}
+
+function resolveToolsUncached(settings) {
   const toolPaths = settings.toolPaths ?? {}
   const node = pickNode(settings)
   const env = childEnv(settings, node)
@@ -371,7 +414,7 @@ function resolveTools(settings) {
     const result = spawnSync(invocation.cmd, invocation.args, {
       env,
       encoding: 'utf8',
-      timeout: 15_000,
+      timeout: PROBE_TIMEOUT_MS,
       windowsHide: true,
       ...invocation.options,
     })
@@ -392,5 +435,6 @@ function resolveTools(settings) {
 }
 
 module.exports = {
-  resolveTools, childEnv, engineOk, defaultLoginShell, nvmBinDirs, bestWindowsPath,
+  resolveTools, forgetResolvedTools, childEnv, engineOk, defaultLoginShell, nvmBinDirs, bestWindowsPath,
+  PROBE_TIMEOUT_MS,
 }

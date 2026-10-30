@@ -25,6 +25,13 @@
   /* All settings text is copyable: the shell disables selection globally,
      but a settings page is reference material users quote from. */
   .settings-main { user-select: text; -webkit-user-select: text; }
+  /* While the state IPC is in flight the form is genuinely empty. Dim it and
+     block interaction so it reads as "loading", not "broken/blank"; the class
+     is dropped the moment the state lands (see settleLoading). */
+  body.loading .settings-content { opacity: .45; pointer-events: none; transition: opacity .12s ease; }
+  body.loading .footer-note::after { content: ''; display: inline-block; width: 1em; text-align: left; animation: ds-dots 1.2s steps(4, end) infinite; }
+  @keyframes ds-dots { 0% { content: ''; } 25% { content: '.'; } 50% { content: '..'; } 75% { content: '...'; } }
+  @media (prefers-reduced-motion: reduce) { body.loading .footer-note::after { animation: none; content: '…'; } }
 </style>
 </head>
 <body>
@@ -157,7 +164,7 @@
     </div>
 
     <footer class="settings-footer">
-      <span class="footer-note" id="footer-note">已载入当前设置</span>
+      <span class="footer-note" id="footer-note">正在载入设置…</span>
       <span class="footer-actions" id="footer-actions"></span>
     </footer>
     </main>
@@ -640,6 +647,17 @@ async function saveSettings() {
 // rows added above it.
 let bootSettled = false
 let updatesSettled = false
+
+// The settings state arrives over IPC, and the main process may be busy
+// probing the toolchain when the panel opens. Until then the form is genuinely
+// empty, which used to read as a blank/broken page for as long as that took.
+// Say so in the footer and keep the page visibly busy; both are cleared as
+// soon as the state lands (or the fetch fails).
+document.body.classList.add('loading')
+$('footer-note').textContent = '正在载入设置…'
+function settleLoading() {
+  document.body.classList.remove('loading')
+}
 function settleAndFocus() {
   if (!bootSettled || !updatesSettled) return
   applyInitialFocus()
@@ -676,12 +694,26 @@ api.getState().then(state => {
   // Single page: the log card is always visible, so hydrate it once at boot.
   void refreshUpdatesLog()
   bootSettled = true
+  settleLoading()
+  // Replace the loading placeholder with the real status note — otherwise the
+  // footer keeps saying "正在载入设置…" forever after a successful load.
+  status('已载入当前设置')
   settleAndFocus()
+}).catch(error => {
+  // The state call itself failed: say so instead of leaving a silent blank
+  // panel, and let the log card be usable.
+  settleLoading()
+  status(`读取设置失败：${String((error && error.message) || error)}`, false)
 })
 
 api.updates.getState().then(state => {
   updateState = state
   renderUpdates()
+  updatesSettled = true
+  settleAndFocus()
+}).catch(() => {
+  // Update state is supplementary — the connection form is still usable, so
+  // never block on it or surface a scary error.
   updatesSettled = true
   settleAndFocus()
 })

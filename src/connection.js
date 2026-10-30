@@ -31,7 +31,7 @@ const {
   parseRemoteLoginShell,
   parseRemoteProbe,
 } = require('./remote-protocol')
-const { resolveTools } = require('./tools')
+const { resolveTools, forgetResolvedTools } = require('./tools')
 const { findFreePort, releasePort, reservePort, tcpProbe } = require('./ports')
 const { runtimeLayout } = require('./runtime-layout')
 const runtimeStore = require('./runtime-store')
@@ -475,6 +475,10 @@ class ConnectionManager extends EventEmitter {
   }
 
   resolvedTools({ refresh = false } = {}) {
+    // A refresh must ALSO drop the module-level memo, otherwise a tool the user
+    // just installed stays invisible: `resolveTools` would return the cached
+    // "not found" result for the same settings/PATH key.
+    if (refresh) forgetResolvedTools()
     if (this.tools === null || refresh) this.tools = resolveTools(this.getSettings())
     return this.tools
   }

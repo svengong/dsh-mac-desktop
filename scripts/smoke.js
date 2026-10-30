@@ -806,6 +806,41 @@ async function main() {
   const pnpmRun = await runCommand({ cmd: tools.pnpm, args: [...tools.pnpmPrefix, '--version'], env: tools.env })
   assert.strictEqual(pnpmRun.code, 0, `pnpm not runnable under clean env: ${pnpmRun.lines.join('\n')}`)
 
+  // resolveTools must be MEMOISED and its probes must be SHORT.
+  //
+  // Every resolveTools call runs spawnSync probes on the main process, so each
+  // one freezes the whole UI. The settings panel called it on every open, and
+  // with a 15s per-candidate timeout a cold Windows start (antivirus scanning
+  // powershell.exe) could block the main thread for the entire budget — the
+  // reported "settings panel is blank for a long time". Two properties keep
+  // that from coming back.
+  {
+    const { forgetResolvedTools, PROBE_TIMEOUT_MS } = require('../src/tools')
+    assert.ok(
+      Number.isInteger(PROBE_TIMEOUT_MS) && PROBE_TIMEOUT_MS <= 5000,
+      `tool probes must time out fast (got ${String(PROBE_TIMEOUT_MS)}ms) — they block the main thread`,
+    )
+    const probeSettings = {
+      local: { repoDir: '', repoUrl: '' },
+      toolPaths: { node: '', git: '', pnpm: '', shell: require('../src/tools').defaultLoginShell() },
+    }
+    forgetResolvedTools()
+    const coldStart = Date.now()
+    const cold = resolveTools(probeSettings)
+    const coldMs = Date.now() - coldStart
+    const warmStart = Date.now()
+    const warm = resolveTools(probeSettings)
+    const warmMs = Date.now() - warmStart
+    assert.deepStrictEqual(warm, cold, 'a memoised resolve must return the same result')
+    // The warmed call must be effectively free. Allow 50ms of scheduling noise
+    // but nothing resembling another probe round trip.
+    assert.ok(
+      warmMs <= 50,
+      `the second resolveTools must be memoised, took ${warmMs}ms (cold ${coldMs}ms)`,
+    )
+    forgetResolvedTools()
+  }
+
   // update manager snapshot: only the built-in Harness row is present,
   // no network calls.
   const manager = new UpdateManager({
