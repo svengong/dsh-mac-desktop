@@ -57,14 +57,25 @@ const BUILD_DIR = path.join(__dirname, '..', 'build')
 const SHELL_VERSION = require('../package.json').version
 /**
  * The highest harness version this shell is known to be compatible with,
- * keyed on the harness's own `apps/cli` package version. The shell is a thin
- * client over the harness, so a harness that outruns this range may have
+ * keyed on the harness's own `@deepseek-ai/dsh` package version. The shell is a
+ * thin client over the harness, so a harness that outruns this range may have
  * changed its launch contract (bin path, boot marker, state file, runtime
  * layout). When the connected harness reports a version above this, the shell
- * warns the user to upgrade the shell. An older harness is not flagged here —
- * the shell upgrades it through the existing update pipeline instead.
+ * warns — it never blocks — that an upgrade is due. An older harness is not
+ * flagged: the shell upgrades it through the existing update pipeline.
+ *
+ * Keep this CURRENT. It was pinned to 0.2.0 in 2026-08 (when the shell was
+ * 0.1.0 and the harness was pre-0.2.0) and never revisited while the harness
+ * moved on to 0.2.2-alpha.2 — the warning was dead for months only because
+ * hostVersion() could not read a version at all. The moment that was fixed,
+ * every artifact-based install started showing a stale "upgrade the shell"
+ * dialog. A ceiling nobody updates is worse than no ceiling: it turns a real
+ * signal into noise the user learns to ignore.
+ *
+ * Raise it only after connecting this shell to that harness version once and
+ * seeing the connect/restart/update paths work.
  */
-const SHELL_COMPAT = Object.freeze({ maxHarness: '0.2.0' })
+const SHELL_COMPAT = Object.freeze({ maxHarness: '0.2.2' })
 /**
  * Identity tag of the connect-failure banner.
  *
@@ -1588,9 +1599,18 @@ function connectSession(session) {
  * against the shell's known-compatible ceiling. A too-new harness means the
  * shell may no longer understand its launch contract, so warn the user to
  * upgrade the shell. An older harness is not flagged — the shell upgrades it
- * through the existing update pipeline. Best-effort: an unreadable version
- * degrades to no-op.
+ * through the existing update pipeline instead. Best-effort: an unreadable
+ * version degrades to no-op.
+ *
+ * This is a WARNING, never a gate: the connection has already succeeded, so
+ * blocking the user with a modal over it is wrong. It used to call
+ * showErrorBox, which on a machine that reconnects on every launch meant a
+ * dialog to dismiss before reaching an app that was in fact working. It now
+ * logs the line (always) and raises at most one desktop notification per
+ * harness version per app run — noticeable, never in the way.
  */
+const hostCompatibilityWarned = new Set()
+
 async function checkHostCompatibility(session) {
   if (session.connection.status.state !== 'ready') return
   let version = ''
@@ -1601,11 +1621,18 @@ async function checkHostCompatibility(session) {
   }
   if (version === '') return
   session.hostVersion = version
-  if (compareVersions(version, SHELL_COMPAT.maxHarness) > 0) {
-    const message = `守护进程版本 ${version} 高于本壳已知兼容范围（≤ ${SHELL_COMPAT.maxHarness}）。\n\n请升级桌面壳后再连接，否则可能无法正常启动/管理该守护进程。`
-    routeSessionLine(session, `⚠ 壳版本过低：${message.replace(/\n+/g, ' ')}`)
-    dialog.showErrorBox('桌面壳版本过低', message)
-  }
+  if (compareVersions(version, SHELL_COMPAT.maxHarness) <= 0) return
+  const message = `守护进程版本 ${version} 高于本壳已知兼容范围（≤ ${SHELL_COMPAT.maxHarness}）。请升级桌面壳后再连接，否则可能无法正常启动/管理该守护进程。`
+  routeSessionLine(session, `⚠ 壳版本过低：${message}`)
+  if (hostCompatibilityWarned.has(version)) return
+  hostCompatibilityWarned.add(version)
+  // Never a modal fallback: with no notification host the log line plus the
+  // version shown in settings is the record, and the app stays usable.
+  if (!Notification.isSupported()) return
+  new Notification({
+    title: `DSH-[${terminalLabel(settingsViewFor(session.key))}]-桌面壳版本偏低`,
+    body: message,
+  }).show()
 }
 
 

@@ -2003,6 +2003,52 @@ async function main() {
   }
 
 
+  // The shell's harness-compatibility ceiling must stay current, and must
+  // never be enforced with a modal.
+  //
+  // It sat at 0.2.0 from 2026-08 while the harness moved to 0.2.2-alpha.2. The
+  // warning was dead the whole time only because hostVersion() could not read a
+  // version; fixing that turned a stale constant into an "upgrade the desktop
+  // shell" dialog on every launch. A ceiling nobody revisits is worse than no
+  // ceiling, so pin the CURRENT behaviour and the non-blocking delivery here.
+  {
+    const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'main.js'), 'utf8')
+    const ceiling = /const SHELL_COMPAT = Object\.freeze\(\{\s*maxHarness:\s*'([^']+)'/u.exec(source)
+    assert.ok(ceiling !== null, 'SHELL_COMPAT.maxHarness must be declared')
+    const maxHarness = ceiling[1]
+    // A harness release that this shell has actually been run against must not
+    // warn. Bump this alongside maxHarness when a newer one is verified.
+    for (const known of ['0.2.0', '0.2.1', '0.2.2-alpha.2']) {
+      assert.ok(
+        compareVersions(known, maxHarness) <= 0,
+        `the ceiling ${maxHarness} must not flag the verified harness ${known}`,
+      )
+    }
+    // Genuinely newer harnesses must still warn — the check has to keep teeth.
+    assert.ok(
+      compareVersions('0.3.0', maxHarness) > 0,
+      'the ceiling must still flag a harness well beyond it',
+    )
+    // Warning, never a gate: the connection already succeeded by this point.
+    const start = source.indexOf('async function checkHostCompatibility(')
+    assert.ok(start !== -1, 'checkHostCompatibility must exist')
+    const rest = source.slice(start)
+    const nextFn = rest.slice(1).search(/\n(?:async )?function /u)
+    const body = nextFn === -1 ? rest : rest.slice(0, nextFn + 1)
+    assert.ok(
+      !/dialog\.showErrorBox/u.test(body),
+      'a compatible-but-newer harness must not block the user with a modal',
+    )
+    assert.ok(
+      /new Notification\(/u.test(body),
+      'the compatibility warning must use a desktop notification',
+    )
+    assert.ok(
+      /hostCompatibilityWarned/u.test(body),
+      'the warning must be deduplicated so a reconnect loop does not spam it',
+    )
+  }
+
   // A failed connect must NEVER look like a hang.
   //
   // The old code retried twice in total silence and only then showed a MODAL

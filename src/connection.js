@@ -323,6 +323,36 @@ async function waitReady(url, timeoutMs = READY_TIMEOUT_MS) {
 // `expandHomeDir`; the local alias keeps this module's call sites unchanged.
 const expandHome = expandHomeDir
 
+/** Parse a `@deepseek-ai/dsh` package.json body into its `version`, or ''. */
+function packageVersionFromJson(text) {
+  try {
+    const manifest = JSON.parse(text)
+    return typeof manifest.version === 'string' ? manifest.version : ''
+  } catch {
+    return ''
+  }
+}
+
+/**
+ * The real harness package version installed in one runtime directory.
+ *
+ * Reads the installed `@deepseek-ai/dsh` manifest rather than the runtime
+ * store's `manifest.current`: that value is a DIRECTORY TOKEN
+ * (`npm0.2.2-alpha.2`), sized for a filesystem name, not a semver meant to be
+ * compared or shown to a user.
+ * @param {string} runtimeDir - absolute path to an activated runtime.
+ * @returns {string} the version, or '' when it cannot be read.
+ */
+function installedPackageVersion(runtimeDir) {
+  try {
+    return packageVersionFromJson(fs.readFileSync(
+      path.join(runtimeDir, 'node_modules', '@deepseek-ai', 'dsh', 'package.json'), 'utf8',
+    ))
+  } catch {
+    return ''
+  }
+}
+
 class ConnectionManager extends EventEmitter {
   constructor({ getSettings, onLog, getOwner }) {
     super()
@@ -389,32 +419,54 @@ class ConnectionManager extends EventEmitter {
   }
 
   /**
-   * The version of the harness this connection is actually SERVING.
+   * The harness package version this connection is actually SERVING.
    *
-   * It must come from the active runtime, never from a source checkout: the
-   * shell no longer builds or clones a repo (see connectLocal — the runtime is
-   * installed from the official npm artifact), so `settings.local.repoDir`
-   * frequently does not exist at all. Reading it produced a parse failure that
-   * the `catch` below swallowed into `''`, and `''` makes checkHostCompatibility
-   * return early — the "harness is newer than this shell" warning therefore
-   * never fired on any artifact-based install. Measured on a Windows guest
-   * serving npm0.2.2-alpha.2: repoDir was absent, hostVersion() was '', and the
-   * ceiling (SHELL_COMPAT.maxHarness 0.2.0) was silently never enforced.
+   * Two traps it must avoid:
+   *
+   * 1. It must NOT read a source checkout. The shell no longer builds or clones
+   *    a repo (see connectLocal — the runtime is installed from the official
+   *    npm artifact), so `settings.local.repoDir` frequently does not exist at
+   *    all. That read failed, the `catch` below swallowed it into `''`, and
+   *    `''` makes checkHostCompatibility return early — so the "harness is
+   *    newer than this shell" warning never fired on ANY artifact-based
+   *    install, for months, without anyone noticing.
+   *
+   * 2. It must NOT return the runtime DIRECTORY TOKEN. `manifest.current` is a
+   *    storage key (`npm0.2.2-alpha.2`) chosen to name a directory on disk, not
+   *    a semver. Handing that to compareVersions happens to work (it scans the
+   *    leading digits) but shows the user `npm0.2.2-alpha.2` in the warning,
+   *    which reads like a build id rather than a version. The real package
+   *    version lives in the installed CLI's package.json.
    *
    * Best-effort: returns '' when the version cannot be established, so an
    * unreadable runtime degrades to "no warning" rather than a false alarm.
-   * `host.describe` is deliberately NOT used because its `version` field is an
-   * upstream placeholder (`0.0.1`) that does not track the real package version.
    */
   async hostVersion() {
     const settings = this.getSettings()
     try {
-      // `serviceVersion` already knows every way a runtime can be resolved —
-      // the activated runtime store locally, the official artifact remotely —
-      // and is what the connect path itself trusts. `unknown` is its explicit
-      // "could not tell" answer, not a version.
-      const version = await this.serviceVersion(settings)
-      if (typeof version === 'string' && version !== 'unknown' && version !== '') return version
+      if (settings.mode === 'local') {
+        const runtimeDir = runtimeStore.localActiveRuntimeDir(settings)
+        if (runtimeDir !== null) {
+          const version = installedPackageVersion(runtimeDir)
+          if (version !== '') return version
+        }
+      } else {
+        const active = await runtimeStore.remoteActiveRuntimeDir(settings, (host, inner, options) => this.remoteRun(host, inner, options))
+        if (active !== null) {
+          const result = await this.remoteRun(
+            settings.ssh.host,
+            `cat ${remotePath(active)}/node_modules/@deepseek-ai/dsh/package.json 2>/dev/null || echo __none__`,
+            { timeoutMs: 15_000 },
+          )
+          if (result.code === 0) {
+            const text = result.lines.join('\n')
+            if (!text.includes('__none__')) {
+              const version = packageVersionFromJson(text)
+              if (version !== '') return version
+            }
+          }
+        }
+      }
       // Legacy fallback: a source checkout that predates the runtime store
       // still carries the CLI manifest. Keep it so an old setup does not lose
       // the check entirely.
@@ -432,8 +484,7 @@ class ConnectionManager extends EventEmitter {
       if (result.code !== 0) return ''
       const text = result.lines.join('\n')
       if (text.includes('__none__')) return ''
-      const manifest = JSON.parse(text)
-      return typeof manifest.version === 'string' ? manifest.version : ''
+      return packageVersionFromJson(text)
     } catch {
       return ''
     }
