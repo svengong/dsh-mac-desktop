@@ -93,9 +93,15 @@ jobs:
 
       # --publish never: a v* tag on HEAD makes electron-builder try to
       # upload to GitHub; CI has no GH_TOKEN and only checks the build.
-      - name: Build app bundle (macOS)
+      #
+      # Build the real DMG, not just `--mac dir`: the preflight exists to catch
+      # a broken packaging chain, and `dir` skips the dmg-builder step entirely,
+      # so a dmg-only regression (renamed target, missing artifactName override)
+      # would sail through and only surface on the release page. `dir` is listed
+      # too, because the bundle assertion below checks the .app.
+      - name: Build installer (macOS, dmg)
         if: matrix.label == 'macos'
-        run: npm run dist -- --mac dir --publish never
+        run: npx electron-builder --mac dir dmg --arm64 --publish never
 
       # Windows goes through scripts/build-win.js, which pins
       # ELECTRON_BUILDER_7Z_FILTER=BCJ. Calling electron-builder directly packs
@@ -117,9 +123,23 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      # sdkmanager is invoked explicitly instead of relying on the action's
+      # default package set: the failure mode otherwise is a red "Setup Android
+      # SDK" step with no useful log, because the action only prepares
+      # cmdline-tools and defers the real install to Gradle.
       - name: Setup Android SDK
         if: matrix.label == 'android'
         uses: android-actions/setup-android@v3
+        with:
+          packages: ''
+          log-accepted-android-sdk-licenses: true
+
+      - name: Install Android SDK packages
+        if: matrix.label == 'android'
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          sdkmanager "platforms;android-35" "build-tools;35.0.0" "platform-tools"
 
       - name: Build APK (Android, arm64)
         if: matrix.label == 'android'

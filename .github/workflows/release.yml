@@ -148,6 +148,9 @@ jobs:
       - name: Setup Android SDK
         if: matrix.label == 'android'
         uses: android-actions/setup-android@v3
+        with:
+          packages: 'platforms;android-35 build-tools;35.0.0'
+          log-accepted-android-sdk-licenses: true
 
       - name: Package APK (Android, arm64)
         if: matrix.label == 'android'
