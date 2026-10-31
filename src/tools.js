@@ -364,7 +364,56 @@ function childEnv(settings, nodePath) {
     // read `PATH`, while cmd.exe reads `Path`. Divergence is silent and bad.
     env.PATH = env[PATH_KEY]
   }
+  ensureLocale(env)
   return env
+}
+
+/**
+ * Locale entries a GUI launch never has: Finder/Dock strips the environment
+ * down to launchd basics, so LANG/LC_* are absent and every child (the dsh web
+ * host, its PTY shells) runs in the C locale — visible as mojibake for
+ * multibyte text in the sidebar terminal. macOS and modern Linux default to
+ * UTF-8, so when nothing is inherited we set LANG to a UTF-8 locale, preferring
+ * the user's own system locale. An explicitly inherited LC_ALL/LANG always wins
+ * untouched.
+ * @param {object} env - the child environment being built (mutated in place).
+ */
+function ensureLocale(env) {
+  if (env.LC_ALL !== undefined || env.LANG !== undefined) return
+  const detected = detectSystemLocale()
+  env.LANG = detected !== '' ? detected : 'C.UTF-8'
+}
+
+/**
+ * Best-effort system locale probe for the locale fallback. Empty means
+ * "detection unavailable", not "C locale".
+ * @returns {string} a locale name like `zh_CN.UTF-8`, or '' when undetectable.
+ */
+function detectSystemLocale() {
+  // Windows has no POSIX locale: LANG is only meaningful to MSYS-derived
+  // shells (Git Bash), which accept the generic C.UTF-8 default fine, and
+  // console encoding is a code-page question owned by the PTY layer.
+  if (IS_WINDOWS) return ''
+  const osascript = '/usr/bin/osascript'
+  try {
+    if (isExecutable(osascript)) {
+      const result = spawnSync(osascript, ['-e', 'user locale of (get system info)'], { encoding: 'utf8', timeout: PROBE_TIMEOUT_MS })
+      const tag = result.status === 0 ? result.stdout.trim() : ''
+      if (tag !== '') return `${tag.replace(/-/g, '_')}.UTF-8`
+    }
+  } catch {
+    // Fall through to the Linux path.
+  }
+  // Linux/BSD: glibc keeps the default in /etc/default/locale, and its
+  // absence means the distribution made no locale choice either.
+  try {
+    const text = fs.readFileSync('/etc/default/locale', 'utf8')
+    const match = /^LANG=("?)([^\n"]+)\1/m.exec(text)
+    if (match !== null) return match[2]
+  } catch {
+    // No distro default; caller falls back to C.UTF-8.
+  }
+  return ''
 }
 
 /**
