@@ -204,7 +204,7 @@ macOS 缺陷：
 - 图标：`build/icon.png`（512px）会被 electron-builder 自动转成多分辨率 `.ico`，无需手工维护 ICO 文件；macOS 用 `build/icon.icns`。
 - Linux：`dsh-desktop-<ver>-linux-{x86_64,arm64}.AppImage` 与 `…-linux-{amd64,arm64}.deb`，由 `electron-builder --linux` 在 Linux 主机上产出。**架构名按格式不同**（AppImage 用 `x86_64`、deb 用 `amd64`），由 `build.appImage` / `build.deb` 各自的 `artifactName` 决定；**顶层 `artifactName` 是 macOS 命名**，只依赖它会让产物带 `-macos-` 后缀。AppImage/deb 也不能交叉构建。
 - 推送 `v*` 标签触发 `.github/workflows/release.yml`：校验标签与版本一致 → 六条并行构建（macOS arm64/x64、Windows x64/arm64、Linux x64/arm64，全部 `--publish never`）→ 上传各平台产物 → 创建 GitHub Release。Linux 用原生架构 runner（`ubuntu-24.04` / `ubuntu-24.04-arm`），因为 deb 的 arm64 打包需要 aarch64 工具链，x64 runner 上交叉不出。
-- `.github/workflows/ci.yml` 在 `macos-14`、`windows-latest`、`ubuntu-24.04` 上分别跑 `npm run smoke`，并各自做一次打包预检——三条打包链路完全不同，只验一条会让另外两条静默腐化。Linux 任务额外断言 AppImage/deb 的真实文件名。
+- `.github/workflows/ci.yml` 在 `macos-15`、`windows-latest`、`ubuntu-24.04` 上分别跑 `npm run smoke`，并各自做一次打包预检——三条打包链路完全不同，只验一条会让另外两条静默腐化。Linux 任务额外断言 AppImage/deb 的真实文件名。macOS runner 不能回退到 `macos-14`：该镜像 2026-11-02 退役，brownout 期间 job 会在分配到 runner 之前就被取消。
 - 产物未签名/未公证（`identity: null`）。
 
 ## 9. 相关文档

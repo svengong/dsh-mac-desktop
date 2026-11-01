@@ -6,7 +6,7 @@ name: Release
 #
 # 发布面刻意收窄：
 #
-#  - macOS 只出 arm64，且只出 dmg。macos-14 本身就是 arm64 runner，交叉构建
+#  - macOS 只出 arm64，且只出 dmg。macos-15 本身就是 arm64 runner，交叉构建
 #    x64 只会多一个没人验证的产物；zip 与 dmg 是同一份 .app 的另一种封装，
 #    发布页上并存只会让人犹豫装哪个。
 #  - Windows 出 x64 与 arm64，但只出 NSIS setup。portable/zip 同理是同一份
@@ -43,7 +43,9 @@ concurrency:
 jobs:
   build:
     name: Build ${{ matrix.os }} ${{ matrix.arch }}
-    # macOS：macos-14 是 arm64 runner，一次原生构建即可，不再交叉出 x64。
+    # macOS：macos-15 是 arm64 runner，一次原生构建即可，不再交叉出 x64。
+    # 不能用 macos-14：该镜像 2026-11-02 退役，brownout 期间 job 会在拿到
+    # runner 前被直接取消（runner_id 0，0 个 step）。
     # Windows：直接用原生 runner，electron-builder 在那里打包 NSIS 最稳，
     # 且 win32-arm64 的 Electron 产物同样可在 x64 runner 上交叉构建。
     # Android：APK 与宿主架构无关，单跑一个 ubuntu runner 即可。
@@ -51,7 +53,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
+          - os: macos-15
             label: macos
             arch: arm64
             flags: --mac dmg --arm64

@@ -410,9 +410,11 @@ DSH_DESKTOP_SMOKE=1 npx electron .       # Electron 冒烟（菜单/Dock/actions
   创建 GitHub Release。Linux 用**原生架构 runner**（`ubuntu-24.04` /
   `ubuntu-24.04-arm`）：deb 走 fpm，arm64 需要 aarch64 打包工具链，x64 runner 上
   交叉不出。
-- CI（`.github/workflows/ci.yml`）在 `macos-14`、`windows-latest`、`ubuntu-24.04`
+- CI（`.github/workflows/ci.yml`）在 `macos-15`、`windows-latest`、`ubuntu-24.04`
   上分别跑冒烟，并在三个平台各做一次打包预检。Linux 会额外断言 AppImage/deb 的
   真实文件名——架构名写错能让产物「构建成功但名字错误」，只有断言拦得住。
+  macOS 不能用 `macos-14`：该镜像 2026-11-02 退役，brownout 会在分配到 runner
+  之前取消 job。
 - **一键发布**：`node scripts/release.js`——分析自上次 tag 以来的提交
   （conventional commits：breaking→major / feat→minor / fix→patch / 仅文档→不发），
   检查当前版本是否已发布（远端 tag 是否存在：已发布→bump 新版本；未发布→直接

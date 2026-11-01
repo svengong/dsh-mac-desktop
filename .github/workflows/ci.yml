@@ -22,7 +22,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-14, windows-latest, ubuntu-24.04]
+        # macos-15, not macos-14: the 14 image retires on 2026-11-02, and its
+        # brownouts cancel a job before it ever receives a runner.
+        os: [macos-15, windows-latest, ubuntu-24.04]
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
@@ -53,7 +55,7 @@ jobs:
         include:
           # macOS: arm64 only. The release surface no longer ships x64, so CI
           # must not spend a job proving a target nobody downloads.
-          - os: macos-14
+          - os: macos-15
             label: macos
             arch: arm64
             bundle: dist/mac-arm64/DeepSeek Harness.app
