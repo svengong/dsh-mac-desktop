@@ -13,7 +13,7 @@
 | 1 | 登录 shell 探测：`getent passwd` 第 7 列 → `$SHELL` → 固定列表 | `REMOTE_LOGIN_SHELL_PROBE` | `RemoteShell.probeLoginShell()` |
 | 2 | 远端命令用**哨兵包裹**，只取载荷 | `remoteRun` + `extractPayload` | `RemoteShell.run` + `Payload.extract` |
 | 3 | state 文件 `{pid,port,version,url}`，写入**必须带结尾换行** | `runtimeStore.writeRemoteState` | `RemoteService.writeState` |
-| 4 | 复用判定：version 相等 **且** 端口探活通过 | `connectSsh` fast path | `connectSsh` 的 existing 分支 |
+| 4 | 复用判定：端口探活通过即复用，**version 不一致也复用**（见第 15 条） | `connectSsh` fast path | `connectSsh` 的 existing 分支 |
 | 5 | 令牌失效（单跳 401/403）→ 重启换新令牌 | `tokenAccepted` | `HttpProbe.tokenAccepted` |
 | 6 | **启动前等对端**（6×1s），有人先建好就跟随 | `awaitPeerService` | `RemoteService.awaitPeerService` |
 | 7 | 健康连接后**清理多余 host**（state 里的 pid 除外） | `reapStrayRemoteHosts` | `ConnectionManager.reapStrays` |
@@ -24,9 +24,23 @@
 | 12 | 本地端口转发由 JSch/ssh 自己分配并回报 | `ports.findFreePort` + `ssh -L` | `setPortForwardingL(host, 0, …)` |
 | 13 | 就绪后健康看门狗，连续失败自动重连 | `HEALTH_INTERVAL_MS`/`THRESHOLD` | 同左（4s / 2 次） |
 | 14 | 只加载回环转发地址，其余 URL 交系统浏览器 | `external-open.js` | `HarnessWebView.handleUrl` |
+| 15 | **连接动作绝不重启别人正在用的 host**：只有「确认无人服务」才清理+重建；version 不一致只提示、照连 | `connectLocal`/`connectSsh` 的复用快路径 | `connectSsh` 的 existing 分支 |
+
+> 第 15 条是 2026-11 的回归修复：此前发现版本与本机运行时不同，就直接落到
+> `reapHosts(keepPid = 0)` 再拉起新 host。新 host = 新端口 + 新 launch token，
+> 于是**手机一连上本机，桌面窗口就掉到错误页/白屏**（用户报的“连接后本地窗口关闭”）。
+> 现行规则：一个 dsh home 仍然只允许一个 host（两个会争 session store 与
+> task-board ledger），但**只有「确实没有任何 host 应答」或用户显式点更新/回滚/重置时
+> 才允许换掉它**。版本号从“复用门槛”降级为“展示 + 更新决策依据”；Android 端
+> 不提供更新入口，因此永远不主动重启 host。
+>
+> 版本不一致时的日志措辞也定了：`提示：该服务版本 X 与本机运行时 Y 不一致，直接复用、不重启。`
+> 令牌失效（单跳 401/403）同样**不再重启**，改用裸地址并在日志里说明——让已连接的
+> 其他客户端继续可用，比给本端换一张新票据更重要。
 
 > 第 6、7、8 条是 2026-10 修复「两个客户端同时连同一个远程会留下两个 host」时
 > 补齐的：桌面端原本就有 6/7，Android 缺；第 8 条两端都缺，一起补。
+> 第 15 条是 2026-11 修复「客户端一连接就重启别人的 host」时补的。
 
 ## 2. 有意不同的地方
 
@@ -45,6 +59,7 @@
 | 全清路径的扫描不可用 | 只**提示**（`reapRemoteHosts` 仍按记录 pid 兜底） | 同样只提示（`sweepHosts(0)` 报告 note） | 一致 |
 | 直接 URL 模式的诊断 | 不适用（无此模式） | 区分「有响应但不是 dsh」/「端口无响应」 | Android 特有 |
 | 旋转/尺寸变化是否重载页面 | 不适用（窗口缩放不重建 WebContentsView） | `movableContentOf` 保持同一 WebView | Android 特有 |
+| 版本不一致时谁去升级 | 用户显式「更新 → 更新并重启」/「回滚」 | 无入口，只提示 | 有意不同（第 15 条） |
 
 ## 4. 改动时的检查清单
 
@@ -56,4 +71,6 @@
 4. 写入文件是否带结尾换行？（哨兵按行解析）
 5. 这条路径会不会杀掉别人正在用的服务？（`keepPid` 语义）
 6. 扫描失败时，用户能看到原因吗？
-7. `npm run smoke` 与 `./gradlew :app:assembleDebug` 都要过。
+7. 这个决定是不是「连接动作」，而它会导致 host 重启吗？（第 15 条：连接只许复用，
+   重启只许发生在「无人服务」或用户显式操作时。版本比较不能作为重启理由。）
+8. `npm run smoke` 与 `./gradlew :app:assembleDebug` 都要过。

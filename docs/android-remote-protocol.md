@@ -47,7 +47,7 @@ ssh -N -L <localPort>:127.0.0.1:<remotePort> \
 | 构建锁 | `"$HOME"/.dsh/locks/desktop-shell/<lockName>` |
 
 **state JSON schema**（`runtime-store.js:isValidState`）：
-`{"pid":<int>,"port":<int>,"version":"<str>","url":"<str>"}` —— `pid`/`port` 必须是整数、`version` 必须是字符串才有效；`url` 可选（旧文件没有）。`version` 是运行时版本 token：`connection.js:serviceVersion` 返回 `~/.dsh/runtime/manifest.json` 的 `current`（`versionToken()` 已去掉冒号，形如 `npm0.2.1-rc.2`），没有可用运行时为 `unknown`；复用要求它与当前版本**字符串相等**。
+`{"pid":<int>,"port":<int>,"version":"<str>","url":"<str>"}` —— `pid`/`port` 必须是整数、`version` 必须是字符串才有效；`url` 可选（旧文件没有）。`version` 是运行时版本 token：`connection.js:serviceVersion` 返回 `~/.dsh/runtime/manifest.json` 的 `current`（`versionToken()` 已去掉冒号，形如 `npm0.2.1-rc.2`），没有可用运行时为 `unknown`；**它是标签，不是复用门槛**（见 (a) 与 §7.4）：客户端只在「无人应答」时才重建 host。
 
 **写入**（`runtime-store.js:writeRemoteState`）：
 
@@ -70,7 +70,9 @@ echo <PAYLOAD_BEGIN>; ( <inner> ); __dsh_rc=$?; echo <PAYLOAD_END>; exit $__dsh_
 # 完整形式： <loginShell> -l -c '<上面这行，整体单引号转义>'
 ```
 
-**(a) 判定已有服务是否健康**（`connection.js:connectSsh`）：先 `readRemoteState`，要求 `state.version` 与 `serviceVersion(settings)` **字符串相等**（ssh 模式下后者就是远端 `~/.dsh/runtime/manifest.json` 的 `current`，且 `current/` 下 bin 必须存在，否则 `unknown`），再做 (b)。两者都过才复用；否则进入 (c)/(d)。版本不符而端口能答 ⇒ 说明是旧版/其他 shell 启的实例，按 (c) 清掉重启（Android 客户端可直接复用这条规则：读 `manifest.json` 的 `current` 与 `state.version` 比对）。
+**(a) 判定已有服务是否健康**（`connection.js:connectSsh`）：先 `readRemoteState`，**只要 (b) 探活通过就复用，不再要求 `state.version` 与 `serviceVersion(settings)` 相等**（ssh 模式下后者就是远端 `~/.dsh/runtime/manifest.json` 的 `current`，且 `current/` 下 bin 必须存在，否则 `unknown`）。版本不一致只写一行提示并继续复用；令牌单跳 401/403 也只写提示、改用裸地址，**都不重启服务**。
+
+> 为什么删掉版本门：它是「手机一连上本机，桌面窗口就掉到错误页」的根因。版本不符 ⇒ 旧逻辑按 (c) 清掉全部 host 再按 (d) 起新的，新 host 换端口、换 launch token，所有正在渲染旧 host 的客户端同时失效。现在只有「记录端口无人应答、等对端 6s 仍无人应答」才进 (c)/(d)。版本号仍然有意义：它记录在 state 里、展示在日志与状态栏，也是桌面端「更新 → 更新并重启」的判断依据；只是**不再由连接动作触发重启**。
 
 **(b) 端口探活（在远端执行）**（`connection.js:remoteProbePort`）：
 
@@ -80,7 +82,7 @@ body=$(curl -sL --max-time 5 http://127.0.0.1:<port>/ 2>/dev/null); case "$body"
 
 必须是 `curl -sL`（跟随 303 并把 set-cookie 带回），且 401 认证提示也算"活着"；用 `case` 而不是 `grep -c`（远端登录 shell 常是 zsh，不能依赖管道退出码）。
 
-**(c) 清理/停掉旧服务**（`connection.js:killRemotePids` / `reapRemoteHosts`；按 pid/端口定点清理的 `reapRemoteService` 保留但当前无调用点）：
+**(c) 清理/停掉旧服务**（`connection.js:killRemotePids` / `reapRemoteHosts`；按 pid/端口定点清理的 `reapRemoteService` 保留但当前无调用点）。**只有两种时机允许走这里**：连接时「确认无人服务」（adopt 与 awaitPeer 都失败），或用户显式发起「更新并重启」/「回滚」/「重置后端服务」（`restartService` / `resetService`）：
 
 ```sh
 kill -0 <pid> 2>/dev/null && echo alive || echo dead      # 存活判定
@@ -180,8 +182,8 @@ if test -f <versionDir>/node_modules/@deepseek-ai/dsh/lib/bin.js; then echo ok; 
 1. **连 ssh**：`setTimeout(10000)`、`setServerAliveInterval(30000)`、`setServerAliveCountMax(3)`；跑 `echo dsh-ok`，非 0 即失败（对应 `BatchMode`：没有可用密钥/口令就必须立刻报错）。
 2. **探登录 shell**（一次，结果缓存）：执行 `REMOTE_LOGIN_SHELL_PROBE`（§5 原串），取输出首个绝对路径，失败用 `/bin/sh`。
 3. **读 state**：`cat "$HOME"/.dsh/desktop-web.state.json 2>/dev/null || echo __none__`；解析并校验（§2）。
-4. **adopt 判定**：先过 (a) 的版本门（`state.version` == `manifest.json` 的 `current`，且 `~/.dsh/runtime/current` 下 bin 存在），再执行 (b) 探活该 port（返回 `1` 才算活着）⇒ 建本地转发 `localPort → 127.0.0.1:<remotePort>`，把 `rehostUrl(state.url, localPort)` 交给 WebView。**注意**：只按 (b) 的 `1` 就报 ready 不够——remoteRun 里那段 curl 已经跟随重定向并带上 cookie，客户端必须做同样的事（见 §4），否则 303 的空响应体读不到 `__DSH_BOOT__`。
-   - 再单跳 GET 该重宿 URL（`connection.js:tokenAccepted`）：**3xx ⇒ token 仍有效**；**401/403 ⇒ token 已被新进程作废**，跳到第 5 步重启换 token；其它状态/超时/异常 ⇒ `null`，**不判断、不重启**（继续用裸 URL，浏览器可能已有 cookie）。
+4. **adopt 判定**：先执行 (b) 探活该 port（返回 `1` 才算活着；**版本比较只用于日志，不参与判定**）⇒ 建本地转发 `localPort → 127.0.0.1:<remotePort>`，把 `rehostUrl(state.url, localPort)` 交给 WebView。**注意**：只按 (b) 的 `1` 就报 ready 不够——remoteRun 里那段 curl 已经跟随重定向并带上 cookie，客户端必须做同样的事（见 §4），否则 303 的空响应体读不到 `__DSH_BOOT__`。
+   - 再单跳 GET 该重宿 URL（`connection.js:tokenAccepted`）：**3xx ⇒ token 仍有效**；**401/403 ⇒ token 已被新进程作废**，仍**继续用裸 URL**并提示用户去服务端重新打开 `dsh web` 打印的 URL——**不要跳到第 5 步重启**，那会掐断其他客户端；其它状态/超时/异常 ⇒ `null`，**不判断、不重启**。
 5. **launch**：`kill` 掉 state 里 pid（若 `kill -0` 活）→ 跑 §3(c) 的 `REMOTE_HOST_SCAN`，对所有 `usesHome>0` 的 pid 执行 §3(c) 的批量 kill → `sleep 2000` → 执行 (d) 的 `setsid/nohup` 启动 → 执行 (e) 等待循环拿到 `dsh web:` 行 → 读 pid 文件 → **写回 state（§2 printf，务必带 `\n`）**。
 6. **建隧道 + 重宿**：`rehostUrl(announced, localPort)`；判定就绪用 `GET`（跟随重定向、带 set-cookie），命中 `__DSH_BOOT__` 或 `401 + dsh web authentication required` 都算"服务活着"（后者只说明需要 token）。
 7. **运行期看护**：`ready` 状态下每 4000ms 探一次，连续 2 次 `!up || !isDsh` ⇒ 整链重连（`connection.js:startHealthMonitor/healthTick`）；隧道断开按 `2000*n` 重试 5 次并换本地端口。服务自身退出：本地壳重试 3 次（`1000*n` ms），远端没有 close 事件可听，只能靠健康检查。
@@ -194,7 +196,7 @@ if test -f <versionDir>/node_modules/@deepseek-ai/dsh/lib/bin.js; then echo ok; 
 | 无运行时 | `bin-missing` / state 无 version | 走 §6 安装，或提示"需在桌面端更新" |
 | 端口未公告 | `service-exited` / `port-timeout` | 读 `desktop-web.log` 尾部 20 行报错；不要复用旧 port |
 | 端口被非 DSH 占用 | 探活返回 `0` | 不可 adopt；按 (c) 清理后重启 |
-| token 失效 | 单跳 GET 得 401/403 | 重启服务换新 token（§7.5） |
+| token 失效 | 单跳 GET 得 401/403 | 用裸 URL 并提示去桌面端重开；**不重启服务**（§7.4） |
 | 一个 home 上两个 host | 扫描出现 `usesHome>0` 且 `pid != keepPid` | 保留 state 记的那个，其余 `kill`（否则抢 session store/task-board 锁） |
 | 远端缺 `lsof`/`curl`/`setsid` | 命令空输出/非 0 | 退化到"只按 state pid 杀"、用 `nohup` 兜底；探活用 HTTP 客户端代替 curl |
 

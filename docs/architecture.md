@@ -157,17 +157,19 @@ macOS 缺陷：
 3. 所有子进程 spawn 都经 `runner.js`：`runCommand`（有界前台命令，`detached: true` 独立进程组，超时组杀 SIGKILL）、`spawnService`（长驻服务，组 SIGTERM 停止）、`spawnDetached`（更新 worker，不注册登记表，壳退出不杀）。
 4. **进程登记表**：每个 spawn 自动登记，`before-quit` 调 `killActiveChildren()` 组杀全部——包括在途 git/pnpm 构建与插件安装。
 5. 本地 clone、远端 clone、build pipeline 都通过 `runtime-store.js` 的原子目录锁；本地锁 owner 为 `{pid, host, createdAt}`，owner 进程消失即 stale；远端锁 owner JSON 超 2 小时视为 stale。
-6. 旧版/残留自管服务通过 `<dshHome>/desktop-web.state.json`（远端 `~/.dsh/desktop-web.state.json`）按 `{pid, port, version}` 回收；版本一致且仍响应 `__DSH_BOOT__` 时复用。
+6. 旧版/残留自管服务通过 `<dshHome>/desktop-web.state.json`（远端 `~/.dsh/desktop-web.state.json`）按 `{pid, port, version}` 记录；**端口仍响应（`__DSH_BOOT__` 或 401 认证提示）即复用，version 只做展示与更新决策，不参与复用判定**（见第 5 节）。
 
 ## 5. 连接生命周期与驻留程序自动升级
 
 `connect()` 重置本地引用、杀旧子进程、释放旧预留，然后 `connectLocal/connectSsh`。失败触发 `connect-failed`，main 最多自动重试 2 次（10s/20s）。
 
-**连接时自动升级（reap → launch）**：连接对比 state 记录的 version 与当前 `serviceVersion`。不匹配 → 自动清理旧驻留程序（kill 记录 pid / lsof 兜底）→ 以当前版本重新启动。版本身份即官方产物的包版本（npm 布局），统一经 `versionToken`。
+**连接只连、不换（adopt-or-launch，一个 home 一个 host，多端只连）**：`connectLocal`/`connectSsh` 先读 state，**只要记录端口有 dsh 应答就复用**；版本与 `serviceVersion` 不一致只写一行提示。出现以下情况之一才允许清理并重建：(1) 记录端口无人应答，且 `awaitPeerService`（6×1s）也等不到对端写出的新 state——即**确实没有任何 host 在服务**；(2) 用户显式「更新 → 更新并重启」/「回滚」/「重置后端服务」（`restartService`/`resetService`）。
 
-**两层升级语义**：连接只负责「升级到 current」；「获取新版本」走更新管线（registry 预检 → 下载官方产物 → 原子切换 → 重启）。
+> 这条规则是 2026-11 的回归修复。此前版本不匹配就直接 reap→launch，而新 host 必然换端口、换 launch token，于是**手机或第二个窗口一连接，正在用旧 host 的窗口就掉到错误页**。一个 home 只能有一个 host（两个会争 session store 与 task-board ledger）这一点不变；变的是**谁有权换掉它**。版本身份仍是官方产物的包版本（npm 布局），统一经 `versionToken`。
 
-**远端恢复**：state 匹配但服务已死（崩溃/远端重启）时，锁内探活（node fetch + `__DSH_BOOT__`）→ 自动 reap + relaunch，不会建隧道到死端口空等。
+**两层升级语义**：「获取新版本」走更新管线（registry 预检 → 下载官方产物 → 原子切换 → 重启）；连接路径不再承担任何升级职责。Android 端没有更新入口，因此永远不主动重启 host。
+
+**远端恢复**：state 记录的服务已死（崩溃/远端重启，端口无人应答）时，在远端探活（curl + `__DSH_BOOT__`/401 提示）→ 等对端 → 仍无人服务才 reap + relaunch，不会建隧道到死端口空等。令牌失效（单跳 401/403）**不触发重启**，改用裸地址并提示。
 
 **无感自动重连（seamless reconnect）**：harness 可能因外部因素重启——插件安装触发进程退出或进程内重载、外部托管服务换端口、远端服务在隧道仍活时崩溃。壳用两层机制兜住，均不打断用户手动操作：
 
