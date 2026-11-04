@@ -1617,6 +1617,10 @@ async function main() {
     const adoptLogs = []
     const adopt = recordingConnection(adoptLogs)
     await adopt.connection.connectLocal(stubSettings)
+    // A `ready` status starts the health watchdog (a 4s interval). Left running
+    // it keeps the process — and therefore the whole suite — alive forever,
+    // which on CI reads as "smoke hung" long after the last assertion printed.
+    adopt.connection.stopHealthMonitor()
     assert.strictEqual(adopt.connection.status.state, 'ready', 'a live host must be adopted even across versions')
     assert.strictEqual(adopt.connection.status.serviceOwner, 'external', 'an adopted host is not ours to restart')
     assert.strictEqual(adopt.connection.localPort, stubPort, 'the adopted port is the one being served')
@@ -1629,24 +1633,39 @@ async function main() {
 
     // (2) Nothing answering is the ONLY case that may rebuild the service.
     //
-    // A stubbed `spawnLocalService` announces no URL, so the real `waitReady`
-    // would spend its 90-second budget on a port nobody listens on. This
-    // assertion is about the DECISION before the probe, so the wait is skipped
-    // by a test-only hook rather than by loosening production code.
-    stubHost.close()
+    // The "nothing answering" side is simulated by POINTING THE RECORDED STATE
+    // AT A PORT NOBODY LISTENS ON, not by closing the stub while the state
+    // still names its port. That distinction is load-bearing and cost a stuck
+    // release: once the stub was closed, its port number was free for the OS
+    // (and for anything else in this file) to reuse, and `connectLocal` then
+    // probed whatever had taken it over — a 200 from an unrelated stub counts
+    // as a serving harness, so the connect never reached the rebuild path and
+    // the run sat on its readiness budget forever. A port bound to a socket
+    // that never accepts makes the "dead" case deterministic instead.
+    const deadPort = await new Promise((resolve, reject) => {
+      const dead = net.createServer()
+      dead.once('error', reject)
+      dead.listen(0, '127.0.0.1', () => {
+        const port = dead.address().port
+        dead.close(() => resolve(port))
+      })
+    })
+    assert.strictEqual(runtimeStore.writeLocalState(stubSettings, {
+      pid: process.pid,
+      port: deadPort,
+      version: 'npm0.0.1-old',
+      url: '',
+    }), true)
     const rebuildLogs = []
     const rebuild = recordingConnection(rebuildLogs)
     rebuild.connection.waitReadyAfterSpawn = async () => ({ up: true, isDsh: true })
-    // No egress in this environment (a sandboxed probe hangs rather than
-    // failing fast), so the remote-mode version lookup is pinned here. Its
-    // "unknown ⇒ old runtime" fallback would otherwise skip `--no-open`.
-    rebuild.connection.serviceVersion = async () => 'npm9.9.9-new'
-    rebuild.connection.readLocalState = () => null
     await rebuild.connection.connectLocal(stubSettings)
+    rebuild.connection.stopHealthMonitor()
     assert.strictEqual(rebuild.seen.spawns, 1, 'nothing serving: the service must be rebuilt')
     assert.strictEqual(rebuild.seen.fullSweeps, 1, 'nothing serving: the deck is cleared first (task-board ledger)')
     assert.strictEqual(rebuild.connection.status.state, 'ready', 'the rebuilt service must be reported ready')
 
+    await new Promise(resolve => stubHost.close(resolve))
     fs.rmSync(stubHome, { recursive: true, force: true })
   }
 
