@@ -7,7 +7,7 @@ else
   scan=
 fi
 echo "CANDIDATES=$(printf '%s\n' "$scan" | awk -F'|' '$1 ~ /^[0-9]+$/ && $2+0 > 0 {c++} END {print c+0}')"
-targets=$(printf '%s\n' "$scan" | awk -F'|' -v keep=__KEEP__ '$1 ~ /^[0-9]+$/ && $2+0 > 0 && $1+0 != keep+0 {print $1}')
+targets=$(printf '%s\n' "$scan" | awk -F'|' -v keeps="__KEEP__" 'BEGIN { n = split(keeps, k, " "); for (i = 1; i <= n; i++) { if (k[i] ~ /^[0-9]+$/) keep[k[i]] = 1 } } $1 ~ /^[0-9]+$/ && $2+0 > 0 && !($1+0 in keep) {print $1}')
 alive=$(printf '%s\n' "$targets" | while read p; do [ -n "$p" ] && kill -0 "$p" 2>/dev/null && echo "$p"; done)
 echo "ALIVE=$(echo $alive)"
 printf '%s\n' "$alive" | while read p; do [ -n "$p" ] && kill "$p" 2>/dev/null; done

@@ -133,11 +133,23 @@ class ConnectionManager(
         emit("SSH 已连接（登录 shell：${shell.loginShell}）")
 
         if (!target.manageService) {
-            // Tunnel-only: the user runs the service themselves.
+            // Tunnel-only: the user runs the service themselves. Probe before
+            // spending a forward on it so a dead recorded port fails as a
+            // stated error instead of a tunnel that answers nothing.
             _state.value = ConnectionState.Connecting("正在探测已有服务…")
-            val state = RemoteService(shell, homeFor(target)).readState()
+            val unattended = RemoteService(shell, homeFor(target))
+            val state = unattended.readState()
                 ?: throw IllegalStateException("远端没有可复用的服务，且已关闭「托管服务」。请先在桌面端启动，或重新开启托管。")
-            openTunnel(target, shell, state.port, state.url, myEpoch)
+            if (!unattended.probePort(state.port)) {
+                throw IllegalStateException("远端记录的服务（端口 ${state.port}）没有响应，且已关闭「托管服务」。请先在桌面端启动，或重新开启托管。")
+            }
+            // A refused token is reported, not answered with a restart: the host
+            // belongs to whoever started it (usually the desktop shell) and may
+            // be serving other clients right now.
+            val verdict = openTunnel(target, shell, state.port, state.url, myEpoch)
+            if (verdict == false) {
+                emit("启动令牌已失效；不重启服务，已改用裸地址（若显示认证页请在桌面端重新打开 dsh web 的 URL）。")
+            }
             return
         }
 
@@ -149,22 +161,32 @@ class ConnectionManager(
         val activeVersion = service.activeVersion()
         emit("远端运行时版本：$activeVersion")
 
+        // Adopt ANY live service over this home: the recorded version is a
+        // LABEL, not a gate.
+        //
+        // Requiring `existing.version == activeVersion` here is what made this
+        // client kick the desktop off. A version mismatch fell through to the
+        // clear-everything sweep, which killed the host the desktop window was
+        // rendering and started a replacement on a new port with a new launch
+        // token. One host per home stays the invariant; only a connect that
+        // found NOTHING serving may rebuild it (see docs/android-parity.md #15).
         _state.value = ConnectionState.Connecting("正在检查已有服务…")
         val existing = service.readState()
-        if (existing != null && existing.version == activeVersion && service.probePort(existing.port)) {
+        if (existing != null && service.probePort(existing.port)) {
             _state.value = ConnectionState.Connecting("正在复用已有服务…")
             val verdict = openTunnel(target, shell, existing.port, existing.url, myEpoch)
-            // A recorded token is only good while the service that minted it is
-            // still answering; a rejected token means restart for a fresh one.
-            if (verdict != false) {
-                emit("复用远端 dsh web（端口 ${existing.port}）")
-                reapStrays(target, service, existing.pid)
-                return
+            emit("复用远端 dsh web（端口 ${existing.port}，版本 ${existing.version}）")
+            if (existing.version != activeVersion) {
+                emit("提示：该服务版本与本机运行时不一致，直接复用、不重启（升级请在桌面端执行）。")
             }
-            emit("启动令牌已失效，重启远端服务以获取新的认证 URL…")
-            teardownQuietly()
-        } else if (existing != null && existing.version != activeVersion) {
-            emit("远端服务版本不符（${existing.version} ≠ $activeVersion），重启…")
+            if (verdict == false) {
+                // The token was minted by a previous process. The host is alive
+                // and may be serving other clients, so say so instead of
+                // restarting it; the browser may still hold a valid cookie.
+                emit("启动令牌已失效；不重启服务，已改用裸地址（若显示认证页请在桌面端重新打开 dsh web 的 URL）。")
+            }
+            reapStrays(target, service, existing.pid)
+            return
         } else if (existing != null) {
             emit("远端服务已退出（端口 ${existing.port}），自动重启…")
         }
@@ -180,19 +202,19 @@ class ConnectionManager(
         if (peer != null) {
             emit("跟随其他终端已启动的远端 dsh web（端口 ${peer.port}）")
             val verdict = openTunnel(target, shell, peer.port, peer.url, myEpoch)
-            if (verdict != false) {
-                reapStrays(target, service, peer.pid)
-                return
+            if (verdict == false) {
+                emit("对端令牌已失效；不重启服务，已改用裸地址。")
             }
-            // The peer's token was already stale (it restarted underneath us).
-            emit("对端令牌已失效，改为自行启动…")
-            teardownQuietly()
+            reapStrays(target, service, peer.pid)
+            return
         }
 
         _state.value = ConnectionState.Connecting("正在清理残留服务…")
-        // keepPid = 0: nothing is worth sparing here, because the adopt and peer
-        // paths above both failed. A leftover host would only crash-loop us
-        // against the task-board ledger it still holds.
+        // keepPid = 0: nothing is worth sparing here, because every host we can
+        // see over this home is unreachable (the adopt and peer paths above both
+        // probed and failed). Such a host only holds the task-board ledger and
+        // would crash-loop us. This is the ONLY place this client ever rebuilds
+        // the service — it never restarts a host it merely found being served.
         val swept = service.sweepHosts(context, keepPid = 0)
         reportSweep(swept, prefix = "清理残留远端 dsh web")
         if (swept.killed > 0) delay(2000)

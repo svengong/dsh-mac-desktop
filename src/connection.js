@@ -360,6 +360,8 @@ class ConnectionManager extends EventEmitter {
     // retry timers from a previous connect generation must never spawn a
     // second service or clobber the current child reference.
     this.connectEpoch = 0
+    // Test-only override for the post-spawn readiness probe; see connectLocal.
+    this.waitReadyAfterSpawn = null
     // Health-monitor state (see startHealthMonitor / healthTick).
     this.healthTimer = null
     this.healthFailures = 0
@@ -984,10 +986,24 @@ class ConnectionManager extends EventEmitter {
     // service that is no longer running must never reach a window.
     this.localWebUrl = ''
 
-    // Reuse a previously owned service when it still matches this build: same
-    // version fingerprint AND a dsh service still answering on its port.
-    if (state !== null && state.version === version) {
-      // Prefer the URL this service announced when we spawned it — it carries
+    // Reuse any LIVE dsh service over this home — the recorded version is a
+    // LABEL, not a gate.
+    //
+    // It used to be a gate ("same version fingerprint AND still answering"),
+    // and that is what made one client kick another off: a second window, the
+    // Android app, or a terminal `dsh` that found a service built by a
+    // different runtime concluded "not mine", swept EVERY host over the home
+    // and spawned a replacement. A replacement mints a new launch token on a
+    // new port, so every other client sitting on the old one lost its window —
+    // the reported "connecting from my phone closes the desktop harness".
+    //
+    // One host per home stays the invariant (two hosts fight over the session
+    // store and the task-board ledger). What changes is who may replace it:
+    // only a path that found NOTHING serving, or the user's own explicit
+    // update/restart. A version mismatch is reported and then served as-is;
+    // upgrading is a separate, deliberate action.
+    if (state !== null) {
+      // Prefer the URL this service announced when it was spawned — it carries
       // the launch token that mints the browser cookie. It is only trustworthy
       // while the recorded pid is still the live owner: another process that
       // inherited this port minted its own token, and the state file's copy
@@ -997,29 +1013,37 @@ class ConnectionManager extends EventEmitter {
         && pidAlive(state.pid) && urlPort(state.url) === state.port
         ? state.url
         : ''
-      const url = recorded !== '' ? recorded : `http://127.0.0.1:${state.port}`
-      const probe = await probeOnce(url)
-      // A service we cannot authenticate against is no better than no
-      // service. Without a token URL to present (and with no live browser
-      // cookie for this authority — guaranteed when the port just changed,
-      // since the cookie is bound to it) the window would only ever render
-      // the 401 notice. Fall through and restart to obtain a fresh token
-      // instead of reporting a "successful" connect that shows nothing.
-      const authenticated = !(probe.needsAuth === true && recorded === '')
-      if (probe.needsAuth === true && recorded === '') {
-        this.log(`已运行的 dsh web（端口 ${state.port}）要求启动令牌且本地无可用票据，重启以获取新的认证 URL…`)
-        this.localWebUrl = ''
-      }
-      if (probe.up && probe.isDsh && authenticated) {
+      const bare = `http://127.0.0.1:${state.port}`
+      const probe = await probeOnce(recorded !== '' ? recorded : bare)
+      // A live service we hold no token for is still the service this home has.
+      // The browser may hold a cookie for this very authority (the local twin
+      // keeps its port across a restart of the shell, unlike the ssh tunnel),
+      // so report it instead of killing it: restarting to "get a token" is
+      // exactly the action that closes somebody else's window.
+      if (probe.up && probe.isDsh) {
+        const sameVersion = state.version === version
         this.localPort = state.port
-        this.localVersion = version
+        this.localVersion = state.version || version
         this.localWebUrl = recorded
-        this.log(`复用已运行的 dsh web（端口 ${state.port}，版本 ${version.slice(0, 8)}）`)
+        if (recorded !== '') {
+          this.log(`复用已运行的 dsh web（端口 ${state.port}，版本 ${this.localVersion.slice(0, 8)}）`)
+        } else {
+          this.log(`复用已运行的 dsh web（端口 ${state.port}，需启动令牌，本端无票据；沿用已有 cookie）`)
+        }
+        if (!sameVersion) {
+          this.log(`提示：该服务版本 ${state.version} 与本机运行时 ${version} 不一致，直接复用、不重启（升级请用「更新 → 更新并重启」）。`)
+        }
         // Sweep strays before declaring ready, same reasoning as the remote
         // twin: the reuse path is the only one a healthy device ever takes, so
-        // a second host over this home would otherwise never be evicted.
+        // a second host over this home would otherwise never be evicted. The
+        // service we just validated is spared.
         await this.reapLocalHosts(settings, state.pid).catch(() => 0)
-        this.setStatus({ state: 'ready', url: this.url(), detail: '已连接（复用已运行服务）', serviceOwner: 'external' })
+        this.setStatus({
+          state: 'ready',
+          url: this.url(),
+          detail: sameVersion ? '已连接（复用已运行服务）' : `已连接（复用已运行服务，版本 ${this.localVersion.slice(0, 8)}）`,
+          serviceOwner: 'external',
+        })
         return
       }
     }
@@ -1039,9 +1063,7 @@ class ConnectionManager extends EventEmitter {
     // pinned to the old runtime for good.
     //
     // Follow a peer shell that is mid-startup before taking over: see
-    // `awaitPeerService` for the ping-pong this avoids. Only ever follow a
-    // host whose recorded version is ours — the same condition the reuse fast
-    // path above requires.
+    // `awaitPeerService` for the ping-pong this avoids.
     const peer = await this.awaitPeerService({
       version,
       readState: async () => this.readLocalState(settings),
@@ -1059,22 +1081,33 @@ class ConnectionManager extends EventEmitter {
         && urlPort(peerState.url) === peer.port
         ? peerState.url
         : ''
-      // Following a peer we cannot authenticate against would park the
-      // window on the 401 page. Take over with our own spawn instead.
+      // The peer is serving; follow it even when we hold no token for it. The
+      // browser may already have a cookie for this authority, and spawning our
+      // own service would kill the very host the peer just started (a new
+      // token means the peer's window gets the 401 page). A missing token is
+      // a degraded-but-usable state, not a reason to take over.
       const peerProbe = await probeOnce(peerToken !== '' ? peerToken : `http://127.0.0.1:${peer.port}`)
-      const peerUsable = peerProbe.up && peerProbe.isDsh
-        && !(peerProbe.needsAuth === true && peerToken === '')
-      if (!peerUsable) {
-        this.log(`其他终端的 dsh web（端口 ${peer.port}）无法完成认证，改为自行启动…`)
-      } else {
+      if (peerProbe.up && peerProbe.isDsh) {
+        const sameVersion = peer.version === version
         this.localPort = peer.port
-        this.localVersion = version
+        this.localVersion = peer.version || version
         this.localWebUrl = peerToken
         this.log(`跟随其他终端已启动的 dsh web（端口 ${peer.port}）`)
+        if (!sameVersion) {
+          this.log(`提示：该服务版本 ${peer.version} 与本机运行时 ${version} 不一致，直接跟随、不重启。`)
+        }
         await this.reapLocalHosts(settings, peer.pid).catch(() => 0)
-        this.setStatus({ state: 'ready', url: this.url(), detail: `已连接（跟随其他终端，端口 ${peer.port}）`, serviceOwner: 'external' })
+        this.setStatus({
+          state: 'ready',
+          url: this.url(),
+          detail: sameVersion
+            ? `已连接（跟随其他终端，端口 ${peer.port}）`
+            : `已连接（跟随其他终端，端口 ${peer.port}，版本 ${this.localVersion.slice(0, 8)}）`,
+          serviceOwner: 'external',
+        })
         return
       }
+      this.log(`其他终端的 dsh web（端口 ${peer.port}）无响应，改为自行启动…`)
     }
 
     // So: clear every host over this dsh home and start a known-good one. The
@@ -1089,10 +1122,13 @@ class ConnectionManager extends EventEmitter {
     // wrapper that has exec'd, a process whose open files are not visible).
     // This asks about the RECORDED pid directly — a second, independent
     // discovery path — so a host the sweep missed cannot survive to fight the
-    // new one over the session store. It matters most right after an upgrade,
-    // where the recorded host is an older build.
+    // new one over the session store. It matters most after a self-restart,
+    // where the recorded host has moved to a port this state never learned.
     if (state !== null && pidAlive(state.pid)) {
-      this.log(`检测到旧版/残留服务（pid ${state.pid}），清理后升级…`)
+      // Reaching this point means the recorded port did NOT answer (see the
+      // fast path above), so this is a host we could not reach, not a healthy
+      // one built by a different version.
+      this.log(`检测到残留服务（pid ${state.pid}，端口无响应），清理后重启…`)
       // Group kill — the recorded pid may be the guard wrapper or the node
       // service; signalling just one strands the other (see
       // `killLocalServiceTree`).
@@ -1104,7 +1140,10 @@ class ConnectionManager extends EventEmitter {
     // no +30 scan; the configured port is only a fallback for `url()` while
     // the service is still starting.
     await this.spawnLocalService(settings, 0, version)
-    const ready = await waitReady(this.url())
+    // Indirection, not decoration: the smoke suite replaces the wait with an
+    // instant answer when its spawn stub announces no URL, so the "nothing
+    // serving ⇒ rebuild" decision stays testable without a live service.
+    const ready = await (this.waitReadyAfterSpawn ?? waitReady)(this.url())
     this.localRetries = 0
     this.setStatus({
       state: 'ready',
@@ -1460,10 +1499,19 @@ class ConnectionManager extends EventEmitter {
     //     reintroduce exactly the "reconnect does nothing" symptom this code
     //     exists to fix.
     //
-    // Reuse a previously started remote service when its build still matches.
+    // Reuse a previously started remote service whenever it is still ALIVE.
     // This fast path spawns nothing, so it cannot orphan a process.
+    //
+    // The recorded version used to be part of the gate ("same fingerprint AND
+    // answering"), which is what let one client kick another off: a phone (or a
+    // second window) whose own runtime differed swept every host over this
+    // home and spawned a replacement, invalidating the token every other client
+    // was rendering. One host per home is still the invariant — but the version
+    // is now a label, not a veto: mismatches are reported and served as-is, and
+    // upgrading is the user's explicit "更新 → 更新并重启" (Android has no
+    // update entry at all).
     const fresh = await this.readRemoteState(settings)
-    if (fresh !== null && fresh.version === version) {
+    if (fresh !== null) {
       // Ask the host itself before spending an ssh tunnel on the recorded
       // port: a service that already died would otherwise cost a full tunnel
       // setup and surface ssh's `channel N: open failed: Connection refused`
@@ -1479,31 +1527,29 @@ class ConnectionManager extends EventEmitter {
         this.remoteWebUrl = rehostUrl(fresh.url ?? '', this.localPort)
         const token = this.remoteWebUrl
         const probe = await probeOnce(this.url())
-        // Same rule as the local twin: a remote service we cannot authenticate
-        // against is not reusable — restart it for a fresh token rather than
-        // reporting a connect that renders the 401 page.
-        //
         // A recorded token is only good while the service that minted it is
         // still the one answering: dsh-market restarts the host by itself and
         // leaves our state naming the previous launch, and the cookie-less
-        // probe cannot tell the two apart. Ask the service directly — and
-        // restart when it answers "not mine", which is what this path did
-        // unconditionally back when the token could not survive in the state
-        // at all. Nothing here can fall back on a browser cookie the way the
-        // local twin can: the forward port changes with every restart, so the
-        // cookie that authenticated the previous service is bound to an
-        // authority that no longer exists.
-        const replaced = token !== '' && (await tokenAccepted(token)) === false
-        const unauthenticated = replaced || (probe.needsAuth === true && token === '')
-        const authenticated = !unauthenticated
-        if (unauthenticated) {
-          this.log(replaced
-            ? `复用远端 dsh web（端口 ${fresh.port}）的启动令牌已随重启失效，重启以获取新的认证 URL…`
-            : `远端 dsh web（端口 ${fresh.port}）要求启动令牌且本地无可用票据，重启以获取新的认证 URL…`)
-          this.remoteWebUrl = ''
-        }
-        if (probe.up && probe.isDsh && authenticated) {
-          this.log(`复用远端 dsh web（端口 ${fresh.port}，版本 ${version.slice(0, 8)}）`)
+        // probe cannot tell the two apart. Ask the service directly.
+        //
+        // A refused token is reported, NOT answered with a restart. The host is
+        // alive and may be serving other clients right now; killing it to mint a
+        // fresh token is precisely the cross-client outage this path must not
+        // cause. The window loads the bare URL against the new forward port,
+        // which at worst shows the harness's own 401 notice until the user
+        // reconnects from the client that owns the service.
+        const rejected = token !== '' && (await tokenAccepted(token)) === false
+        if (rejected) this.remoteWebUrl = ''
+        if (probe.up && probe.isDsh) {
+          const sameVersion = fresh.version === version
+          if (rejected) {
+            this.log(`复用远端 dsh web（端口 ${fresh.port}）的启动令牌已随重启失效；不重启服务，改用裸地址（若显示认证页请在服务端重新打开 dsh web 打印的 URL）。`)
+          } else {
+            this.log(`复用远端 dsh web（端口 ${fresh.port}，版本 ${fresh.version.slice(0, 8)}）`)
+          }
+          if (!sameVersion) {
+            this.log(`提示：该服务版本 ${fresh.version} 与本机运行时 ${version} 不一致，直接复用、不重启。`)
+          }
           // Sweep strays BEFORE declaring ready. This is the only path that
           // runs on every healthy connect, so it is the only place a second
           // host sharing this home can be evicted — the slow path's
@@ -1512,7 +1558,9 @@ class ConnectionManager extends EventEmitter {
           this.setStatus({
             state: 'ready',
             url: this.url(),
-            detail: `已连接（${displayLabel(target)}，复用远端服务）`,
+            detail: sameVersion
+              ? `已连接（${displayLabel(target)}，复用远端服务）`
+              : `已连接（${displayLabel(target)}，复用远端服务，版本 ${fresh.version.slice(0, 8)}）`,
             serviceOwner: 'remote',
           })
           return
@@ -1526,17 +1574,15 @@ class ConnectionManager extends EventEmitter {
     // its stdout sent to a temp file, so the port it moved to never reaches
     // us and the state still names the port of the process that exited.
     //
-    // Do NOT adopt the replacement: a host we did not start runs a runtime
-    // whose version we cannot establish from here (a remote host launches
-    // `bin.js` by a path relative to its cwd, so its command line carries no
-    // runtime dir to match). Recording the CURRENT version for it would leave
-    // the state file lying, and the next connect would take the reuse fast
-    // path and pin the device to that unknown build for good.
+    // The fast path above already adopted any live service regardless of its
+    // version, so reaching here means nothing answers on the recorded port.
+    // What is left is (a) a peer that is still STARTING (its state is not
+    // written yet) and (b) a host we could not reach that still holds the
+    // task-board ledger.
     //
-    // Follow a PEER shell that is mid-startup instead. Two shells that both
-    // saw the recorded port die would otherwise race: ours sweeps the host
-    // theirs has just spawned, their close watcher fires and sweeps ours, and
-    // the two ping-pong without ever connecting. A lock does not close that
+    // Follow a PEER shell in case (a) instead of racing it: two shells that
+    // both saw the recorded port die would otherwise sweep each other's host,
+    // and the two ping-pong without ever connecting. A lock does not close that
     // window either — it re-reads the state on entry, but a peer still waiting
     // for its port has not written one yet. Polling does.
     const peer = await this.awaitPeerService({
@@ -1554,12 +1600,18 @@ class ConnectionManager extends EventEmitter {
       this.remoteWebUrl = rehostUrl(peerState?.url ?? '', this.localPort)
       const url = this.url()
       const ready = await waitReady(url)
+      const sameVersion = peer.version === version
+      if (!sameVersion) {
+        this.log(`提示：该服务版本 ${peer.version} 与本机运行时 ${version} 不一致，直接跟随、不重启。`)
+      }
       await this.reapStrayRemoteHosts(settings, peer.pid).catch(() => 0)
       this.setStatus({
         state: 'ready',
         url,
         detail: ready.isDsh
-          ? `已连接（${displayLabel(target)}，跟随其他终端）`
+          ? (sameVersion
+              ? `已连接（${displayLabel(target)}，跟随其他终端）`
+              : `已连接（${displayLabel(target)}，跟随其他终端，版本 ${peer.version.slice(0, 8)}）`)
           : '隧道已建立，但该端口响应的可能不是 DeepSeek Harness',
         serviceOwner: 'remote',
       })
@@ -2104,6 +2156,10 @@ class ConnectionManager extends EventEmitter {
     // A self-restart invalidates the recorded pid: the replacement keeps
     // running on a port the state never learned, and it still owns the
     // task-board ledger — the spawn below would crash-loop against it.
+    //
+    // This is an EXPLICIT restart (update / rollback / 「重置后端服务」), so
+    // sweeping the deck is correct here — unlike the connect paths, which
+    // never restart a host they merely found being served.
     if ((await this.reapRemoteHosts(settings, state)) > 0) await sleep(2000)
     const version = await this.serviceVersion(settings)
     return this.launchRemoteService(settings, 0, version)

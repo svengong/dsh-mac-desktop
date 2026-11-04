@@ -1556,6 +1556,100 @@ async function main() {
     'a SYNC readState that throws must not break the connect either',
   )
 
+  // ── one host, many clients: a version mismatch must never restart ──────────
+  //
+  // Measured regression: connecting from the Android app (or a second window)
+  // to a host built by a different runtime used to fall through to
+  // `reapHosts(keepPid=0)` + respawn. The replacement gets a NEW port and a NEW
+  // launch token, so every client already rendering the old one lost its page —
+  // "connecting from my phone closes the desktop harness".
+  //
+  // The fix makes the recorded version a LABEL: any live host is reused and the
+  // mismatch is only reported. A rebuild happens solely when NOTHING answers.
+  //
+  // Both directions are covered with a stub harness and stubbed sweeps: a
+  // version mismatch must ADOPT, and only a host that answers nothing may be
+  // rebuilt. Neither case touches a real process.
+  {
+    // A bare `GET /` answering the harness's own 401 notice is live-and-dsh to
+    // `probeOnce` — the shape a token-gated host has for a caller with no token.
+    const stubHost = http.createServer((req, res) => {
+      res.writeHead(401, { 'content-type': 'text/plain; charset=utf-8' })
+      res.end(req.method === 'HEAD' ? undefined : 'dsh web authentication required; reopen the URL printed by dsh web.\n')
+    })
+    await new Promise(resolve => stubHost.listen(0, '127.0.0.1', resolve))
+    const stubPort = stubHost.address().port
+    const stubHome = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-mismatch-'))
+    const stubSettings = { mode: 'local', local: { repoDir: '', repoUrl: '', dshHome: stubHome, port: 3080 }, ssh: {} }
+
+    // A connection whose decisions are recorded instead of executed: no sweep
+    // ever scans or signals a real process, and no service is ever spawned.
+    const recordingConnection = (log, spawn) => {
+      const connection = new ConnectionManager({
+        getSettings: () => stubSettings,
+        onLog: line => log.push(line),
+      })
+      connection.serviceVersion = async () => 'npm9.9.9-new'
+      // `awaitPeerService` has a 6x1s production budget; this assertion is
+      // about the decision AFTER the wait, so the wait itself is stubbed.
+      connection.awaitPeerService = async () => null
+      const seen = { fullSweeps: 0, spawns: 0 }
+      connection.reapLocalHosts = async (_settings, keepPid = 0) => {
+        if (!(keepPid > 0)) seen.fullSweeps += 1
+        return 0
+      }
+      connection.killLocalServiceTree = async () => {}
+      connection.spawnLocalService = async (_settings, _port, version) => {
+        seen.spawns += 1
+        connection.localPort = stubPort
+        connection.localVersion = version
+      }
+      return { connection, seen }
+    }
+
+    // (1) A live host recorded with a DIFFERENT version must be adopted.
+    assert.strictEqual(runtimeStore.writeLocalState(stubSettings, {
+      pid: process.pid,
+      port: stubPort,
+      version: 'npm0.0.1-old',
+      url: '',
+    }), true)
+    const adoptLogs = []
+    const adopt = recordingConnection(adoptLogs)
+    await adopt.connection.connectLocal(stubSettings)
+    assert.strictEqual(adopt.connection.status.state, 'ready', 'a live host must be adopted even across versions')
+    assert.strictEqual(adopt.connection.status.serviceOwner, 'external', 'an adopted host is not ours to restart')
+    assert.strictEqual(adopt.connection.localPort, stubPort, 'the adopted port is the one being served')
+    assert.strictEqual(adopt.seen.spawns, 0, 'a version mismatch must NOT spawn a replacement service')
+    assert.strictEqual(adopt.seen.fullSweeps, 0, 'a version mismatch must NOT run the clear-everything sweep')
+    assert.ok(
+      adoptLogs.some(line => line.includes('不一致')),
+      'the version mismatch has to be reported, not silently hidden',
+    )
+
+    // (2) Nothing answering is the ONLY case that may rebuild the service.
+    //
+    // A stubbed `spawnLocalService` announces no URL, so the real `waitReady`
+    // would spend its 90-second budget on a port nobody listens on. This
+    // assertion is about the DECISION before the probe, so the wait is skipped
+    // by a test-only hook rather than by loosening production code.
+    stubHost.close()
+    const rebuildLogs = []
+    const rebuild = recordingConnection(rebuildLogs)
+    rebuild.connection.waitReadyAfterSpawn = async () => ({ up: true, isDsh: true })
+    // No egress in this environment (a sandboxed probe hangs rather than
+    // failing fast), so the remote-mode version lookup is pinned here. Its
+    // "unknown ⇒ old runtime" fallback would otherwise skip `--no-open`.
+    rebuild.connection.serviceVersion = async () => 'npm9.9.9-new'
+    rebuild.connection.readLocalState = () => null
+    await rebuild.connection.connectLocal(stubSettings)
+    assert.strictEqual(rebuild.seen.spawns, 1, 'nothing serving: the service must be rebuilt')
+    assert.strictEqual(rebuild.seen.fullSweeps, 1, 'nothing serving: the deck is cleared first (task-board ledger)')
+    assert.strictEqual(rebuild.connection.status.state, 'ready', 'the rebuilt service must be reported ready')
+
+    fs.rmSync(stubHome, { recursive: true, force: true })
+  }
+
   // Local `--port 0`: the shell adopts the OS-chosen port from stdout.
   // This needs a BUILT local checkout (deepseek-harness/); on CI the
   // checkout is absent (it is gitignored), so skip instead of failing —

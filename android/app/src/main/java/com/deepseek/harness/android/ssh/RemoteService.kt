@@ -153,8 +153,9 @@ class RemoteService(private val shell: RemoteShell, private val homeExpression: 
      * Iteration always goes through `read` in a pipeline; only stdout crosses a
      * subshell boundary, which is all the report needs.
      */
-    suspend fun sweepHosts(context: android.content.Context, keepPid: Int = 0): SweepResult {
-        val result = shell.run(sweepScript(context, keepPid), timeoutMs = 45_000)
+    suspend fun sweepHosts(context: android.content.Context, keepPid: Int = 0, keepPids: List<Int> = emptyList()): SweepResult {
+        val keeps = (keepPids + listOf(keepPid)).filter { it > 0 }.distinct()
+        val result = shell.run(sweepScript(context, keeps), timeoutMs = 45_000)
         fun field(name: String): String? =
             result.lines.firstOrNull { it.trim().startsWith("$name=") }
                 ?.trim()?.removePrefix("$name=")
@@ -192,13 +193,15 @@ class RemoteService(private val shell: RemoteShell, private val homeExpression: 
      * have the binary yet deny it (restricted shells, sandboxes), and that is
      * exactly the case where a silent empty scan would lie.
      */
-    private fun sweepScript(context: android.content.Context, keepPid: Int): String {
+    private fun sweepScript(context: android.content.Context, keepPids: List<Int>): String {
         val body = context.resources.openRawResource(R.raw.remote_sweep)
             .bufferedReader()
             .use { it.readText() }
         return body
             .replace("__HOME__", homeExpression)
-            .replace("__KEEP__", keepPid.toString())
+            // Space-padded list, so the script can test membership with an exact
+            // `" $pid "` match. An empty list means "spare none".
+            .replace("__KEEP__", if (keepPids.isEmpty()) "" else " ${keepPids.joinToString(" ")} ")
     }
 
     /**
