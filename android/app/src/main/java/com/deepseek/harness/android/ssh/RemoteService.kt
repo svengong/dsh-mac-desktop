@@ -34,14 +34,27 @@ class RemoteService(private val shell: RemoteShell, private val homeExpression: 
 
     // ── state file ──────────────────────────────────────────────────────────
 
+    /**
+     * Read the service state record.
+     *
+     * The file is written by BOTH clients, and they format it differently: this
+     * app writes ONE line, while the desktop shell writes pretty-printed JSON
+     * (`JSON.stringify(state, null, 2)`). Scanning line by line for a `{`-prefixed
+     * line therefore parsed our own output and REJECTED the desktop's — which
+     * looked exactly like "no state file at all", so the connect fell through to
+     * the rebuild path and (before that was fixed) killed the desktop's host.
+     * Join the whole payload and parse THAT instead; it is valid for both.
+     */
     suspend fun readState(): State? {
         val result = shell.run("cat ${statePath()} 2>/dev/null || echo __none__", timeoutMs = 15_000)
-        for (line in result.lines) {
-            val trimmed = line.trim()
-            if (!trimmed.startsWith("{")) continue
-            parseState(trimmed)?.let { return it }
-        }
-        return null
+        val text = result.lines.joinToString("\n").trim()
+        if (text.isEmpty() || text == "__none__") return null
+        // Tolerate a banner or stray output around the record: take the outermost
+        // JSON object rather than assuming the whole payload is one.
+        val start = text.indexOf('{')
+        val end = text.lastIndexOf('}')
+        if (start < 0 || end <= start) return null
+        return parseState(text.substring(start, end + 1))
     }
 
     private fun parseState(text: String): State? = runCatching {
@@ -167,10 +180,18 @@ class RemoteService(private val shell: RemoteShell, private val homeExpression: 
             }
             .firstOrNull { (_, port) -> runCatching { probePort(port) }.getOrDefault(false) }
             ?: return null
-        // The token cannot be recovered from a process that is not ours: return
-        // the bare authority and let the browser's own cookie (if any) do the
-        // rest. `openTunnel` re-hosts a blank url to the bare forward address.
-        return State(pid = candidate.first, port = candidate.second, version = "unknown", url = "")
+        // Carry the launch token across when the state file has one for THIS
+        // port: without it the window lands on the harness's 401 notice
+        // ("dsh web authentication required"). `readState()` may have been the
+        // thing that failed, so re-read rather than assume.
+        val recorded = runCatching { readState() }.getOrNull()
+        val url = if (recorded != null && recorded.port == candidate.second) recorded.url else ""
+        return State(
+            pid = candidate.first,
+            port = candidate.second,
+            version = recorded?.version ?: "unknown",
+            url = url,
+        )
     }
 
     /** Guidance shown when a sweep-then-launch retry still could not start. */

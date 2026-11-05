@@ -1751,6 +1751,44 @@ async function main() {
       'the helper must refuse to replace an existing key: rotating it orphans every installed copy')
   }
 
+  // ── the shared service-state record must stay machine-readable by OTHERS ──
+  //
+  // `~/.dsh/desktop-web.state.json` is written by the desktop shell AND by the
+  // Android client, and each reads the other's output. The desktop used to
+  // pretty-print it (JSON.stringify(state, null, 2)); Android scanned the file
+  // line by line for a `{`-prefixed record, so it only ever saw the lone `{`,
+  // gave up, and concluded no service was running — which sent it down the
+  // rebuild path and left the window on the harness's 401 page ("dsh web
+  // authentication required"). Both sides now agree on ONE compact line; this
+  // pins the writer, because the failure is silent on the writing side.
+  {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-state-format-'))
+    try {
+      const settings = { mode: 'local', local: { repoDir: '', repoUrl: '', dshHome: home, port: 3080 }, ssh: {} }
+      assert.strictEqual(runtimeStore.writeLocalState(settings, {
+        pid: 4242,
+        port: 51122,
+        version: 'npm9.9.9',
+        url: 'http://127.0.0.1:51122/?token=t0k',
+      }), true)
+      const text = fs.readFileSync(runtimeStore.localStatePath(settings), 'utf8')
+      assert.strictEqual(text.trim().split('\n').length, 1,
+        'the service state must be ONE line: other clients parse a single record')
+      assert.strictEqual(text.includes('\n{'), false, 'no pretty-printed object may come back')
+      const back = runtimeStore.readLocalState(settings)
+      assert.strictEqual(back.port, 51122)
+      assert.ok(back.url.includes('token='), 'the launch token must survive the round trip')
+      // And a reader that joins the whole payload (what Android now does) must
+      // reach the same values.
+      const start = text.indexOf('{')
+      const end = text.lastIndexOf('}')
+      const joined = JSON.parse(text.slice(start, end + 1))
+      assert.strictEqual(joined.port, 51122, 'joining the payload must yield the same record')
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true })
+    }
+  }
+
   // Local `--port 0`: the shell adopts the OS-chosen port from stdout.
   // This needs a BUILT local checkout (deepseek-harness/); on CI the
   // checkout is absent (it is gitignored), so skip instead of failing —

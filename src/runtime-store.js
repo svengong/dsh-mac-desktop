@@ -96,7 +96,12 @@ function writeLocalState(settings, state) {
   try {
     const file = localStatePath(settings)
     fs.mkdirSync(path.dirname(file), { recursive: true })
-    fs.writeFileSync(file, JSON.stringify(state, null, 2))
+    // ONE line, deliberately. This file is shared with the Android client,
+    // whose reader took a single JSON record; the pretty-printed form was
+    // unreadable to it, which looked like "no service running" and sent it down
+    // the rebuild path instead of adopting the running host. A single compact
+    // record is valid for every reader, so emit that.
+    fs.writeFileSync(file, JSON.stringify(state))
     return true
   } catch {
     return false
