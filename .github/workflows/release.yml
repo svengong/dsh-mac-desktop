@@ -173,7 +173,9 @@ jobs:
         working-directory: android
         env:
           KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          STOREPASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
         run: |
+          : "${STOREPASS:=android}"
           if [ -z "$KEYSTORE_B64" ]; then
             echo "::error::ANDROID_KEYSTORE_BASE64 is not set."
             echo "A release must be signed with the SAME keystore as the previous one,"
@@ -184,9 +186,15 @@ jobs:
           mkdir -p .keystore
           printf '%s' "$KEYSTORE_B64" | base64 --decode > .keystore/debug.keystore
           test -s .keystore/debug.keystore || { echo "::error::decoded keystore is empty"; exit 1; }
-          keytool -list -keystore .keystore/debug.keystore -storepass "${{ secrets.ANDROID_KEYSTORE_PASSWORD || 'android' }}" 2>/dev/null \
-            | grep -q androiddebugkey || { echo "::error::keystore has no androiddebugkey alias"; exit 1; }
-          echo "keystore restored"
+          # The alias is NOT assumed: the key created by scripts/android-keystore.sh
+          # is named `dsh-release`, while the local convenience key is
+          # `androiddebugkey`. Checking for one specific name failed a valid key.
+          # Accept any private-key entry and pass the alias through to Gradle.
+          ALIAS="$(keytool -list -keystore .keystore/debug.keystore -storepass "$STOREPASS" 2>/dev/null \
+            | sed -n 's/^\([^,]*\),.*PrivateKeyEntry.*/\1/p' | head -1)"
+          test -n "$ALIAS" || { echo "::error::keystore has no PrivateKeyEntry"; exit 1; }
+          echo "ANDROID_KEY_ALIAS=$ALIAS" >> "$GITHUB_ENV"
+          echo "keystore restored (alias: $ALIAS)"
 
       - name: Package APK (Android, arm64)
         if: matrix.label == 'android'
