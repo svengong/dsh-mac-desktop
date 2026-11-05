@@ -25,6 +25,16 @@
 | 13 | 就绪后健康看门狗，连续失败自动重连 | `HEALTH_INTERVAL_MS`/`THRESHOLD` | 同左（4s / 2 次） |
 | 14 | 只加载回环转发地址，其余 URL 交系统浏览器 | `external-open.js` | `HarnessWebView.handleUrl` |
 | 15 | **连接动作绝不重启别人正在用的 host**：只有「确认无人服务」才清理+重建；version 不一致只提示、照连 | `connectLocal`/`connectSsh` 的复用快路径 | `connectSsh` 的 existing 分支 |
+| 16 | **清理之前先证明「我能起得来」**：node 不可用时直接报错，一个进程都不清 | 不适用（本地模式用 `tools.js` 解析，缺失时连接前即失败） | `RemoteService.checkToolchain()` |
+
+> 第 16 条来自 2026-11 的真机事故：macOS 上桌面端的 node 来自 nvm，写在 `~/.zshrc`
+> （交互 shell 才读）；Android 走 `ssh host 'cmd'`，是**非交互登录 shell**，不读它，
+> 于是 `exec node` 报 `node: not found`，服务起不来。而旧顺序是「先全清、再启动」——
+> 清完之后启动失败，整个 home 一个 host 都不剩，桌面窗口直接掉线，日志里只看到
+> 「清理残留远端 dsh web」。现在启动前先 `command -v node`，失败就报错并给出
+> 设置 node 绝对路径 / 改用「只建隧道」的补救办法；同时 `toolchainPrefix()` 补上
+> nvm（动态取最新版本目录）、volta、homebrew 与 `/usr/local/bin`，让 macOS 主机不必
+> 改 shell profile 也能被连上。
 
 > 第 15 条是 2026-11 的回归修复：此前发现版本与本机运行时不同，就直接落到
 > `reapHosts(keepPid = 0)` 再拉起新 host。新 host = 新端口 + 新 launch token，
@@ -51,6 +61,7 @@
 | 布局 | 多窗口 + 46px 壳边框 | 单 Activity：手机单栏路由 / 平板双栏 | 屏幕与输入方式不同 |
 | 平台进程管理 | POSIX 进程组 / Windows 进程树 | 不适用 | Android 没有子进程模型 |
 | 更新 | 完整产物升级管线 | 无 | 客户端自身由用户更新 |
+| 版本号 | `package.json#version` | `versionName` 读同一个 `package.json`（`versionCode` 由它推导） | 见 §3「版本号漂移」 |
 
 ## 3. 已知的、仍不一致的点
 
@@ -60,6 +71,7 @@
 | 直接 URL 模式的诊断 | 不适用（无此模式） | 区分「有响应但不是 dsh」/「端口无响应」 | Android 特有 |
 | 旋转/尺寸变化是否重载页面 | 不适用（窗口缩放不重建 WebContentsView） | `movableContentOf` 保持同一 WebView | Android 特有 |
 | 版本不一致时谁去升级 | 用户显式「更新 → 更新并重启」/「回滚」 | 无入口，只提示 | 有意不同（第 15 条） |
+| 版本号漂移 | —— | —— | **已修**：`versionName` 曾硬编码 `0.1.0`，下载的是 `0.10.13` 却显示 0.1.0。现在两者同源，release 工作流用 `aapt2 dump badging` 断言 APK 内版本等于 `package.json` |
 
 ## 4. 改动时的检查清单
 

@@ -1669,6 +1669,44 @@ async function main() {
     fs.rmSync(stubHome, { recursive: true, force: true })
   }
 
+  // ── the Android build must not carry its own version number ────────────────
+  //
+  // Measured: the released APK was named dsh-android-0.10.13-arm64.apk (built
+  // from package.json) while reporting versionName "0.1.0" — a hardcoded
+  // default nobody had touched since the first commit. Every install showed the
+  // wrong version in Settings, and two builds were indistinguishable. The
+  // version now comes from package.json; this pins that, because the failure
+  // mode is silent (an installable, working APK with a lying label).
+  {
+    const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'))
+    const gradle = fs.readFileSync(path.join(__dirname, '..', 'android', 'app', 'build.gradle.kts'), 'utf8')
+    assert.ok(
+      /versionName = shellVersion/u.test(gradle),
+      'the APK versionName must come from package.json, not a literal',
+    )
+    assert.ok(
+      /versionCode = shellVersionCode/u.test(gradle),
+      'the APK versionCode must be derived, so an update is always installable over the previous one',
+    )
+    assert.ok(
+      !/versionName = "\d/u.test(gradle),
+      'no hardcoded versionName may survive: it drifts from package.json silently',
+    )
+    assert.ok(
+      /package\.json/u.test(gradle),
+      'build.gradle.kts must actually READ package.json, not merely declare a variable',
+    )
+    // The release workflow has to verify it too: the Gradle file can be right
+    // while a stale build output is uploaded, (versionCode, versionName) is the
+    // only thing a user can check on the device.
+    const release = fs.readFileSync(path.join(__dirname, '..', '.github', 'workflows', 'release.yml'), 'utf8')
+    assert.ok(
+      /dump badging/u.test(release),
+      'the release workflow must assert the APK’s own version, not just its filename',
+    )
+    assert.ok(typeof pkg.version === 'string' && pkg.version !== '', 'package.json needs a version')
+  }
+
   // Local `--port 0`: the shell adopts the OS-chosen port from stdout.
   // This needs a BUILT local checkout (deepseek-harness/); on CI the
   // checkout is absent (it is gitignored), so skip instead of failing —

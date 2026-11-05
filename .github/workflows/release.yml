@@ -214,6 +214,25 @@ jobs:
             android)
               f="dsh-android-${VERSION}-arm64.apk"
               test -f "dist/$f" || { echo "::error::missing $f"; ls -1 dist; exit 1; }
+              # The FILENAME carries the version; so must the package inside it.
+              # These drifted apart: versionName was a hardcoded "0.1.0" while the
+              # release page said 0.10.13, so every install reported the wrong
+              # version in Settings and two builds were indistinguishable.
+              AAPT="$(ls -1 "$ANDROID_SDK_ROOT"/build-tools/*/aapt2 2>/dev/null | sort -V | tail -1)"
+              test -n "$AAPT" || AAPT="$(command -v aapt2 || true)"
+              test -n "$AAPT" || { echo "::error::aapt2 not found; cannot verify the APK version"; exit 1; }
+              badging="$("$AAPT" dump badging "dist/$f" 2>/dev/null | head -1)"
+              got="$(printf '%s' "$badging" | sed -n "s/.*versionName='\\([^']*\\)'.*/\\1/p")"
+              code="$(printf '%s' "$badging" | sed -n "s/.*versionCode='\\([^']*\\)'.*/\\1/p")"
+              if [ "$got" != "$VERSION" ]; then
+                echo "::error::APK versionName is '$got' but the release is $VERSION"
+                echo "  android/app/build.gradle.kts must read package.json, not hardcode a version"
+                exit 1
+              fi
+              case "$code" in
+                ''|0) echo "::error::APK versionCode is '$code'; it must be derived from versionName"; exit 1 ;;
+              esac
+              echo "apk version ok: $got ($code)"
               ;;
           esac
           echo "artifacts ok (${{ matrix.label }} ${{ matrix.arch }})"

@@ -87,6 +87,34 @@ class RemoteService(private val shell: RemoteShell, private val homeExpression: 
     }
 
     /** Whether a runtime with an executable CLI is actually present. */
+    /**
+     * Whether this app can actually START a host on that machine, or null when
+     * it can.
+     *
+     * The shell resolves `node` differently from this app: a GUI launch inherits
+     * a PATH that includes nvm/fnm/homebrew setup written in an INTERACTIVE
+     * profile (~/.zshrc), while `ssh host 'cmd'` starts a non-interactive login
+     * shell that only reads ~/.zprofile / ~/.profile. On macOS with nvm, node
+     * exists for the desktop app and is invisible here — measured as
+     * "exec: node: not found" in the service log, five retries deep.
+     *
+     * This is checked BEFORE any sweep, because a launch that cannot work must
+     * not first clear the home: that is how connecting from a phone left the
+     * desktop with no service at all.
+     *
+     * @returns a user-facing reason when node cannot be resolved, else null.
+     */
+    suspend fun checkToolchain(): String? {
+        val probe = "${toolchainPrefix()} command -v node 2>/dev/null || echo __no_node__"
+        val result = shell.run(probe, timeoutMs = 20_000)
+        val found = result.lines.map { it.trim() }.firstOrNull { it.isNotEmpty() && it != "__no_node__" }
+        if (found == null) {
+            return "这台机器上的登录 shell 里找不到 node，无法启动 dsh web。" +
+                "桌面端能启动是因为它继承了图形界面会话的 PATH。"
+        }
+        return null
+    }
+
     suspend fun hasRuntime(): Boolean {
         val probe = "if [ -f ${runtimeDir()}/current/apps/cli/lib/bin.js ] || " +
             "[ -f ${runtimeDir()}/current/node_modules/@deepseek-ai/dsh/lib/bin.js ]; then echo bin-ok; else echo bin-missing; fi"
@@ -331,8 +359,26 @@ class RemoteService(private val shell: RemoteShell, private val homeExpression: 
      */
     private fun homeValue(): String = homeExpression
 
-    /** The portable node/pnpm the desktop shell provisions on the remote. */
+    /**
+     * PATH prefix for the portable toolchain, plus the usual places a menu-bar
+     * or Dock app would have but a non-interactive ssh shell does not.
+     *
+     * `~/.dsh-tools` is what the DESKTOP shell provisions on a Linux box. It is
+     * absent on macOS, where node normally comes from nvm/fnm/homebrew — and
+     * those export their PATH from an INTERACTIVE profile that `ssh host cmd`
+     * never reads. Prepending the conventional install locations is what makes
+     * a macOS host reachable from this app without asking the user to rewrite
+     * their shell profile; every path that does not exist is simply a dead PATH
+     * entry.
+     */
     private fun toolchainPrefix(): String =
         "export DSH_LEFTHOOK_ALLOW_HOOKS_PATH_OVERRIDE=1; " +
-            "export PATH=\"\$HOME\"/.dsh-tools/node/bin:\"\$HOME\"/.dsh-tools/node_modules/.bin:\"\$PATH\";"
+            // nvm has no `current` symlink: it uses one versioned directory per
+            // installed node, so the newest one has to be picked at run time.
+            // `sort -V` orders 24.22.1 above 9.11.2; the version-string sort
+            // (not `ls -t`) is what keeps a stale build directory from winning.
+            "nvmbin=\"\$(ls -1d \"\$HOME\"/.nvm/versions/node/*/bin 2>/dev/null | sort -V | tail -1)\"; " +
+            "export PATH=\"\$HOME\"/.dsh-tools/node/bin:\"\$HOME\"/.dsh-tools/node_modules/.bin:" +
+            "\"\$nvmbin\":\"\$HOME\"/.volta/bin:\"\$HOME\"/.local/bin:" +
+            "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:\"\$PATH\";"
 }

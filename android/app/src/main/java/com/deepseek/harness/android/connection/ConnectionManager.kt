@@ -209,6 +209,27 @@ class ConnectionManager(
             return
         }
 
+        // Before touching anything: can this client even STRAT a host here?
+        //
+        // Measured on macOS: the desktop shell starts its service from a GUI
+        // process whose PATH includes nvm; this app starts it from an SSH
+        // non-interactive login shell, which does NOT read ~/.zshrc, so
+        // `exec node` fails with "node: not found" and the launch dies. The
+        // old order (sweep-then-launch) meant that failure left the home with
+        // NO host at all — the desktop window went dead — after the sweep had
+        // already killed everything it could see.
+        //
+        // Checking first turns "my launch cannot work" into a stated error
+        // instead of collateral damage on somebody else's running service.
+        val toolchainProblem = service.checkToolchain()
+        if (toolchainProblem != null) {
+            throw ConnectionFailure(
+                toolchainProblem,
+                "在桌面端「设置 → 高级」里把 node 路径填成绝对路径，或在该账号的 ~/.zprofile 里导出 PATH；" +
+                    "也可以改用「只建隧道」模式，由桌面端负责启动服务。",
+            )
+        }
+
         _state.value = ConnectionState.Connecting("正在清理残留服务…")
         // keepPid = 0: nothing is worth sparing here, because every host we can
         // see over this home is unreachable (the adopt and peer paths above both

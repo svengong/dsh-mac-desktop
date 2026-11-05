@@ -4,6 +4,38 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+/**
+ * The desktop shell's version, which names the release ("dsh-android-0.10.13-arm64.apk").
+ *
+ * Read from package.json at configuration time so the APK cannot disagree with
+ * the file it is published as. `versionName` used to be a hardcoded "0.1.0",
+ * which meant every download reported 0.1.0 in Settings → About while the
+ * release page said 0.10.13 — and users had no way to tell two builds apart.
+ */
+val shellVersion: String by lazy {
+    val pkg = rootProject.file("../package.json")
+    require(pkg.isFile) { "package.json not found next to android/: ${pkg.absolutePath}" }
+    val json = groovy.json.JsonSlurper().parse(pkg)
+    (json as Map<*, *>)["version"] as? String
+        ?: error("package.json has no version: ${pkg.absolutePath}")
+}
+
+/**
+ * A monotonically increasing integer for the store/update machinery.
+ *
+ * Android requires versionCode to grow on every update, while versionName is
+ * only a label. Derived from the version triple: "0.10.13" -> 0*10000 + 10*100
+ * + 13 = 1013. Two builds of the same version share a code, which is correct —
+ * they are the same release.
+ */
+val shellVersionCode: Int by lazy {
+    val parts = shellVersion.split("-", "+").first().split(".")
+    val major = parts.getOrNull(0)?.toIntOrNull() ?: 0
+    val minor = parts.getOrNull(1)?.toIntOrNull() ?: 0
+    val patch = parts.getOrNull(2)?.toIntOrNull() ?: 0
+    major * 10000 + minor * 100 + patch
+}
+
 android {
     namespace = "com.deepseek.harness.android"
     compileSdk = 35
@@ -12,8 +44,8 @@ android {
         applicationId = "com.deepseek.harness.android"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = shellVersionCode
+        versionName = shellVersion
 
         vectorDrawables { useSupportLibrary = true }
     }
