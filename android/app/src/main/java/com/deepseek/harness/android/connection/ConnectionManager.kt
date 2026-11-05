@@ -189,6 +189,25 @@ class ConnectionManager(
             return
         } else if (existing != null) {
             emit("远端服务已退出（端口 ${existing.port}），自动重启…")
+        } else {
+            // No state file at all. That is NOT proof that nothing is running:
+            // the desktop shell keeps its own record, and this file is rewritten
+            // by every client, so a half-written or partially-cleared one is
+            // normal during a restart. Look for a live host by PORT before
+            // concluding the home is empty — otherwise the only way forward is
+            // to kill everything and start over, which is how a phone connect
+            // used to take down the desktop.
+            emit("未找到服务记录，正在探测本机是否有运行中的实例…")
+            val found = service.findLiveHost()
+            if (found != null) {
+                emit("发现运行中的 dsh web（端口 ${found.port}），直接复用…")
+                val verdict = openTunnel(target, shell, found.port, found.url, myEpoch)
+                if (verdict == false) {
+                    emit("启动令牌已失效；不重启服务，已改用裸地址。")
+                }
+                reapStrays(target, service, found.pid)
+                return
+            }
         }
 
         // Nobody is serving. Before spawning, give a PEER client a few seconds to
@@ -230,18 +249,40 @@ class ConnectionManager(
             )
         }
 
-        _state.value = ConnectionState.Connecting("正在清理残留服务…")
-        // keepPid = 0: nothing is worth sparing here, because every host we can
-        // see over this home is unreachable (the adopt and peer paths above both
-        // probed and failed). Such a host only holds the task-board ledger and
-        // would crash-loop us. This is the ONLY place this client ever rebuilds
-        // the service — it never restarts a host it merely found being served.
-        val swept = service.sweepHosts(context, keepPid = 0)
-        reportSweep(swept, prefix = "清理残留远端 dsh web")
-        if (swept.killed > 0) delay(2000)
-
+        // Do NOT sweep before launching.
+        //
+        // This used to run `sweepHosts(keepPid = 0)` — kill every host over the
+        // home — and only then start one. Measured consequence on a Mac that
+        // the desktop shell was actively serving: the phone saw no usable
+        // state, killed the desktop's host, started its own, and the desktop
+        // window died. The log said only "清理残留远端 dsh web (1 个)".
+        //
+        // The sweep existed for one real case: a wedged host that still holds
+        // the task-board ledger crash-loops every spawn. That is exactly what
+        // `launch()` reports as a failure, so it is handled AFTER the attempt,
+        // below. Killing first optimises the rare wedged case at the expense of
+        // the common one — and the common one is another client's live window.
         _state.value = ConnectionState.Connecting("正在启动远端服务…")
-        val launched = service.launch()
+        val launched = try {
+            service.launch()
+        } catch (error: Exception) {
+            // The only place a sweep is warranted: a host we could not reach is
+            // still holding the ledger. Sweeping here is safe because nothing
+            // is answering — we just failed to start against it.
+            val note = service.takeoverHint()
+            emit("启动失败（${error.message ?: error}），清理残留实例后重试…")
+            val swept = service.sweepHosts(context, keepPid = 0)
+            reportSweep(swept, prefix = "清理残留远端 dsh web")
+            if (swept.killed > 0) delay(2000)
+            try {
+                service.launch()
+            } catch (retry: Exception) {
+                throw ConnectionFailure(
+                    "清理后仍无法启动远端 dsh web：${retry.message ?: retry}",
+                    note,
+                )
+            }
+        }
         emit("远端 dsh web 已监听端口 ${launched.port}")
         if (epoch != myEpoch) return
         openTunnel(target, shell, launched.port, launched.url, myEpoch)

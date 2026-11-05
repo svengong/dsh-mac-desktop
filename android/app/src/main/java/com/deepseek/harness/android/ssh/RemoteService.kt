@@ -121,6 +121,62 @@ class RemoteService(private val shell: RemoteShell, private val homeExpression: 
         return shell.run(probe, timeoutMs = 20_000).contains("bin-ok")
     }
 
+    /**
+     * Find a live `dsh web` over this home WITHOUT a state file.
+     *
+     * The state file is shared by every client (desktop shell, this app, a
+     * terminal `dsh`) and each of them rewrites it. During a restart it can be
+     * missing, half-written, or point at a process that has already exited —
+     * and treating that as "nothing is running" is what let a phone connect
+     * kill the desktop's host. Ask the operating system instead: enumerate the
+     * listeners owned by a `node … bin.js web` process whose files live under
+     * THIS home.
+     *
+     * Deliberately conservative: a host that cannot be identified as serving
+     * this home is not returned, and no process is signalled.
+     *
+     * @returns the live host, or null when there is genuinely nothing to adopt.
+     */
+    suspend fun findLiveHost(): State? {
+        // `ps` + `lsof` are the same tools the sweep relies on; a host that
+        // denies them simply yields an empty answer and the caller falls back
+        // to the old launch path. Never guess, never kill.
+        val script = """
+            command -v lsof >/dev/null 2>&1 || { echo __no_lsof__; exit 0; }
+            ps ax -o pid=,command= 2>/dev/null \
+              | grep -E 'bin\.js +web' | grep -v grep \
+              | grep -E '^[[:space:]]*[0-9]+[[:space:]]+([^[:space:]]*/)?node([0-9.]*)?[[:space:]]' \
+              | sed -E 's/^[[:space:]]*([0-9]+).*/\1/' \
+              | while read p; do
+                  uses=${'$'}(lsof -Fn -p ${'$'}p 2>/dev/null | grep -c "^n${'$'}{HOME}/\.dsh/")
+                  case ${'$'}uses in 0) continue ;; esac
+                  port=${'$'}(lsof -nP -a -p ${'$'}p -iTCP -sTCP:LISTEN 2>/dev/null \
+                    | grep -oE '127\.0\.0\.1:[0-9]+' | sed -E 's/.*:([0-9]+)${'$'}/\1/' | head -1)
+                  [ -n "${'$'}port" ] && echo "${'$'}p|${'$'}port"
+                done
+        """.trimIndent()
+        val result = shell.run(script, timeoutMs = 30_000)
+        if (result.lines.any { it.trim() == "__no_lsof__" }) return null
+        val candidate = result.lines
+            .map { it.trim() }
+            .filter { it.contains('|') }
+            .mapNotNull { line ->
+                val pid = line.substringBefore('|').trim().toIntOrNull()
+                val port = line.substringAfter('|').trim().toIntOrNull()
+                if (pid != null && pid > 0 && port != null && port in 1..65535) pid to port else null
+            }
+            .firstOrNull { (_, port) -> runCatching { probePort(port) }.getOrDefault(false) }
+            ?: return null
+        // The token cannot be recovered from a process that is not ours: return
+        // the bare authority and let the browser's own cookie (if any) do the
+        // rest. `openTunnel` re-hosts a blank url to the bare forward address.
+        return State(pid = candidate.first, port = candidate.second, version = "unknown", url = "")
+    }
+
+    /** Guidance shown when a sweep-then-launch retry still could not start. */
+    fun takeoverHint(): String =
+        "若桌面端正在使用该服务，请先在桌面端断开，或改用「只建隧道」模式。"
+
     // ── probing ─────────────────────────────────────────────────────────────
 
     /**
