@@ -27,14 +27,28 @@
 | 15 | **连接动作绝不重启别人正在用的 host**：只有「确认无人服务」才清理+重建；version 不一致只提示、照连 | `connectLocal`/`connectSsh` 的复用快路径 | `connectSsh` 的 existing 分支 |
 | 16 | **清理之前先证明「我能起得来」**：node 不可用时直接报错，一个进程都不清 | 不适用（本地模式用 `tools.js` 解析，缺失时连接前即失败） | `RemoteService.checkToolchain()` |
 
-> 第 16 条来自 2026-11 的真机事故：macOS 上桌面端的 node 来自 nvm，写在 `~/.zshrc`
-> （交互 shell 才读）；Android 走 `ssh host 'cmd'`，是**非交互登录 shell**，不读它，
+> 第 16 条来自 2026-11 的真机事故。机制要说准，因为修法依赖它：
+>
+> **不是"zsh 不读 .zshrc"那么简单。** macOS 上用户登录 shell 是 zsh（`dscl . -read
+> /Users/<u> UserShell` 可见），但 zsh 的启动文件分四档：
+> `.zshenv`（总是读）→ `.zprofile`（登录读）→ `.zshrc`（**交互**才读）→ `.zlogin`。
+> 而 `ssh host '<cmd>'` 起的是**非交互登录** shell：读 `.zshenv` 与 `.zprofile`，
+> **跳过 `.zshrc`**。本机的 nvm 初始化写在 `~/.zshrc`，所以同一个 `zsh`，
+> `zsh -i -l` 能找到 node，`zsh -l` 找不到（实测：前者返回
+> `~/.nvm/versions/node/v24.22.1/bin/node`，后者 `NO-NODE`）。
+>
+> 另外 macOS **没有 `getent`**，`REMOTE_LOGIN_SHELL_PROBE` 会回退到 `$SHELL`，
+> 而 sshd 注入的 `$SHELL` 与实际登录 shell 未必一致——本机实测探测结果就是
+> `/bin/bash`，而真实登录 shell 是 `/bin/zsh`。这条回退路径本身没错（两端都写的是
+> `getent → $SHELL → 固定列表`），但它意味着"探测到的 shell"不能作为
+> "PATH 会被正确初始化"的保证。
+>
 > 于是 `exec node` 报 `node: not found`，服务起不来。而旧顺序是「先全清、再启动」——
 > 清完之后启动失败，整个 home 一个 host 都不剩，桌面窗口直接掉线，日志里只看到
 > 「清理残留远端 dsh web」。现在启动前先 `command -v node`，失败就报错并给出
 > 设置 node 绝对路径 / 改用「只建隧道」的补救办法；同时 `toolchainPrefix()` 补上
-> nvm（动态取最新版本目录）、volta、homebrew 与 `/usr/local/bin`，让 macOS 主机不必
-> 改 shell profile 也能被连上。
+> nvm（动态取最新版本目录）、volta、homebrew 与 `/usr/local/bin`，让 macOS 主机
+> 不必改 shell profile 也能被连上。
 
 > 第 15 条是 2026-11 的回归修复：此前发现版本与本机运行时不同，就直接落到
 > `reapHosts(keepPid = 0)` 再拉起新 host。新 host = 新端口 + 新 launch token，
