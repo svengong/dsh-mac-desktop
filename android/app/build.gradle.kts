@@ -51,15 +51,23 @@ android {
     }
 
     signingConfigs {
-        // The debug keystore normally lives in ~/.android, which is outside this
-        // checkout. Keeping it in the repository's ignored .keystore/ makes the
-        // build reproducible on any machine and inside a sandbox that does not
-        // allow writes to the home directory.
+        // A released APK's identity IS its signing certificate: Android refuses
+        // to replace an installed app whose certificate differs
+        // (INSTALL_FAILED_UPDATE_INCOMPATIBLE), so every release must be signed
+        // with the same key. This used to be the throwaway `~/.android` debug
+        // key — and CI regenerated it on every run, which made each version
+        // uninstallable over the last.
+        //
+        // Local builds keep the convenience key in android/.keystore/ (ignored
+        // by git, reproducible, sandbox-friendly). CI instead restores the real
+        // key from ANDROID_KEYSTORE_BASE64 into the same path, so the two never
+        // diverge in spelling.
         getByName("debug") {
             storeFile = rootProject.file(".keystore/debug.keystore")
-            storePassword = "android"
-            keyAlias = "androiddebugkey"
-            keyPassword = "android"
+            storePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD") ?: "android"
+            keyAlias = System.getenv("ANDROID_KEY_ALIAS") ?: "androiddebugkey"
+            keyPassword = System.getenv("ANDROID_KEY_PASSWORD")
+                ?: (System.getenv("ANDROID_KEYSTORE_PASSWORD") ?: "android")
         }
     }
 

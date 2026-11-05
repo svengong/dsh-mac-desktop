@@ -178,8 +178,44 @@ Gradle at a local home:
 GRADLE_USER_HOME=$PWD/.gradle-home ./gradlew :app:assembleDebug
 ```
 
-The debug keystore lives in `android/.keystore/` (gitignored) so a build works
-on any machine without depending on `~/.android/debug.keystore`.
+The keystore lives in `android/.keystore/` (gitignored) so a build works on any
+machine without depending on `~/.android/debug.keystore`.
+
+### Release signing: one key, forever
+
+An APK's identity is its signing certificate, and Android refuses to install an
+update whose certificate differs:
+
+```
+INSTALL_FAILED_UPDATE_INCOMPATIBLE: signatures do not match
+```
+
+The release workflow used to run `keytool -genkeypair` on every run, minting a
+new key per build — same DN, different keypair — so no release could be
+installed over an earlier one. Measured: v0.10.11, v0.10.13 and v0.10.14 each
+had a different certificate SHA-256. That is unrecoverable for those builds:
+their keys were never saved, so they must be uninstalled once.
+
+Create the real key ONCE and keep the file somewhere safe (a password manager).
+Losing it means installed copies can only be updated by uninstalling first:
+
+```sh
+ANDROID_KEYSTORE_PASSWORD='<choose-one>' scripts/android-keystore.sh
+```
+
+The script prints the three `gh` commands that store it. Two secrets and one
+variable are needed:
+
+| Name | Kind | Purpose |
+|---|---|---|
+| `ANDROID_KEYSTORE_BASE64` | secret | the `.jks` itself, base64 |
+| `ANDROID_KEYSTORE_PASSWORD` | secret | store/key password |
+| `ANDROID_SIGNING_SHA256` | variable | expected certificate digest |
+
+The workflow fails when the keystore secret is missing, and fails when the
+produced APK's certificate differs from `ANDROID_SIGNING_SHA256` — so a rotated
+key is a red build instead of an uninstallable release. `npm run smoke`
+asserts the same rules from the repo side.
 
 ## Module map
 

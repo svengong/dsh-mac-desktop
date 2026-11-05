@@ -1707,6 +1707,50 @@ async function main() {
     assert.ok(typeof pkg.version === 'string' && pkg.version !== '', 'package.json needs a version')
   }
 
+  // ── releases must reuse ONE signing key ──────────────────────────────────
+  //
+  // Android's identity for an app is its signing certificate: installing
+  // version N+1 over N fails with
+  //   INSTALL_FAILED_UPDATE_INCOMPATIBLE: signatures do not match
+  // unless the certificate is identical. Release builds used to run
+  // `keytool -genkeypair` on EVERY CI run, so the certificate changed every
+  // version — measured as three different SHA-256 digests across
+  // v0.10.11 / v0.10.13 / v0.10.14, i.e. no release could ever be installed
+  // over an earlier one. A keystore that is generated at build time is the
+  // bug; this pins that it is RESTORED from a secret instead.
+  {
+    const workflow = fs.readFileSync(path.join(__dirname, '..', '.github', 'workflows', 'release.yml'), 'utf8')
+    // Strip comments first: the step's own explanation mentions
+    // `keytool -genkeypair`, and matching that would flag the fix itself.
+    const workflowCode = workflow
+      .split('\n')
+      .filter(line => !/^\s*#/.test(line))
+      .join('\n')
+    assert.ok(
+      !/keytool\s+-genkeypair/u.test(workflowCode),
+      'the release workflow must never GENERATE a signing key: a fresh key makes every release uninstallable over the last',
+    )
+    assert.ok(
+      /ANDROID_KEYSTORE_BASE64/u.test(workflow),
+      'the workflow must restore the signing keystore from a secret',
+    )
+    assert.ok(
+      /ANDROID_SIGNING_SHA256/u.test(workflow),
+      'the workflow must pin the signing certificate, so a rotated key fails the build instead of shipping',
+    )
+    assert.ok(
+      /apksigner/u.test(workflow),
+      'the certificate must be read from the produced APK, not assumed from the keystore',
+    )
+    // The helper that creates the key once lives in the repo too, so the value
+    // in the secret is reproducible and documented.
+    const helper = path.join(__dirname, '..', 'scripts', 'android-keystore.sh')
+    assert.ok(fs.existsSync(helper), 'scripts/android-keystore.sh must exist: it is how the one key is created')
+    const helperText = fs.readFileSync(helper, 'utf8')
+    assert.ok(/refusing to overwrite/u.test(helperText),
+      'the helper must refuse to replace an existing key: rotating it orphans every installed copy')
+  }
+
   // Local `--port 0`: the shell adopts the OS-chosen port from stdout.
   // This needs a BUILT local checkout (deepseek-harness/); on CI the
   // checkout is absent (it is gitignored), so skip instead of failing —

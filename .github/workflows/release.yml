@@ -157,17 +157,36 @@ jobs:
       # android/.keystore/ is gitignored (it holds the AOSP debug key), so a
       # fresh checkout has none and the release type — which signs with it so
       # the APK is installable — would fail to build. Generate it here.
-      - name: Generate debug keystore
+      # A RELEASED APK's identity is its signing certificate, and Android only
+      # lets an update replace an installed app when the certificate MATCHES.
+      # This step used to run `keytool -genkeypair` on every build, minting a
+      # brand-new key each time: same DN (CN=Android Debug), different keypair,
+      # therefore a different certificate — so every release was uninstallable
+      # OVER the previous one:
+      #   INSTALL_FAILED_UPDATE_INCOMPATIBLE: signatures do not match
+      # Measured across v0.10.11 / v0.10.13 / v0.10.14: three different SHA-256
+      # digests. The key now comes from a repository secret and is reused for
+      # every build, so upgrades work from here on. (Releases published BEFORE
+      # this change are unrecoverable: their keys were never saved.)
+      - name: Restore signing keystore
         if: matrix.label == 'android'
         working-directory: android
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
         run: |
+          if [ -z "$KEYSTORE_B64" ]; then
+            echo "::error::ANDROID_KEYSTORE_BASE64 is not set."
+            echo "A release must be signed with the SAME keystore as the previous one,"
+            echo "otherwise it cannot be installed over it. Create it once (scripts/android-keystore.sh)"
+            echo "and store it as a repository secret; see android/README.md."
+            exit 1
+          fi
           mkdir -p .keystore
-          keytool -genkeypair -v \
-            -keystore .keystore/debug.keystore \
-            -storepass android -keypass android \
-            -alias androiddebugkey \
-            -keyalg RSA -keysize 2048 -validity 10000 \
-            -dname "CN=Android Debug,O=Android,C=US"
+          printf '%s' "$KEYSTORE_B64" | base64 --decode > .keystore/debug.keystore
+          test -s .keystore/debug.keystore || { echo "::error::decoded keystore is empty"; exit 1; }
+          keytool -list -keystore .keystore/debug.keystore -storepass "${{ secrets.ANDROID_KEYSTORE_PASSWORD || 'android' }}" 2>/dev/null \
+            | grep -q androiddebugkey || { echo "::error::keystore has no androiddebugkey alias"; exit 1; }
+          echo "keystore restored"
 
       - name: Package APK (Android, arm64)
         if: matrix.label == 'android'
@@ -233,6 +252,29 @@ jobs:
                 ''|0) echo "::error::APK versionCode is '$code'; it must be derived from versionName"; exit 1 ;;
               esac
               echo "apk version ok: $got ($code)"
+
+              # The certificate must be the SAME one every release is signed with.
+              # A rotated key makes the APK impossible to install over the
+              # previous one, and nothing else in the pipeline would notice.
+              expected="${{ vars.ANDROID_SIGNING_SHA256 }}"
+              APKSIGNER="$(ls -1 "$ANDROID_SDK_ROOT"/build-tools/*/apksigner 2>/dev/null | sort -V | tail -1)"
+              test -n "$APKSIGNER" || APKSIGNER="$(command -v apksigner || true)"
+              test -n "$APKSIGNER" || { echo "::error::apksigner not found"; exit 1; }
+              actual="$("$APKSIGNER" verify --print-certs "dist/$f" 2>/dev/null \
+                | sed -n "s/.*SHA-256 digest: //p" | head -1 | tr 'A-F' 'a-f')"
+              test -n "$actual" || { echo "::error::could not read the APK signing certificate"; exit 1; }
+              if [ -n "$expected" ]; then
+                expected="$(printf '%s' "$expected" | tr -d ':' | tr 'A-F' 'a-f')"
+                if [ "$actual" != "$expected" ]; then
+                  echo "::error::APK is signed by $actual but the pinned key is $expected"
+                  echo "  updates would fail with INSTALL_FAILED_UPDATE_INCOMPATIBLE"
+                  exit 1
+                fi
+                echo "apk signature ok: $actual"
+              else
+                echo "::warning::ANDROID_SIGNING_SHA256 is unset; cannot pin the signing certificate."
+                echo "  Set it to: $actual"
+              fi
               ;;
           esac
           echo "artifacts ok (${{ matrix.label }} ${{ matrix.arch }})"
