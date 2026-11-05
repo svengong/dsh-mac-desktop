@@ -30,3 +30,8 @@ android/build/
 .emulator/
 .android-sdk/
 .DS_Store
+
+# Signing keys must never enter the repository: a leaked key lets anyone
+# publish an APK that Android will happily install over yours. The local
+# convenience keystore under android/.keystore/ stays ignored separately above.
+*.jks
