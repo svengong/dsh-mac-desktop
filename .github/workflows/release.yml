@@ -193,7 +193,13 @@ jobs:
           ALIAS="$(keytool -list -keystore .keystore/debug.keystore -storepass "$STOREPASS" 2>/dev/null \
             | sed -n 's/^\([^,]*\),.*PrivateKeyEntry.*/\1/p' | head -1)"
           test -n "$ALIAS" || { echo "::error::keystore has no PrivateKeyEntry"; exit 1; }
+          # BOTH values must reach the Gradle step: build.gradle.kts reads the
+          # alias and password from the environment, and a step-local `env:`
+          # does not outlive its own `run`. Forgetting the password failed the
+          # build with "keystore password was incorrect" while everything above
+          # had succeeded, which is a confusing place to land.
           echo "ANDROID_KEY_ALIAS=$ALIAS" >> "$GITHUB_ENV"
+          echo "ANDROID_KEYSTORE_PASSWORD=$STOREPASS" >> "$GITHUB_ENV"
           echo "keystore restored (alias: $ALIAS)"
 
       - name: Package APK (Android, arm64)
