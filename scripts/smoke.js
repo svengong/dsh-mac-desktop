@@ -18,7 +18,9 @@ const { terminalLabel, terminalPrefix } = require('../src/labels')
 const {
   compareVersions, isNewerVersion, versionOf, versionToken,
 } = require('../src/components')
-const { resolveChannelVersion, notargetPackage } = require('../src/artifact')
+const {
+  resolveChannelVersion, notargetPackage, npmInstallDirs, describeInstallFailure,
+} = require('../src/artifact')
 const { UpdateManager } = require('../src/update-manager')
 const { parseTarget, shellQuote, remotePath, tunnelArgs, parseSshConfig, listSshHosts } = require('../src/ssh')
 const { runCommand, spawnService, killActiveChildren, SERVICE_PID_PREFIX } = require('../src/runner')
@@ -272,6 +274,28 @@ async function main() {
   assert.strictEqual(notargetPackage('npm error notarget No matching version found for left-pad@1.2.3'), 'left-pad')
   assert.strictEqual(notargetPackage('npm error code ECONNRESET'), '')
   assert.strictEqual(notargetPackage(''), '')
+
+  // The artifact install must NEVER inherit `~/.npm`. A root-owned cache, a
+  // sandboxed home, or a read-only $HOME makes npm exit 1 with EPERM before
+  // it contacts the registry, and the update silently never happens. The
+  // cache therefore lives beside the version dir — the one tree the shell
+  // created and owns — and survives retries (it must not be inside the
+  // wiped-and-rebuilt version dir).
+  {
+    const versionDir = path.join('/home/u/.dsh/npm-home', 'runtime', 'npm0.2.2-rc.1')
+    const dirs = npmInstallDirs(versionDir)
+    assert.strictEqual(dirs.cache, path.join('/home/u/.dsh/npm-home', 'runtime', '.npm-cache'),
+      'cache is a runtime-root sibling, not inside the version dir')
+    assert.strictEqual(dirs.logs, path.join(dirs.cache, '_logs'))
+    assert.ok(!dirs.cache.startsWith(versionDir), 'a cancelled install wipes the version dir, not the cache')
+    assert.ok(!dirs.cache.includes(`${path.sep}.npm${path.sep}`), 'never the default ~/.npm cache')
+
+    // A permission failure is explained as such instead of leaving npm's
+    // misleading "chown your cache" advice as the whole story.
+    assert.ok(describeInstallFailure('npm error code EPERM\nnpm error syscall open').includes('没有写权限'))
+    assert.ok(describeInstallFailure('npm error errno EACCES').includes('没有写权限'))
+    assert.strictEqual(describeInstallFailure('npm error code ETARGET'), '', 'only permission failures are annotated')
+  }
 
   // A `dsh web` token URL survives being re-hosted onto another loopback
   // port — that is what lets an ssh device use the remote token on the local

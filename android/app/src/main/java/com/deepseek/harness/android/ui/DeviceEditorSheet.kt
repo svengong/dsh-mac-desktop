@@ -14,7 +14,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Delete
@@ -139,24 +138,33 @@ fun DeviceEditorSheet(
             Spacer(Modifier.height(12.dp))
 
             if (mode == ConnectionMode.SSH) {
-                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    OutlinedTextField(
-                        value = host,
-                        onValueChange = { host = it },
-                        label = { Text("主机") },
-                        placeholder = { Text("192.168.1.10") },
-                        singleLine = true,
-                        modifier = Modifier.weight(1f),
-                    )
-                    OutlinedTextField(
-                        value = port,
-                        onValueChange = { input -> port = input.filter { it.isDigit() } },
-                        label = { Text("端口") },
-                        singleLine = true,
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                        modifier = Modifier.padding(top = 0.dp).widthIn(),
-                    )
-                }
+                // Host and port each get their own row.
+                //
+                // They used to share a Row, with the port field given
+                // `Modifier.widthIn()` — and the file defines a no-argument
+                // `widthIn()` at the bottom that is a literal no-op
+                // (`this.then(Modifier)`). It constrained nothing, so the port
+                // field claimed the whole row and the host field (weight 1f)
+                // collapsed to zero width: on a phone the "主机" input was
+                // simply not there. A port is five digits at most; it never
+                // needed to share a row with the host name.
+                OutlinedTextField(
+                    value = host,
+                    onValueChange = { host = it },
+                    label = { Text("主机") },
+                    placeholder = { Text("192.168.1.10") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Spacer(Modifier.height(12.dp))
+                OutlinedTextField(
+                    value = port,
+                    onValueChange = { input -> port = input.filter { it.isDigit() } },
+                    label = { Text("端口") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.fillMaxWidth(),
+                )
                 Spacer(Modifier.height(12.dp))
                 OutlinedTextField(
                     value = user,
@@ -380,5 +388,3 @@ private fun KeyImportDialog(
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
     )
 }
-
-private fun Modifier.widthIn() = this.then(Modifier)

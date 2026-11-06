@@ -15,11 +15,16 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Article
 import androidx.compose.material.icons.filled.Cloud
@@ -97,6 +102,9 @@ fun DshRoot(
     var showLog by rememberSaveable { mutableStateOf(false) }
     var editorTarget by remember { mutableStateOf<Device?>(null) }
     var showEditor by rememberSaveable { mutableStateOf(false) }
+    // Folding the rail is a preference about how much window the page gets.
+    // Saved so a rotation does not silently re-expand it.
+    var railCollapsed by rememberSaveable { mutableStateOf(false) }
 
     val selected = devices.firstOrNull { it.id == selectedId } ?: devices.firstOrNull()
 
@@ -157,6 +165,9 @@ fun DshRoot(
             onThemeChange = onThemeChange,
             themeMode = settings?.themeMode ?: "system",
             onConnectionChanged = onConnectionChanged,
+            railCollapsed = railCollapsed,
+            onCollapse = { railCollapsed = true },
+            onExpand = { railCollapsed = false },
             harness = { slot -> harnessContent(slot) },
         )
     } else {
@@ -218,17 +229,21 @@ private fun TwoPaneLayout(
     onThemeChange: (String) -> Unit,
     themeMode: String,
     onConnectionChanged: (Boolean) -> Unit,
+    railCollapsed: Boolean,
+    onCollapse: () -> Unit,
+    onExpand: () -> Unit,
     harness: @Composable (HarnessSlot) -> Unit,
 ) {
     val form = FormFactor.current()
     Row(Modifier.fillMaxSize()) {
+        if (!railCollapsed) {
         Surface(
             modifier = Modifier.width(form.railWidth).fillMaxHeight(),
             color = MaterialTheme.colorScheme.surface,
             tonalElevation = 1.dp,
         ) {
             Column(Modifier.fillMaxHeight()) {
-                RailHeader(devices.size, onAdd)
+                RailHeader(devices.size, onAdd, onCollapse)
                 HorizontalDivider()
                 LazyColumn(Modifier.weight(1f)) {
                     items(devices, key = { it.id }) { device ->
@@ -257,6 +272,34 @@ private fun TwoPaneLayout(
             modifier = Modifier.fillMaxHeight().width(1.dp),
             color = MaterialTheme.colorScheme.outline.copy(alpha = 0.4f),
         )
+        } else {
+            // A 56dp strip, not an overlay: the harness page draws its own
+            // sidebar of unpredictable width, so any button floated on top of
+            // it eventually covers something the page needs.
+            Surface(
+                modifier = Modifier.width(56.dp).fillMaxHeight(),
+                color = MaterialTheme.colorScheme.surface,
+                tonalElevation = 1.dp,
+            ) {
+                Box(
+                    Modifier.fillMaxSize().padding(top = RAIL_TOP_PADDING),
+                    contentAlignment = Alignment.TopCenter,
+                ) {
+                    IconButton(
+                        onClick = onExpand,
+                        // Same 36dp box as the header's buttons so the toggle
+                        // sits at exactly the same height in both states.
+                        modifier = Modifier.size(36.dp),
+                    ) {
+                        Icon(
+                            Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                            contentDescription = "展开终端列表",
+                            modifier = Modifier.size(18.dp),
+                        )
+                    }
+                }
+            }
+        }
         Box(Modifier.weight(1f).fillMaxHeight()) {
             harness(
                 HarnessSlot(
@@ -276,10 +319,32 @@ private fun TwoPaneLayout(
     }
 }
 
+/**
+ * Distance from the window's top edge to the first row of rail controls.
+ *
+ * SHARED by the expanded header and the folded strip. They used to disagree —
+ * 28dp versus `statusBarsPadding() + 6dp` — so collapsing the rail made the
+ * toggle button jump vertically. One constant, one position, no movement.
+ *
+ * 28dp clears the status bar's CONTENT (which occupies 13-24dp on the tested
+ * device) without reserving the bar's full 36dp inset, which wasted a seventh
+ * of a 326dp-tall landscape window.
+ */
+private val RAIL_TOP_PADDING = 28.dp
+
 @Composable
-private fun RailHeader(count: Int, onAdd: () -> Unit) {
+private fun RailHeader(count: Int, onAdd: () -> Unit, onCollapse: () -> Unit) {
+    // A fixed offset, NOT `statusBarsPadding()`: the status bar's own inset is
+    // 36dp, which pushed the title a seventh of the way down a 326dp-tall
+    // landscape window and made the rail look empty above it. The bar's content
+    // only occupies 13-24dp, so RAIL_TOP_PADDING clears it and reclaims the
+    // rest. Plain padding rather than an inset because only the VERTICAL
+    // position matters here — applying the inset horizontally as well is what
+    // once pushed "终端" off the left edge and left a gutter down the rail.
     Row(
-        modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp, top = 18.dp, bottom = 14.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 20.dp, end = 4.dp, top = RAIL_TOP_PADDING, bottom = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(Modifier.weight(1f)) {
@@ -290,8 +355,19 @@ private fun RailHeader(count: Int, onAdd: () -> Unit) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-        IconButton(onClick = onAdd) {
-            Icon(Icons.Filled.Add, contentDescription = "新建终端")
+        IconButton(onClick = onAdd, modifier = Modifier.size(36.dp)) {
+            Icon(
+                Icons.Filled.Add,
+                contentDescription = "新建终端",
+                modifier = Modifier.size(18.dp),
+            )
+        }
+        IconButton(onClick = onCollapse, modifier = Modifier.size(36.dp)) {
+            Icon(
+                Icons.AutoMirrored.Filled.KeyboardArrowLeft,
+                contentDescription = "收起终端列表",
+                modifier = Modifier.size(18.dp),
+            )
         }
     }
 }
@@ -335,31 +411,35 @@ private fun RailFooter(
     onThemeChange: (String) -> Unit,
     themeMode: String,
 ) {
-    Column(Modifier.padding(8.dp)) {
-        NavigationDrawerItem(
-            selected = showLog,
-            onClick = { onShowLog(!showLog) },
-            label = { Text(if (showLog) "返回连接" else "日志") },
-            icon = { Icon(if (showLog) Icons.Filled.Computer else Icons.Filled.Article, contentDescription = null) },
-        )
-        NavigationDrawerItem(
-            selected = false,
-            onClick = onAdd,
-            label = { Text("新建终端") },
-            icon = { Icon(Icons.Filled.Add, contentDescription = null) },
-        )
-        NavigationDrawerItem(
-            selected = false,
-            onClick = { if (reconnectEnabled) onReconnect() },
-            label = { Text("重新连接") },
-            icon = { Icon(Icons.Filled.Refresh, contentDescription = null) },
-        )
-        NavigationDrawerItem(
-            selected = false,
-            onClick = { onThemeChange(nextTheme(themeMode)) },
-            label = { Text(themeLabel(themeMode)) },
-            icon = { Icon(Icons.Filled.DarkMode, contentDescription = null) },
-        )
+    // One row of icons instead of four stacked NavigationDrawerItems.
+    //
+    // Four list items cost ~224dp. A phone in landscape is ~400dp tall, so the
+    // footer alone consumed most of the rail and the terminal list — the reason
+    // this rail exists — was reduced to a thin empty strip. As a row this is
+    // 48dp and every action keeps a full touch target and a description.
+    Row(
+        modifier = Modifier.fillMaxWidth().navigationBarsPadding().padding(vertical = 4.dp),
+        horizontalArrangement = Arrangement.SpaceEvenly,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        IconButton(onClick = { onShowLog(!showLog) }) {
+            Icon(
+                if (showLog) Icons.Filled.Computer else Icons.Filled.Article,
+                contentDescription = if (showLog) "返回连接" else "日志",
+            )
+        }
+        IconButton(onClick = onAdd) {
+            Icon(Icons.Filled.Add, contentDescription = "新建终端")
+        }
+        IconButton(onClick = { if (reconnectEnabled) onReconnect() }, enabled = reconnectEnabled) {
+            Icon(Icons.Filled.Refresh, contentDescription = "重新连接")
+        }
+        IconButton(onClick = { onThemeChange(nextTheme(themeMode)) }) {
+            Icon(
+                if (isDark(themeMode)) Icons.Filled.LightMode else Icons.Filled.DarkMode,
+                contentDescription = themeLabel(themeMode),
+            )
+        }
     }
 }
 

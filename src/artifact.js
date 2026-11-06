@@ -120,6 +120,40 @@ async function queryNpmArtifact({ registryUrl = '', timeoutMs = 20_000 } = {}) {
 }
 
 /**
+ * The cache/log dirs this install owns.
+ *
+ * npm's default cache is `~/.npm`, and the install process does NOT control
+ * who owns or sandboxes that directory. When anything about it is
+ * unwritable — a root-owned `_cacache` from a `sudo npm`, a sandbox that
+ * denies the path, a read-only home — npm exits 1 with EPERM before it ever
+ * contacts the registry, and the user sees an update that simply never
+ * happens. Reports of exactly that ("EPERM … _cacache/tmp") are what this
+ * avoids: the artifact install keeps its cache beside the version it is
+ * building, so it only needs the runtime root, which the shell already
+ * created and owns.
+ * @param {string} runtimeDir - the version dir being installed into.
+ * @returns {{cache: string, logs: string}}
+ */
+function npmInstallDirs(runtimeDir) {
+  // `<runtimeRoot>/.npm-cache` rather than inside `runtimeDir`: the version
+  // dir is wiped and rebuilt on every attempt (and removed on cancel), and a
+  // cache inside it would be re-downloaded every time. The sibling directory
+  // survives, so retries reuse the download.
+  const cache = path.join(path.dirname(runtimeDir), '.npm-cache')
+  return { cache, logs: path.join(cache, '_logs') }
+}
+
+/** Human-readable reason for a failed install, keeping the directory in view. */
+function describeInstallFailure(detail) {
+  if (/EPERM|EACCES|permission denied/iu.test(detail)) {
+    return '\n\n这是“没有写权限”导致的失败，而不是版本或网络问题：'
+      + '安装进程无法写入 npm 的缓存/日志目录。壳已把缓存隔离到运行时目录，'
+      + '若仍出现，请检查该目录的属主与磁盘权限。'
+  }
+  return ''
+}
+
+/**
  * Install the pinned official CLI into `runtimeDir` with `npm install --prefix`.
  * The runtime dir must already exist (created by the caller); node_modules is
  * created inside it. Returns the resolved bin path on success.
@@ -130,6 +164,10 @@ async function queryNpmArtifact({ registryUrl = '', timeoutMs = 20_000 } = {}) {
  * registry — the two disagreed, and a mirror whose packument lagged behind
  * its dist-tags failed the install with ETARGET for a version the preflight
  * had just advertised.
+ *
+ * The cache and log dirs are passed explicitly for the same reason (see
+ * `npmInstallDirs`): inheriting `~/.npm` lets an unrelated permission
+ * problem kill an update before it starts.
  *
  * A `notarget` failure is retried instead of being reported verbatim: the
  * cached packument for the offending package is purged and the install is
@@ -147,11 +185,27 @@ async function installNpmArtifact({ nodeBin, npmBin, runtimeDir, spec, env, onLi
   }
   const configured = String(registryUrl || DEFAULT_REGISTRY).replace(/\/$/, '')
   const emit = onLine === undefined ? undefined : line => onLine(`[npm] ${line}`)
+  const { cache: cacheDir, logs: logsDir } = npmInstallDirs(runtimeDir)
+  // The cache dir must exist before npm touches it; the whole point is to
+  // never depend on `~/.npm` being writable.
+  try {
+    fs.mkdirSync(logsDir, { recursive: true })
+  } catch (error) {
+    throw new Error(`无法创建 npm 缓存目录 ${cacheDir}：${error.message}`)
+  }
 
   const run = async registry => {
     const result = await runCommand({
       cmd: npm,
-      args: ['install', '--prefix', runtimeDir, '--no-audit', '--no-fund', '--registry', registry, spec],
+      args: [
+        'install',
+        '--prefix', runtimeDir,
+        '--cache', cacheDir,
+        '--logs-dir', logsDir,
+        '--no-audit', '--no-fund',
+        '--registry', registry,
+        spec,
+      ],
       cwd: runtimeDir,
       env,
       timeoutMs,
@@ -166,8 +220,13 @@ async function installNpmArtifact({ nodeBin, npmBin, runtimeDir, spec, env, onLi
       throw error
     }
     if (result.code !== 0) {
+      // Keep the TAIL but also surface a permission failure's real shape: the
+      // last 8 lines of an EPERM are npm's generic "chown your cache" advice,
+      // which points at the wrong thing when the cache is already private.
       const tail = result.lines.slice(-8).join('\n')
-      const error = new Error(`官方产物安装失败（退出码 ${result.code}）：${tail || '无输出'}`)
+      const error = new Error(
+        `官方产物安装失败（退出码 ${result.code}）：${tail || '无输出'}${describeInstallFailure(tail)}`,
+      )
       error.registry = registry
       throw error
     }
@@ -185,12 +244,14 @@ async function installNpmArtifact({ nodeBin, npmBin, runtimeDir, spec, env, onLi
     }
     // Drop only the offending package's cached packument: a full
     // `npm cache clean --force` would force every other dependency to be
-    // re-fetched on a connection that is already proving slow.
+    // re-fetched on a connection that is already proving slow. The cache
+    // flag must match the install's, or this would purge a cache the
+    // install never reads.
     const stale = notargetPackage(error.message)
     if (stale !== '') {
       await runCommand({
         cmd: npm,
-        args: ['cache', 'clean', stale, '--force'],
+        args: ['cache', 'clean', stale, '--force', '--cache', cacheDir],
         cwd: runtimeDir,
         env,
         timeoutMs: 60_000,
@@ -236,6 +297,8 @@ module.exports = {
   queryNpmArtifact,
   resolveChannelVersion,
   installNpmArtifact,
+  npmInstallDirs,
+  describeInstallFailure,
   verifyNpmArtifact,
   notargetPackage,
 }
