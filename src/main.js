@@ -91,7 +91,18 @@ const SHELL_PRELOAD = path.join(__dirname, 'shell-preload.js')
  * opens a Host-side panel that is not the frontmost app (first click eaten).
  */
 const HARNESS_PRELOAD = path.join(__dirname, 'harness-preload.js')
-const SHELL_FRAME_HEIGHT = 46
+
+/**
+ * Height of the shell's own title/toolbar strip, in logical pixels.
+ *
+ * Kept deliberately short: this strip is window chrome, not content, so every
+ * pixel it takes comes off the harness below. 42px is the narrowest height
+ * that still centres a 22px control with breathing room and leaves the native
+ * traffic lights (which keep their default inset) uncrowded. The CSS copy of
+ * this number (`--shell-frame-height` in ui/shell.css) must stay in step; both
+ * sides carry a comment, and this one is the source of truth.
+ */
+const SHELL_FRAME_HEIGHT = 42
 
 /**
  * Keep development launches from touching the packaged app's settings/logs.
@@ -1437,11 +1448,18 @@ function createBrowserWindow(bounds = null) {
     //  macOS    hiddenInset keeps the traffic lights and lets the shell pad
     //           around them (trafficLightPosition). The frame draws the title.
     //  Windows  hidden + titleBarOverlay puts the native min/max/close cluster
-    //           in the top-right and keeps the shell's own 46px bar as the
+    //           in the top-right and keeps the shell's own bar as the
     //           draggable strip. The overlay takes a transparent background so
     //           a dark frame never carries a white caption band.
     ...(IS_MAC
-      ? { titleBarStyle: 'hiddenInset', trafficLightPosition: { x: 18, y: 15 } }
+      ? {
+          titleBarStyle: 'hiddenInset',
+          // Electron's default traffic-light placement already sits optically
+          // right in a hiddenInset bar, so this stays at the values the shell
+          // shipped with. Moving y with the frame height pushed the buttons
+          // down instead of centring them — leave the native default alone.
+          trafficLightPosition: { x: 18, y: 15 },
+        }
       : {
           titleBarStyle: 'hidden',
           titleBarOverlay: {
@@ -2101,7 +2119,7 @@ function refreshMenu() {
   // live. Windows/Linux attach the menu to each WINDOW instead (see the
   // `autoHideMenuBar` + `setMenuBarVisibility(false)` pair in
   // createBrowserWindow): the commands and their accelerators stay live, but
-  // no menu bar paints over the frameless 46px shell frame.
+  // no menu bar paints over the frameless shell frame.
   Menu.setApplicationMenu(buildMenu({
     actions,
     getStatus: () => session === null ? idleStatus() : session.connection.status,

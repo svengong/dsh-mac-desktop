@@ -47,13 +47,36 @@
   --ds-font-weight-bold: 700;
   --ds-line-height: 1.45;
 
-  /* control / layout metrics (frame & titlebar heights stay 46px/48px — they
-     are coupled to SHELL_FRAME_HEIGHT and the native traffic-light inset) */
+  /* control / layout metrics (the frame height lives in the
+     --shell-frame-height token below — it is coupled to SHELL_FRAME_HEIGHT) */
   --ds-control-height: 22px;
   --ds-control-height-sm: 18px;
   --ds-input-height: 22px;
-  --ds-nav-height: 28px;
+  /* Compact, pointer-sized nav rows (HIG: Mac controls are 22–28pt; pointer
+     input needs no touch-sized targets). 22px leaves the 42px strip's content
+     optically centred with room above and below. */
+  --ds-nav-height: 22px;
   --ds-sidebar-width: 224px;
+
+  /* Workspace title/toolbar strip height. MUST equal SHELL_FRAME_HEIGHT in
+     src/main.js: that value is also the Windows titleBarOverlay height and the
+     top of the embedded WebContentsViews, so a mismatch would either clip the
+     strip or leave a dead band under it. */
+  --shell-frame-height: 42px;
+  /* Native chrome the strip has to leave clear. macOS traffic lights are
+     centred at x=20 in main.js and span 62px, so the toolbar content starts at
+     84px — matching the 20pt content margin of a native toolbar. Windows and
+     Linux reserve the caption cluster on the trailing edge instead. */
+  --shell-frame-inset-start: 84px;
+  --shell-frame-inset-end: 152px;
+  /* Optical-centering nudge for text inside the frame. `align-items: center`
+     centres a text run's LINE BOX, not its ink: the font's ascent is taller
+     than its descent, so identical 11px Latin/CJK labels paint ~0.5px above
+     the strip's true middle. Native traffic lights are drawn by AppKit
+     against the optical centre and therefore look right next to text that
+     does not. Every text-bearing child of the frame adds this back, so the
+     labels sit on the same visual axis as the window controls. */
+  --shell-frame-optical-nudge: 1px;
 
   /* ── default theme = liquid-glass-dark (dark appearance) ───────────────── */
   --ds-bg: #0e0e16;
@@ -455,24 +478,40 @@ body.shell-workspace {
   background: var(--ds-bg);
 }
 
+/* The workspace frame IS the title bar + toolbar, in the HIG sense: window
+   controls on the leading edge, the app/view title next to them, view
+   switchers and actions grouped around it, and status on the trailing edge.
+   Apple's toolbar guidance asks for chrome to stay understated and for the
+   content layer to carry the colour, so the strip is a quiet band over the
+   content with the accent spent only on the trailing primary action — not a
+   second navigation surface competing with the harness below. */
+
 .shell-frame {
   position: fixed;
   inset: 0 0 auto 0;
-  /* 46px is coupled to SHELL_FRAME_HEIGHT in main.js and the native
-     traffic-light inset — do NOT theme this height. */
-  height: 46px;
+  /* Coupled to SHELL_FRAME_HEIGHT in main.js (see the token) — do NOT theme
+     this height: it is also the Windows overlay height and the top edge of
+     the embedded views. */
+  height: var(--shell-frame-height);
   display: flex;
   align-items: center;
-  gap: 14px;
+  /* Brand → view switcher is one tight group; the switcher spaces its own
+     buttons by 2px. */
+  gap: 6px;
   /* Leave room for the native window chrome rendered by titleBarStyle.
-     Default (macOS): the traffic lights sit around x=18–70 in a 46px
-     hiddenInset bar, so the frame starts at 84px. Windows AND Linux put their
-     caption buttons (minimise/restore/close) on the RIGHT — the
-     [data-platform] blocks below move the inset there instead. */
-  padding: 0 12px 0 84px;
-  background: color-mix(in srgb, var(--ds-sidebar-bg) 86%, var(--ds-bg));
-  border-bottom: var(--ds-border-width) solid var(--ds-border);
-  box-shadow: var(--ds-highlight), 0 1px 0 color-mix(in srgb, var(--ds-border-strong) 55%, transparent);
+     Default (macOS): the traffic lights are centred at x=20 and end at ~78px,
+     so toolbar content starts at 84px (a native toolbar's 20pt content
+     margin). Windows AND Linux put their caption buttons
+     (minimise/restore/close) on the RIGHT — the [data-platform] blocks below
+     move the inset there instead. */
+  padding: 0 var(--ds-space-3) 0 var(--shell-frame-inset-start);
+  /* A native toolbar is not an opaque slab: it is a translucent material the
+     window content shows through, separated from that content by a single
+     hairline rather than a hard double border. The band is tinted from the
+     page background (not the sidebar) so the strip reads as window frame. */
+  background: color-mix(in srgb, var(--ds-bg) 72%, transparent);
+  border-bottom: var(--ds-border-width) solid color-mix(in srgb, var(--ds-border) 70%, transparent);
+  box-shadow: var(--ds-highlight);
   backdrop-filter: blur(var(--ds-blur)) saturate(var(--ds-saturate));
   -webkit-backdrop-filter: blur(var(--ds-blur)) saturate(var(--ds-saturate));
   -webkit-app-region: drag;
@@ -488,7 +527,7 @@ body.shell-workspace {
    in the top-RIGHT corner. The frame therefore reserves that strip and drops
    the macOS left inset, so the two never overlap. The reserved height matches
    SHELL_FRAME_HEIGHT, which is also the overlay height handed to Electron —
-   the shell's 46px bar IS the titlebar on all three platforms.
+   the shell's bar IS the titlebar on all three platforms.
 
    Linux is in this list because main.js gives it the SAME branch as Windows
    (only macOS gets hiddenInset). Scoping these rules to "windows" alone left
@@ -498,17 +537,17 @@ body.shell-workspace {
    stays independently tunable if a WM needs a different width. */
 :root[data-platform="windows"] .shell-frame,
 :root[data-platform="linux"] .shell-frame {
-  padding: 0 152px 0 12px;
+  padding: 0 var(--shell-frame-inset-end) 0 var(--ds-space-3);
 }
 
 /* Neither platform paints a traffic-light reservation, so the brand sits at
-   the true leading edge and the settings rail needs no top inset above it. */
+   the true leading edge. */
 :root[data-platform="windows"] .shell-frame-brand,
 :root[data-platform="linux"] .shell-frame-brand {
   margin-left: 2px;
 }
 
-/* The embedded panel has no native chrome above it, so the 46px traffic-light
+/* The embedded panel has no native chrome above it, so the traffic-light
    reservation would leave a dead strip under the shell frame. */
 :root[data-platform="windows"] body.embedded .settings-sidebar,
 :root[data-platform="linux"] body.embedded .settings-sidebar {
@@ -520,99 +559,144 @@ body.shell-workspace {
    sit underneath them. */
 :root[data-platform="windows"] body.embedded .settings-titlebar,
 :root[data-platform="linux"] body.embedded .settings-titlebar {
-  padding-right: 152px;
+  padding-right: var(--shell-frame-inset-end);
 }
 
+/* App identity immediately right of the window controls — the place a native
+   app puts either the document title or a small branded mark. Kept quiet and
+   small: the strip is chrome, so the brand must not out-shout the harness
+   content below it. */
 .shell-frame-brand {
   flex: none;
   display: flex;
   align-items: center;
-  gap: 7px;
-  padding-right: 4px;
-  font-size: var(--ds-font-size-base);
-  font-weight: var(--ds-font-weight-bold);
-  letter-spacing: 0.02em;
+  gap: 5px;
+  padding-right: 2px;
+  color: var(--ds-text-muted);
+  font-size: var(--ds-font-size-xs);
+  font-weight: var(--ds-font-weight-semibold);
+  letter-spacing: 0.06em;
+  /* Same optical nudge as the nav labels, scaled down a touch: this label's
+     line box is taller than the run it holds, so a full 1px overshoots. */
+  transform: translateY(calc(var(--shell-frame-optical-nudge) * 0.7));
 }
 
 .shell-frame-mark {
-  width: 18px;
-  height: 18px;
-  border-radius: var(--ds-radius-xs);
+  width: 14px;
+  height: 14px;
+  border-radius: 4px;
   background: linear-gradient(135deg, var(--ds-accent), var(--ds-accent-hover));
   color: #fff;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-size: var(--ds-font-size-xs);
+  font-size: 8px;
   font-weight: var(--ds-font-weight-bold);
+  letter-spacing: 0;
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
 }
 
+/* View switcher. A native toolbar uses a *segmented* control for this
+   ("switching between content views is a toolbar pattern"), so the tabs read
+   as one contained capsule: a recessive track, a raised selected segment, and
+   pill radii concentric with the 24px control height. The accent stays on the
+   trailing/primary action only — a full accent fill on a toolbar segment is
+   what makes a desktop strip look like a web tab bar.
+
+   The group HUGS its buttons (`flex: 0 1 auto`) and `margin-right: auto`
+   pushes everything after it — the trailing status zone — to the far edge.
+   Growing the group itself (`flex: 1`) made the trailing zone chase the
+   buttons instead of sitting at the window's right edge, which is where a
+   native toolbar puts its trailing item group. */
 .shell-frame-nav {
-  flex: 1;
+  flex: 0 1 auto;
   min-width: 0;
   display: flex;
   align-items: center;
   gap: 2px;
   height: 100%;
+  margin-right: auto;
 }
 
-.shell-frame-nav button {
+.shell-frame-nav > button {
+  flex: none;
+}
+
+.shell-frame-nav > button[data-view] {
   height: var(--ds-nav-height);
-  padding: 0 11px;
+  padding: 0 9px;
   border: none;
-  border-radius: var(--ds-radius-sm);
+  border-radius: var(--ds-radius-full);
   background: transparent;
   color: var(--ds-text-secondary);
-  font-size: var(--ds-font-size-md);
-  line-height: 20px;
+  font-size: var(--ds-font-size-base);
+  font-weight: var(--ds-font-weight-medium);
+  line-height: 1;
+  /* Push the glyph down onto the frame's optical centre (see the token). */
+  padding-top: calc(var(--shell-frame-optical-nudge) * 2);
   cursor: pointer;
   transition: background var(--ds-duration-fast) var(--ds-ease), color var(--ds-duration-fast) var(--ds-ease);
 }
 
-.shell-frame-nav button:hover { background: var(--ds-surface-hover); color: var(--ds-text); }
-.shell-frame-nav button.active {
-  background: var(--ds-accent);
-  color: #fff;
+.shell-frame-nav > button[data-view]:hover { background: var(--ds-surface-hover); color: var(--ds-text); }
+.shell-frame-nav > button[data-view].active {
+  background: var(--ds-surface-raised);
+  color: var(--ds-text);
   font-weight: var(--ds-font-weight-semibold);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.16), inset 0 1px 0 rgba(255, 255, 255, 0.10);
 }
 
+/* Trailing action: the one control in the strip allowed to carry the accent,
+   because creating a window is the frame's primary action (HIG: one
+   `.prominent` action per toolbar, on the trailing side). */
 .shell-frame-new {
   height: var(--ds-nav-height);
-  min-width: 28px;
-  padding: 0 8px;
+  width: var(--ds-nav-height);
+  margin-left: 2px;
+  padding: 0;
   border: none;
-  border-radius: var(--ds-radius-sm);
-  background: transparent;
-  color: var(--ds-text-secondary);
-  font-size: var(--ds-font-size-lg);
-  line-height: 20px;
+  border-radius: var(--ds-radius-full);
+  background: var(--ds-accent-soft);
+  color: var(--ds-accent);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: var(--ds-font-size-md);
+  line-height: 1;
   cursor: pointer;
   transition: background var(--ds-duration-fast) var(--ds-ease), color var(--ds-duration-fast) var(--ds-ease);
 }
 
-.shell-frame-new:hover { background: var(--ds-surface-hover); color: var(--ds-text); }
-.shell-frame-new:active { background: var(--ds-surface-raised); }
+.shell-frame-new:hover { background: var(--ds-accent); color: #fff; }
+.shell-frame-new:active { background: var(--ds-accent-hover); color: #fff; }
 
+/* Trailing status zone: terminal chip + live status line, right-aligned like
+   a native toolbar's trailing item group. */
 .shell-frame-context {
   flex: none;
   max-width: 42%;
   display: flex;
   align-items: center;
-  gap: 10px;
+  justify-content: flex-end;
+  gap: 8px;
   min-width: 0;
-  padding-right: 4px;
+  padding-right: 2px;
 }
 
 .shell-frame-terminal {
   flex: none;
-  padding: 2px 8px;
-  border-radius: var(--ds-radius-xs);
-  background: var(--ds-accent-soft);
+  padding: 1px 7px;
+  border-radius: var(--ds-radius-full);
+  background: var(--ds-surface);
   color: var(--ds-text-secondary);
   font-size: var(--ds-font-size-sm);
-  font-weight: var(--ds-font-weight-semibold);
+  font-weight: var(--ds-font-weight-medium);
   font-variant-numeric: tabular-nums;
+  box-shadow: inset 0 0 0 var(--ds-border-width) color-mix(in srgb, var(--ds-border) 80%, transparent);
+  /* Optical nudge: the chip keeps its inset ring on the box, only the text
+     moves (padding compensates so the ring stays symmetric). */
+  padding-top: calc(1px + var(--shell-frame-optical-nudge));
+  padding-bottom: 1px;
 }
 
 .shell-frame-status {
@@ -622,11 +706,14 @@ body.shell-workspace {
   font-size: var(--ds-font-size-sm);
   text-overflow: ellipsis;
   white-space: nowrap;
+  transform: translateY(var(--shell-frame-optical-nudge));
 }
 
 .shell-viewport {
   position: fixed;
-  inset: 46px 0 0 0;
+  /* Coupled to --shell-frame-height (the frame band ends, then the view
+     starts): changed together, never on their own. */
+  inset: var(--shell-frame-height) 0 0 0;
   background: var(--ds-body-bg);
 }
 
@@ -895,6 +982,10 @@ body.embedded .settings-titlebar .titlebar-actions {
   flex-direction: column;
   gap: 2px;
   align-self: stretch;
+  /* The embedded panel stacks this rail directly beside the titlebar, so its
+     first label has to centre on that 52px strip: (52 − 10px label − 12px
+     gap)/2 = 16px, the same value the standalone panel used, so this is also
+     what keeps both modes identical. */
   padding: var(--ds-space-4) 10px var(--ds-space-4);
   background: var(--ds-sidebar-bg);
   border-right: var(--ds-border-width) solid var(--ds-border);
@@ -1000,8 +1091,9 @@ body.embedded .settings-titlebar .titlebar-actions {
   width: var(--ds-sidebar-width);
   display: flex;
   flex-direction: column;
-  /* 46px top inset leaves room for the native traffic lights. */
-  padding: 46px 10px 10px;
+  /* Top inset leaves room for the native traffic lights (macOS) — tied to the
+     frame height so the rail's first row lines up with the frame's content. */
+  padding: var(--shell-frame-height) 10px 10px;
   background: var(--ds-sidebar-bg);
   border-right: var(--ds-border-width) solid var(--ds-border);
   backdrop-filter: blur(var(--ds-blur)) saturate(var(--ds-saturate));
@@ -1115,15 +1207,22 @@ body.embedded .settings-titlebar .titlebar-actions {
 
 .settings-titlebar {
   flex: none;
-  height: 48px;
+  /* In the embedded panel this strip sits directly under the shell frame, so
+     it takes the frame's height: two stacked title strips of different
+     heights read as a layout mistake, and matching lets the rail's first row
+     line up with the reading column. Standalone (window) panels keep the
+     original slack 48px because they do not follow a frame. */
+  height: var(--shell-frame-height);
   display: flex;
   align-items: center;
   gap: var(--ds-space-3);
   /* Same inline padding as .settings-scroll, so the title sits on the exact
      left edge of the reading column instead of drifting from it. */
   padding: 0 var(--ds-space-6);
-  border-bottom: var(--ds-border-width) solid var(--ds-border);
-  background: color-mix(in srgb, var(--ds-sidebar-bg) 72%, var(--ds-bg));
+  /* Same hairline treatment as the frame above: one continuous divider rather
+     than two stacked rules at different opacities. */
+  border-bottom: var(--ds-border-width) solid color-mix(in srgb, var(--ds-border) 70%, transparent);
+  background: color-mix(in srgb, var(--ds-bg) 60%, transparent);
   backdrop-filter: blur(var(--ds-blur)) saturate(var(--ds-saturate));
   -webkit-backdrop-filter: blur(var(--ds-blur)) saturate(var(--ds-saturate));
   -webkit-app-region: drag;

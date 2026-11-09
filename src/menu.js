@@ -21,7 +21,7 @@
  *    only place a macOS app can put commands.
  *  - Windows/Linux: installed as the WINDOW menu but kept hidden
  *    (`setAutoHideMenuBar(true)` + `setMenuBarVisibility(false)` in
- *    createBrowserWindow) so the frameless 46px shell frame owns the top edge
+ *    createBrowserWindow) so the frameless shell frame owns the top edge
  *    while the accelerators (Ctrl+N, Ctrl+,, Ctrl+U) stay live. The same
  *    actions are also on the tray.
  *
