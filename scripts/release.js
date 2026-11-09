@@ -59,8 +59,30 @@ async function main() {
   const currentTag = 'v' + currentVersion
 
   const localHead = sh('git rev-parse HEAD')
-  const remoteHead = sh('git ls-remote origin refs/heads/main', { allowFail: true }).split(/\s+/)[0] || ''
-  if (remoteHead !== '' && remoteHead !== localHead) {
+  // ls-remote MUST fail loudly. It used to run with allowFail, so a dead
+  // remote (SSH blocked, no network, bad URL) returned '' and every check
+  // downstream read that as "nothing on origin": the script declared an
+  // already-released version unpublished and tried to re-push its tag, which
+  // the remote then rejected — or worse, published the same version twice if
+  // the tag pushed cleanly. A release helper must never confuse "could not
+  // ask" with "not there".
+  let remoteRefs
+  try {
+    remoteRefs = sh('git ls-remote origin refs/heads/main refs/tags/' + currentTag)
+  } catch (error) {
+    console.error('无法读取 origin 的状态，不能判断是否已发布：')
+    console.error('  ' + String(error.message).split('\n')[0])
+    console.error('  （检查网络、SSH 通路或 remote URL：git remote -v）')
+    process.exit(1)
+  }
+  const remoteLines = remoteRefs.split('\n').filter(Boolean)
+  const mainLine = remoteLines.find(function (line) { return line.endsWith('\trefs/heads/main') }) || ''
+  const remoteHead = mainLine.split(/\s+/)[0] || ''
+  if (remoteHead === '') {
+    console.error('origin 上找不到 main 分支，remote 配置可能不对：git remote -v')
+    process.exit(1)
+  }
+  if (remoteHead !== localHead) {
     console.error('本地 main 与 origin/main 不一致（需要先 git pull 或 git push）。')
     console.error('  local : ' + localHead.slice(0, 12))
     console.error('  origin: ' + remoteHead.slice(0, 12))
@@ -92,7 +114,9 @@ async function main() {
 
   // ── 3. is the current version already published? ────────────────────
 
-  const tagExists = sh('git ls-remote origin refs/tags/' + currentTag, { allowFail: true }) !== ''
+  const tagExists = remoteLines.some(function (line) {
+    return line.endsWith('\trefs/tags/' + currentTag)
+  })
 
   // ── 4. plan ─────────────────────────────────────────────────────────
 
