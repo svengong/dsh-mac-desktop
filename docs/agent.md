@@ -41,6 +41,8 @@ npm 产物渠道（`@deepseek-ai/dsh`）与 `dsh plugin` 命令。
 | 菜单/托盘按平台 | `src/menu.js`、`src/tray.js`、`src/main.js#refreshMenu` | macOS 装应用菜单 + Dock 菜单；Windows/Linux 装窗口菜单但 `setMenuBarVisibility(false)`（保留 `CmdOrCtrl` 加速键），操作入口靠托盘。托盘图标 macOS 用模板图、其它平台用彩色图标缩到 16px |
 | Linux 支持 | `src/platform.js`、`src/ui/shell.css`、`package.json#build`、`.github/workflows/*.yml` | 与 macOS 共用 POSIX 实现；AppImage/deb 双架构进 CI 与 release；窗口留白已覆盖 `data-platform="linux"`；架构名按格式不同（见不变量 35） |
 | 目录选择器 | `src/picker.js`、`src/harness-preload.js`、`src/main.js#picker:directory`、`src/dialogs.js` | harness 页与设置面板都走同一个窗口 sheet 选择器；父窗口按 webContents 显式解析，不按焦点 |
+| 设置「关于」 | `src/main.js#aboutInfo`、`src/ui/settings.html`、`android/…/ui/AboutDialog.kt` | 版本经 `dialog:get-state` 的 `about` 字段下发（不新增 IPC，不破坏两次渲染锚定）；Android 用 `BuildConfig.VERSION_NAME`（与 package.json 同源），不提供更新入口 |
+| Windows 设置滚动性能 | `src/ui/shell.css`（`:root[data-platform="windows"] .settings-shell`）、`src/ui/settings.html` 滚动高亮 | Windows 关闭设置面板内 backdrop-filter；scroll-spy 缓存分区偏移 + rAF 合并 + 去重写入 |
 
 ## 3. 必须遵守的不变量
 
@@ -160,6 +162,14 @@ npm 产物渠道（`@deepseek-ai/dsh`）与 `dsh plugin` 命令。
     的 sender 它不保证返回宿主窗口，退回 app-modal 就复现原症状。用
     `workspaceOwning(sender)`（workspace 表里按 webContents 匹配）。设置面板同理走
     `handlers.ownerWindow`。
+39. **`shell.openExternal` 只接受 `http/https/mailto`（`isBrowserSafeUrl`）。** `isExternalUrl` 是
+    **导航**分类（离开 harness 视图），不是**启动**授权：`file:`/自定义协议交给系统会执行程序，
+    `smb://` 会在 Windows 上泄露 NTLM。`file:` 链接只 `showItemInFolder`（仅限本机路径，拒绝 UNC）。
+40. **SSH 目标不能以 `-` 开头，argv 中目标前固定加 `--`。** 否则 `-oProxyCommand=…` 会被 OpenSSH
+    当作选项执行本地命令。`parseTarget` 拒绝 `-` 开头/空白/控制字符。
+41. **设备表查找一律 `hasDevice()`（own-property）。** `devices` 是普通对象，`__proto__`/`constructor`
+    会沿原型链命中，使归一化产出 undefined 字段或把默认设备写回用户配置。
+
 ## 4. 验收命令
 
 ```sh

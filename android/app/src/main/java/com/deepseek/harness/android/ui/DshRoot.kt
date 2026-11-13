@@ -34,6 +34,7 @@ import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.filled.Language
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -100,6 +101,7 @@ fun DshRoot(
     val form = FormFactor.current()
     var selectedId by rememberSaveable { mutableStateOf(settings?.lastDeviceId) }
     var showLog by rememberSaveable { mutableStateOf(false) }
+    var showAbout by rememberSaveable { mutableStateOf(false) }
     var editorTarget by remember { mutableStateOf<Device?>(null) }
     var showEditor by rememberSaveable { mutableStateOf(false) }
     // Folding the rail is a preference about how much window the page gets.
@@ -154,6 +156,7 @@ fun DshRoot(
             connection = connection,
             showLog = showLog,
             onShowLog = { showLog = it },
+            onShowAbout = { showAbout = true },
             onSelect = { device ->
                 selectedId = device.id
                 onTouchDevice(device.id)
@@ -178,6 +181,7 @@ fun DshRoot(
             connection = connection,
             showLog = showLog,
             onShowLog = { showLog = it },
+            onShowAbout = { showAbout = true },
             onSelect = { device ->
                 selectedId = device.id
                 onTouchDevice(device.id)
@@ -192,6 +196,8 @@ fun DshRoot(
             harness = { slot -> harnessContent(slot) },
         )
     }
+
+    if (showAbout) AboutDialog(onDismiss = { showAbout = false })
 
     if (showEditor) {
         DeviceEditorSheet(
@@ -222,6 +228,7 @@ private fun TwoPaneLayout(
     connection: ConnectionState,
     showLog: Boolean,
     onShowLog: (Boolean) -> Unit,
+    onShowAbout: () -> Unit,
     onSelect: (Device) -> Unit,
     onAdd: () -> Unit,
     onEdit: (Device) -> Unit,
@@ -260,6 +267,7 @@ private fun TwoPaneLayout(
                 RailFooter(
                     showLog = showLog,
                     onShowLog = onShowLog,
+                    onShowAbout = onShowAbout,
                     onAdd = onAdd,
                     onReconnect = onReconnect,
                     reconnectEnabled = selected != null,
@@ -405,6 +413,7 @@ private fun DeviceRailItem(
 private fun RailFooter(
     showLog: Boolean,
     onShowLog: (Boolean) -> Unit,
+    onShowAbout: () -> Unit,
     onAdd: () -> Unit,
     onReconnect: () -> Unit,
     reconnectEnabled: Boolean,
@@ -440,6 +449,9 @@ private fun RailFooter(
                 contentDescription = themeLabel(themeMode),
             )
         }
+        IconButton(onClick = onShowAbout) {
+            Icon(Icons.Outlined.Info, contentDescription = "关于")
+        }
     }
 }
 
@@ -454,6 +466,7 @@ private fun OnePaneLayout(
     connection: ConnectionState,
     showLog: Boolean,
     onShowLog: (Boolean) -> Unit,
+    onShowAbout: () -> Unit,
     onSelect: (Device) -> Unit,
     onAdd: () -> Unit,
     onEdit: (Device) -> Unit,
@@ -490,6 +503,7 @@ private fun OnePaneLayout(
                 onAdd = onAdd,
                 onEdit = onEdit,
                 onShowLog = { onShowLog(true) },
+                onShowAbout = onShowAbout,
                 onThemeChange = onThemeChange,
             )
             Route.Harness -> harness(
@@ -552,6 +566,7 @@ private fun TerminalsScreen(
     onAdd: () -> Unit,
     onEdit: (Device) -> Unit,
     onShowLog: () -> Unit,
+    onShowAbout: () -> Unit,
     onThemeChange: (String) -> Unit,
 ) {
     Scaffold(
@@ -576,6 +591,9 @@ private fun TerminalsScreen(
                     }
                     IconButton(onClick = onShowLog) {
                         Icon(Icons.Filled.Article, contentDescription = "日志")
+                    }
+                    IconButton(onClick = onShowAbout) {
+                        Icon(Icons.Outlined.Info, contentDescription = "关于")
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(

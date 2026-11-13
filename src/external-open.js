@@ -100,4 +100,23 @@ function isExternalSubFrameUrl(url) {
   return EXTERNAL_PROTOCOLS.includes(parsed.protocol)
 }
 
-module.exports = { isExternalUrl, isExternalSubFrameUrl }
+/**
+ * Schemes the shell may hand to the OS via `shell.openExternal`.
+ *
+ * `isExternalUrl` answers "must this leave the harness view?" — and the
+ * answer is yes for `file:` and for any unknown scheme with a host. That is
+ * the right NAVIGATION decision (block it in-app), but the wrong LAUNCH
+ * decision: `openExternal('file:///…/x.app')` or an `.exe` executes it, and
+ * `smb://host/share` makes Windows authenticate to that host (NTLM hash leak).
+ * Harness pages render model output and web citations, so a link there must
+ * never be able to launch anything but a browser or mail client.
+ */
+const BROWSER_PROTOCOLS = ['https:', 'http:', 'mailto:']
+
+/** True when `url` is safe to pass to `shell.openExternal`. */
+function isBrowserSafeUrl(url) {
+  const parsed = parseUrl(url)
+  return parsed !== null && BROWSER_PROTOCOLS.includes(parsed.protocol)
+}
+
+module.exports = { isExternalUrl, isExternalSubFrameUrl, isBrowserSafeUrl }

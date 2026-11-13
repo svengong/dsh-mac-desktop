@@ -32,6 +32,10 @@
   body.loading .footer-note::after { content: ''; display: inline-block; width: 1em; text-align: left; animation: ds-dots 1.2s steps(4, end) infinite; }
   @keyframes ds-dots { 0% { content: ''; } 25% { content: '.'; } 50% { content: '..'; } 75% { content: '...'; } }
   @media (prefers-reduced-motion: reduce) { body.loading .footer-note::after { animation: none; content: '…'; } }
+  /* 关于: label/value rows; values are mono so versions read and copy cleanly. */
+  .about-list { display: grid; grid-template-columns: max-content 1fr; gap: 8px 20px; margin: 0 0 12px; font-size: 13px; }
+  .about-list dt { color: var(--ds-text-muted); }
+  .about-list dd { margin: 0; font-family: var(--ds-mono); word-break: break-all; }
 </style>
 </head>
 <body>
@@ -45,6 +49,7 @@
       <button type="button" data-sec="connection"><span class="nav-icon">⇄</span><span class="nav-label">连接</span><span class="nav-dot"></span></button>
       <button type="button" data-sec="appearance"><span class="nav-icon">◐</span><span class="nav-label">外观</span><span class="nav-dot"></span></button>
       <button type="button" data-sec="log"><span class="nav-icon">≡</span><span class="nav-label">日志</span><span class="nav-dot"></span></button>
+      <button type="button" data-sec="about"><span class="nav-icon">ⓘ</span><span class="nav-label">关于</span><span class="nav-dot"></span></button>
       <div class="settings-menu-foot" id="menu-foot">DSH-[本地]</div>
     </nav>
 
@@ -160,6 +165,27 @@
         </div>
       </section>
 
+      <section id="section-about" class="settings-section">
+        <h2 class="settings-heading">关于</h2>
+        <p class="section-lead">本桌面壳（DeepSeek Harness 客户端）自身的版本信息。Harness 本体的版本见「更新」。</p>
+        <div class="card">
+          <div class="card-body">
+            <dl class="about-list" id="about-list">
+              <dt>应用</dt><dd id="about-product">DeepSeek Harness</dd>
+              <dt>壳版本</dt><dd id="about-version">—</dd>
+              <dt>平台</dt><dd id="about-platform">—</dd>
+              <dt>Electron</dt><dd id="about-electron">—</dd>
+              <dt>Chromium</dt><dd id="about-chrome">—</dd>
+              <dt>Node.js</dt><dd id="about-node">—</dd>
+              <dt>项目主页</dt><dd id="about-homepage">—</dd>
+            </dl>
+            <div class="panel-actions">
+              <button type="button" class="button small" id="copy-about">复制版本信息</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
       </div>
     </div>
 
@@ -216,7 +242,7 @@ function channelOf(id) {
 }
 
 // ── single-page layout: locating menu + entry-dependent focus ──────────────
-// The settings panel is ONE scrolling page (更新 → 连接 → 外观 → 日志). The
+// The settings panel is ONE scrolling page (更新 → 连接 → 外观 → 日志 → 关于). The
 // left rail only LOCATES sections — nothing collapses, nothing is hidden.
 //
 // Focus is decided by how the panel was opened: an entry whose semantic is
@@ -224,7 +250,7 @@ function channelOf(id) {
 // connect's 连接设置) lands on 连接; the frame's 设置 tab — plain "open
 // settings" — starts at the TOP. See the `section` query param.
 
-const SECTIONS = ['updates', 'connection', 'appearance', 'log']
+const SECTIONS = ['updates', 'connection', 'appearance', 'log', 'about']
 const menuButtons = Array.from(document.querySelectorAll('#settings-menu button'))
 const scroll = document.querySelector('.settings-scroll')
 // Guards the scroll-spy while a menu click animates, so the highlight does
@@ -240,7 +266,32 @@ function sectionOffset(section) {
   return Math.max(0, target.getBoundingClientRect().top - scroll.getBoundingClientRect().top + scroll.scrollTop)
 }
 
+// Section offsets are measured ONCE per layout change, not per scroll event.
+// The spy used to call getBoundingClientRect() on every section for every
+// scroll event (8 forced layouts per tick, interleaved with class writes),
+// which is what made wheel scrolling stutter on Windows. Offsets inside the
+// scroller do not change while scrolling — only when content or the viewport
+// changes — so they are invalidated by a ResizeObserver on the content and
+// re-measured lazily on the next spy tick.
+let cachedOffsets = null
+function sectionOffsets() {
+  if (cachedOffsets === null) cachedOffsets = SECTIONS.map(id => [id, sectionOffset(id)])
+  return cachedOffsets
+}
+function invalidateOffsets() { cachedOffsets = null }
+if (typeof ResizeObserver === 'function') {
+  const observer = new ResizeObserver(invalidateOffsets)
+  const content = document.querySelector('.settings-content')
+  if (content !== null) observer.observe(content)
+  if (scroll !== null) observer.observe(scroll)
+}
+window.addEventListener('resize', invalidateOffsets)
+
+let activeSectionId = null
 function setActiveSection(section) {
+  // Writing identical classes/attributes still invalidates style; skip it.
+  if (section === activeSectionId) return
+  activeSectionId = section
   for (const button of menuButtons) {
     const on = button.dataset.sec === section
     button.classList.toggle('active', on)
@@ -274,29 +325,34 @@ function goToSection(section) {
 for (const button of menuButtons) button.addEventListener('click', () => goToSection(button.dataset.sec))
 
 if (scroll !== null) {
-  scroll.addEventListener('scroll', () => {
+  // Coalesced to one evaluation per frame: wheel/touchpad input can fire
+  // several scroll events per frame, and each used to run the full spy.
+  let spyFrame = 0
+  const runSpy = () => {
+    spyFrame = 0
     if (spyLocked) return
-    // At the very bottom the LAST section is what the user is looking at,
-    // even though its offset never crosses the probe line on a short window.
-    // Keep the section that is actually pinned under the top edge when it is
-    // still on screen: scrolling as far as the page allows is NOT the same as
-    // having reached the last section (on a short window 外观 can be the
-    // furthest one visible while 日志 sits just below it).
-    if (scroll.scrollTop + scroll.clientHeight >= scroll.scrollHeight - 2) {
-      const line = scroll.scrollTop + 24
-      let pinned = SECTIONS[0]
-      for (const id of SECTIONS) {
-        if (sectionOffset(id) <= line) pinned = id
-      }
-      setActiveSection(pinned)
-      return
-    }
+    // The section whose top has passed the probe line is the one being read.
+    // At the very bottom this still picks the section actually pinned under
+    // the top edge (on a short window 外观 can be the furthest one visible
+    // while 日志 sits just below it), so no special bottom case is needed.
     const line = scroll.scrollTop + 24
     let current = SECTIONS[0]
-    for (const id of SECTIONS) {
-      if (sectionOffset(id) <= line) current = id
+    const offsets = sectionOffsets()
+    for (const [id, offset] of offsets) {
+      if (offset <= line) current = id
+    }
+    // Scrolled all the way down: a short trailing section (关于) can never
+    // reach the probe line, so if the user is at the end and that section is
+    // fully on screen, it is the one being read.
+    if (scroll.scrollTop + scroll.clientHeight >= scroll.scrollHeight - 2) {
+      const [lastId, lastOffset] = offsets[offsets.length - 1]
+      if (lastOffset >= scroll.scrollTop) current = lastId
     }
     setActiveSection(current)
+  }
+  scroll.addEventListener('scroll', () => {
+    if (spyLocked || spyFrame !== 0) return
+    spyFrame = requestAnimationFrame(runSpy)
   }, { passive: true })
 }
 
@@ -638,6 +694,30 @@ async function saveSettings() {
   else status('已保存，正在连接…')
 }
 
+// ── about ───────────────────────────────────────────────────────────────────
+// Rendered synchronously inside the boot pass (state.about rides on
+// getState), so it never adds a third async height change ahead of the
+// initial anchor. textContent only: these strings never become markup.
+
+function renderAbout(about) {
+  if (about === null || typeof about !== 'object') return
+  const set = (id, value) => { const el = $(id); if (el && typeof value === 'string' && value !== '') el.textContent = value }
+  set('about-product', about.productName)
+  if (typeof about.shellVersion === 'string' && about.shellVersion !== '') {
+    set('about-version', `v${about.shellVersion}${about.packaged === false ? '（开发版）' : ''}`)
+  }
+  if (typeof about.platform === 'string') set('about-platform', `${about.platform} ${about.arch || ''}`.trim())
+  set('about-electron', about.electron)
+  set('about-chrome', about.chrome)
+  set('about-node', about.node)
+  set('about-homepage', about.homepage)
+}
+
+$('copy-about').addEventListener('click', async () => {
+  const outcome = await api.updates.action('copy-about', {})
+  status(outcome && outcome.ok === false ? (outcome.error || '复制失败') : '已复制版本信息', outcome?.ok !== false)
+})
+
 // ── boot ────────────────────────────────────────────────────────────────────
 
 // The sections settle in TWO async passes: this boot state, then the update
@@ -690,6 +770,7 @@ api.getState().then(state => {
   setSwitch('auto-check', updateState.autoCheckOnLaunch)
   renderLive(state.live)
   renderThemes()
+  renderAbout(state.about)
   refreshMode(); refreshSshHost(); renderFooter()
   // Single page: the log card is always visible, so hydrate it once at boot.
   void refreshUpdatesLog()

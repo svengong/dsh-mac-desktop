@@ -192,7 +192,17 @@ function parseTarget(target) {
     port = Number(portText)
   }
   if (host === '') return null
+  // The destination is passed to ssh as a bare argv element. A value starting
+  // with `-` would be parsed by OpenSSH as an OPTION (`-oProxyCommand=…` runs
+  // a local command through /bin/sh), and whitespace/control characters can
+  // never be part of a real user or host. Reject both so a custom address
+  // can only ever be a destination.
+  if (!isSafeDestinationPart(host) || (user !== '' && !isSafeDestinationPart(user))) return null
   return { user, host, port }
+}
+
+function isSafeDestinationPart(value) {
+  return value !== '' && !value.startsWith('-') && !/[\s\u0000-\u001f\u007f]/.test(value)
 }
 
 /**
@@ -221,7 +231,10 @@ function sshBase(target) {
  */
 function sshCommandArgs(target, remoteCommand) {
   const { options, remote } = sshBase(target)
-  return [...options, remote, remoteCommand]
+  // `--` ends option parsing, so the destination can never be read as an
+  // option even if a value slipped past parseTarget (e.g. an unparsable
+  // string forwarded verbatim by sshBase).
+  return [...options, '--', remote, remoteCommand]
 }
 
 /** ssh argv fragment for a persistent port-forward tunnel (no remote command). */
@@ -233,7 +246,7 @@ function tunnelArgs(target, localPort, remotePort) {
     '-o', 'ExitOnForwardFailure=yes',
     '-o', 'ServerAliveInterval=30',
     '-o', 'ServerAliveCountMax=3',
-    ...options, remote,
+    ...options, '--', remote,
   ]
 }
 

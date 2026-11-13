@@ -28,6 +28,7 @@ const {
 
 const {
   SettingsStore, normalizeSettings, deviceKeyOf, DEV_DEFAULT_DSH_HOME, DEFAULT_DSH_HOME, DEFAULT_THEME, normalizeTheme, THEME_APPEARANCE,
+  hasDevice,
 } = require('./settings')
 const { mergeUpdates } = require('./device-merge')
 const { terminalLabel } = require('./labels')
@@ -47,7 +48,7 @@ const {
   IS_MAC, IS_WINDOWS, isPidAlive, killTree, platformName,
 } = require('./platform')
 const { WindowManager } = require('./window-manager')
-const { isExternalUrl, isExternalSubFrameUrl } = require('./external-open')
+const { isExternalUrl, isExternalSubFrameUrl, isBrowserSafeUrl } = require('./external-open')
 const { BOOT_FAILURE_PROBE, shouldReloadAfterBootFailure } = require('./boot-watch')
 
 const BUILD_DIR = path.join(__dirname, '..', 'build')
@@ -820,6 +821,11 @@ function resumePendingUpdate() {
   const liveWorker = status !== null && Number.isInteger(status.pid) && pidAliveLocal(status.pid)
   const phase = status === null ? '' : String(status.phase || '')
   setTimeout(() => {
+    // This process already observes a worker (it spawned one during startup,
+    // which wrote the very pending file read above). Adopting it again would
+    // overwrite — and leak — the live poll interval, and both intervals would
+    // run the `done` branch (double restartService). Nothing to resume.
+    if (session.workerPollTimer !== null) return
     if (pending !== null && liveWorker) {
       session.workerLogCount = 0
       session.workerPid = status.pid
@@ -1172,10 +1178,34 @@ function setProgress(workspace, progress) {
  */
 function openHarnessPopupUrl(workspace, url) {
   if (workspace.session !== null) {
-    workspace.session.connection.log('[window] 外部链接' + (isExternalUrl(url) ? ' → 系统浏览器 ' : ' → 已拦截 ') + url)
+    const verdict = !isExternalUrl(url) ? ' → 已拦截 ' : isBrowserSafeUrl(url) ? ' → 系统浏览器 ' : ' → 已拦截（不安全的协议）'
+    workspace.session.connection.log('[window] 外部链接' + verdict + url)
   }
   if (!isExternalUrl(url)) return
+  // Blocked in-app either way; only browser/mail schemes may launch outside.
+  if (!isBrowserSafeUrl(url)) {
+    // A local file link is still useful: reveal it in Finder/Explorer, which
+    // shows it without executing it. Other schemes are simply not launched.
+    revealFileUrl(url)
+    return
+  }
   shell.openExternal(url)
+}
+
+/** Reveal a `file:` URL's target in the system file manager (never opens it). */
+function revealFileUrl(url) {
+  try {
+    const parsed = new URL(url)
+    if (parsed.protocol !== 'file:') return
+    // Local files only: `file://host/share` becomes a UNC path on Windows, and
+    // touching it authenticates to that host (the leak this gate prevents).
+    if (parsed.hostname !== '' && parsed.hostname !== 'localhost') return
+    const target = require('node:url').fileURLToPath(parsed)
+    if (target.startsWith('\\\\') || target.startsWith('//')) return
+    if (fs.existsSync(target)) shell.showItemInFolder(target)
+  } catch {
+    // Unparsable or non-local file URL: nothing to reveal.
+  }
 }
 
 /**
@@ -1807,7 +1837,7 @@ function openWorkspaceWindow(workspace) {
 function defaultWorkspaceDeviceKey() {
   if (windowManager !== null) {
     const last = windowManager.lastActiveDeviceKey()
-    if (settingsDocument.devices[last] !== undefined) return last
+    if (hasDevice(settingsDocument.devices, last)) return last
   }
   return candidateDeviceKey()
 }
@@ -2901,6 +2931,27 @@ const actions = {
 
 // ── dialog IPC handlers ─────────────────────────────────────────────────────
 
+/**
+ * Build identity shown in the settings panel's 关于 section. The shell
+ * version is the same SHELL_VERSION the native About panel reads (package.json
+ * is the only source); runtime versions come from this Electron process.
+ */
+function aboutInfo() {
+  const platform = IS_MAC ? 'macOS' : IS_WINDOWS ? 'Windows' : 'Linux'
+  const arch = process.arch === 'ia32' ? 'x86' : process.arch
+  return {
+    productName: 'DeepSeek Harness',
+    shellVersion: SHELL_VERSION,
+    electron: String(process.versions.electron ?? ''),
+    chrome: String(process.versions.chrome ?? ''),
+    node: String(process.versions.node ?? ''),
+    platform,
+    arch: String(arch),
+    packaged: app.isPackaged === true,
+    homepage: 'https://github.com/svengong/dsh-mac-desktop',
+  }
+}
+
 function registerIpc() {
   registerDialogIpc({
     // Parent window of the settings panel that asked. Resolved from the
@@ -2937,6 +2988,13 @@ function registerIpc() {
           pnpm: tools.pnpm,
           ssh: tools.ssh,
         },
+        // Build identity for the 关于 section. Carried on the existing state
+        // call on purpose: a second IPC channel would be a THIRD async render,
+        // and the initial section anchor is only applied once the known ones
+        // settle (see settleAndFocus in ui/settings.html). Everything here is
+        // a plain string, so the payload stays JSON-safe for the sandboxed
+        // renderer, which cannot read `process.versions` itself.
+        about: aboutInfo(),
       }
     },
 
@@ -3028,7 +3086,7 @@ function registerIpc() {
           setWorkspaceView(workspace, name === 'close' ? 'harness' : 'connection')
           return { ok: true }
         }
-        if (name === 'copy-log' || name === 'reveal-log') {
+        if (name === 'copy-log' || name === 'reveal-log' || name === 'copy-about') {
           // Global log helpers stay useful before a terminal is selected.
         } else {
           return { ok: false, error: '请先连接终端' }
@@ -3074,6 +3132,16 @@ function registerIpc() {
               shell.showItemInFolder(sessionLogFile)
             }
             break
+          case 'copy-about': {
+            // Built here from aboutInfo(), never from renderer payload.
+            const info = aboutInfo()
+            clipboard.writeText([
+              `${info.productName} 桌面壳 v${info.shellVersion}`,
+              `平台：${info.platform} ${info.arch}${info.packaged ? '' : '（开发版）'}`,
+              `Electron ${info.electron} · Chromium ${info.chrome} · Node.js ${info.node}`,
+            ].join('\n'))
+            break
+          }
           case 'check-all':
             void trackSessionTask(session, session.updateManager.checkAll()).then(
               () => broadcastSession(session),
@@ -3171,7 +3239,7 @@ function registerIpc() {
   ipcMain.handle('shell:open-external', (_event, url) => {
     if (typeof url !== 'string' || url.trim() === '') return { ok: false, error: '无效地址' }
     const target = String(url)
-    if (!isExternalUrl(target)) return { ok: false, error: '地址不属于外部浏览器' }
+    if (!isExternalUrl(target) || !isBrowserSafeUrl(target)) return { ok: false, error: '地址不属于外部浏览器' }
     shell.openExternal(target)
     return { ok: true }
   })
@@ -3186,8 +3254,8 @@ function registerIpc() {
         // Launcher quick-connect: bind this window to a stored terminal and
         // run the shared save path (duplicate windows just get focused).
         const key = String(payload?.key ?? '')
+        if (!hasDevice(settingsDocument.devices, key)) break
         const device = settingsDocument.devices[key]
-        if (device === undefined) break
         const candidate = normalizeSettings({ mode: device.mode, local: device.local, ssh: device.ssh })
         if (validateSettings(candidate) !== null) break
         void saveConnection(workspace, candidate, device.machineId ?? '')
@@ -3233,7 +3301,7 @@ function registerIpc() {
         // bound window must be closed from that window first.
         const key = String(payload?.key ?? '')
         if (key === '' || key === 'local') break
-        if (settingsDocument.devices[key] === undefined) break
+        if (!hasDevice(settingsDocument.devices, key)) break
         if (boundWorkspaceFor(key, null) !== null) break
         // Stop an orphaned session (e.g. a disconnected SSH session with no
         // windows) so its tunnel/service children are reaped too.
@@ -3477,7 +3545,7 @@ if (!gotLock) {
     // anything else is denied in place.
     app.on('web-contents-created', (_event, webContents) => {
       webContents.setWindowOpenHandler(details => {
-        if (isExternalUrl(details.url)) shell.openExternal(details.url)
+        if (isExternalUrl(details.url) && isBrowserSafeUrl(details.url)) shell.openExternal(details.url)
         return { action: 'deny' }
       })
     })

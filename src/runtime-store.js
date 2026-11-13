@@ -101,7 +101,15 @@ function writeLocalState(settings, state) {
     // unreadable to it, which looked like "no service running" and sent it down
     // the rebuild path instead of adopting the running host. A single compact
     // record is valid for every reader, so emit that.
-    fs.writeFileSync(file, JSON.stringify(state))
+    //
+    // Written to a temp file and renamed into place (same directory, so the
+    // rename is atomic): an in-place write truncates first, and a concurrent
+    // reader (another window, the Android client) that lands in that window
+    // read "no service" and swept the live host. Newline-terminated for
+    // line-based readers.
+    const tmp = `${file}.tmp-${process.pid}`
+    fs.writeFileSync(tmp, `${JSON.stringify(state)}\n`)
+    fs.renameSync(tmp, file)
     return true
   } catch {
     return false
@@ -606,11 +614,20 @@ async function withLocalLock(settings, name, task, { timeoutMs = LOCK_TIMEOUT_MS
     }
     try {
       fs.mkdirSync(lockDir)
-      fs.writeFileSync(path.join(lockDir, 'owner.json'), JSON.stringify({
-        pid: process.pid,
-        host: os.hostname(),
-        createdAt: new Date().toISOString(),
-      }))
+      try {
+        fs.writeFileSync(path.join(lockDir, 'owner.json'), JSON.stringify({
+          pid: process.pid,
+          host: os.hostname(),
+          createdAt: new Date().toISOString(),
+        }))
+      } catch (ownerError) {
+        // We created this directory a moment ago; leaving it without an owner
+        // makes it look held for the 2h stale window and blocks every later
+        // install on this device. Undo the acquisition before failing.
+        try { fs.unlinkSync(path.join(lockDir, 'owner.json')) } catch {}
+        try { fs.rmdirSync(lockDir) } catch {}
+        throw ownerError
+      }
       break
     } catch (error) {
       if (error.code !== 'EEXIST') throw error

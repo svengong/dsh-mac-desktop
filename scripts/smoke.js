@@ -348,6 +348,14 @@ async function main() {
   assert.ok(tunnel.includes('-N'))
   assert.ok(tunnel.includes('3080:127.0.0.1:3081'))
   assert.ok(tunnel.includes('BatchMode=yes'))
+  // A custom destination can never be read by OpenSSH as an option.
+  assert.strictEqual(parseTarget('-oProxyCommand=touch /tmp/x'), null)
+  assert.strictEqual(parseTarget('-oProxyCommand=x@h'), null)
+  assert.strictEqual(parseTarget('u@-oProxyCommand=x'), null)
+  assert.strictEqual(parseTarget('u@h ost'), null)
+  assert.deepStrictEqual(parseTarget('dev.user@host-1.example:22'), { user: 'dev.user', host: 'host-1.example', port: 22 })
+  assert.strictEqual(tunnel[tunnel.length - 2], '--')
+  assert.strictEqual(tunnel[tunnel.length - 1], 'u@h')
 
   // ssh config parsing
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-ssh-config-'))

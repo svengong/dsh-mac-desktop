@@ -1391,7 +1391,14 @@ class ConnectionManager extends EventEmitter {
       // device to whatever it happens to be running. Sweep it so the retry (or
       // the next connect) starts from a clean home instead of crash-looping
       // against the ledger it still holds.
-      await this.reapLocalHosts(settings).catch(() => 0)
+      //
+      // Only while this spawn's generation is still current: a reconnect that
+      // superseded it (which is what rejects portSeen here) is already booting
+      // its own host over the same home, and an unguarded sweep would take
+      // down that brand-new host too (invariant #12).
+      if (epoch === this.connectEpoch && !this.stopped) {
+        await this.reapLocalHosts(settings).catch(() => 0)
+      }
       throw error
     }
   }
@@ -1909,6 +1916,17 @@ class ConnectionManager extends EventEmitter {
     const state = runtimeStore.readLocalTunnelState(settings)
     if (state === null) return
     if (!pidAlive(state.pid)) {
+      runtimeStore.removeLocalTunnelState(settings)
+      return
+    }
+    // A live pid is not proof of identity: after a reboot the recorded number
+    // can belong to any unrelated process, and the tree signal below reaches
+    // its whole process group. Only act when that pid is still the listener
+    // on the tunnel's own forward port; "cannot tell" means leave it alone
+    // and just drop the record (invariant #2).
+    const listener = Number.isInteger(state.localPort) ? await findListeningPid(state.localPort) : 0
+    if (listener !== state.pid) {
+      this.log(`残留隧道记录（pid ${state.pid}）已不属于本壳，仅清除记录。`)
       runtimeStore.removeLocalTunnelState(settings)
       return
     }

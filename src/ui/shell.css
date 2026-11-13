@@ -1880,6 +1880,39 @@ body.embedded .settings-titlebar .titlebar-actions {
 ::-webkit-scrollbar-thumb:hover { background: var(--ds-text-muted); background-clip: padding-box; }
 ::-webkit-scrollbar-track { background: transparent; }
 
+/* ── Windows: settings panel scroll performance ──────────────────────────────
+   On Windows the settings panel stuttered while scrolling. Every glass layer
+   (backdrop-filter: blur 22px + saturate 185%) re-samples and re-blurs the
+   three-gradient body backdrop on each frame its backdrop moves — the cards
+   inside the scroller move every frame, and the titlebar/menu/footer sit over
+   content that does. Chromium on Windows (D3D/ANGLE, often fractional DPI)
+   pays far more for this than macOS does, so the glass is dropped on Windows
+   only, inside the settings panel only; the surfaces are made more opaque so
+   they keep the same visual weight without the blur. macOS and Linux keep
+   the exact previous rendering. `ios-flat*` themes already run with no blur,
+   so this look is one the design system supports. */
+:root[data-platform="windows"] .settings-shell .settings-menu,
+:root[data-platform="windows"] .settings-shell .settings-titlebar,
+:root[data-platform="windows"] .settings-shell .settings-footer,
+:root[data-platform="windows"] .settings-shell .card,
+:root[data-platform="windows"] .settings-shell .component,
+:root[data-platform="windows"] .settings-shell .theme-card {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+:root[data-platform="windows"] .settings-shell .card,
+:root[data-platform="windows"] .settings-shell .component,
+:root[data-platform="windows"] .settings-shell .theme-card {
+  background: color-mix(in srgb, var(--ds-surface) 70%, var(--ds-bg));
+}
+:root[data-platform="windows"] .settings-shell .component:hover { background: var(--ds-surface-raised); }
+/* Content sliding under a still cursor re-triggers :hover on each row; a
+   transform transition there re-rasterizes the card for every row passed. */
+:root[data-platform="windows"] .settings-shell .theme-card:hover { transform: none; }
+/* The panel's JS already asks for smooth scrolling where it wants it (menu
+   jumps); the CSS default additionally animated instant resets. */
+:root[data-platform="windows"] .settings-scroll { scroll-behavior: auto; }
+
 /* ── macOS accessibility motion ──────────────────────────────────────────── */
 
 @media (prefers-reduced-motion: reduce) {

@@ -222,6 +222,13 @@ function deviceKeyOf(device) {
   return 'local'
 }
 
+/** Own-property lookup on a device map (never the prototype chain). */
+function hasDevice(devices, key) {
+  return devices !== null && typeof devices === 'object'
+    && Object.prototype.hasOwnProperty.call(devices, key)
+    && devices[key] !== null && typeof devices[key] === 'object'
+}
+
 /** Normalize the per-device map; keys are canonicalized from each device. */
 function normalizeDevices(raw) {
   const source = raw !== null && typeof raw === 'object' ? raw : {}
@@ -261,10 +268,14 @@ function normalizeSettings(raw) {
     devices[activeDeviceId] = active
   } else {
     const keys = Object.keys(devices).sort()
-    if (activeDeviceId === '' || devices[activeDeviceId] === undefined) {
+    // Own-property checks: `devices` is a plain object, so a persisted or
+    // renderer-sent id like `__proto__` / `constructor` would otherwise resolve
+    // through the prototype chain, skip the default, and yield a document with
+    // undefined mode/local/ssh that crashes every consumer.
+    if (activeDeviceId === '' || !hasDevice(devices, activeDeviceId)) {
       activeDeviceId = keys.length > 0 ? keys[0] : DEFAULTS.activeDeviceId
     }
-    if (devices[activeDeviceId] === undefined) devices[activeDeviceId] = defaultDevice('local')
+    if (!hasDevice(devices, activeDeviceId)) devices[activeDeviceId] = defaultDevice('local')
   }
 
   const active = devices[activeDeviceId]
@@ -329,5 +340,6 @@ module.exports = {
   deviceKeyOf,
   normalizeDevice,
   normalizeSettings,
+  hasDevice,
   SettingsStore,
 }
