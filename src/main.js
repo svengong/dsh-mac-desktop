@@ -1177,11 +1177,12 @@ function setProgress(workspace, progress) {
  * would have navigated to.
  */
 function openHarnessPopupUrl(workspace, url) {
+  const harnessUrl = workspace.loadedUrl
   if (workspace.session !== null) {
-    const verdict = !isExternalUrl(url) ? ' → 已拦截 ' : isBrowserSafeUrl(url) ? ' → 系统浏览器 ' : ' → 已拦截（不安全的协议）'
+    const verdict = !isExternalUrl(url, harnessUrl) ? ' → 已拦截 ' : isBrowserSafeUrl(url) ? ' → 系统浏览器 ' : ' → 已拦截（不安全的协议）'
     workspace.session.connection.log('[window] 外部链接' + verdict + url)
   }
-  if (!isExternalUrl(url)) return
+  if (!isExternalUrl(url, harnessUrl)) return
   // Blocked in-app either way; only browser/mail schemes may launch outside.
   if (!isBrowserSafeUrl(url)) {
     // A local file link is still useful: reveal it in Finder/Explorer, which
@@ -1242,7 +1243,7 @@ function installHarnessNavigationGuard(workspace) {
   // `did-finish-load`, so without the restore below the frame's loading panel
   // covers the harness forever.
   webContents.on('will-navigate', (event, url) => {
-    if (!isExternalUrl(url)) return
+    if (!isExternalUrl(url, workspace.loadedUrl)) return
     event.preventDefault()
     openHarnessPopupUrl(workspace, url)
     restoreHarnessAfterBlockedNav(workspace)
@@ -1254,7 +1255,7 @@ function installHarnessNavigationGuard(workspace) {
   // plugin route everything else in place. Intercepting those here hijacked
   // the plugin's UI (a preview click jumped to the system browser).
   webContents.on('will-frame-navigate', (event) => {
-    if (event.isMainFrame || !isExternalSubFrameUrl(event.url)) return
+    if (event.isMainFrame || !isExternalSubFrameUrl(event.url, workspace.loadedUrl)) return
     event.preventDefault()
     openHarnessPopupUrl(workspace, event.url)
   })
@@ -3236,10 +3237,14 @@ function registerIpc() {
   // The shell frame renders no external content itself, but the API is kept
   // narrow and validated anyway: only real external URLs may reach the OS
   // browser, and in-app targets are delegated back to shell navigation.
-  ipcMain.handle('shell:open-external', (_event, url) => {
+  ipcMain.handle('shell:open-external', (event, url) => {
     if (typeof url !== 'string' || url.trim() === '') return { ok: false, error: '无效地址' }
     const target = String(url)
-    if (!isExternalUrl(target) || !isBrowserSafeUrl(target)) return { ok: false, error: '地址不属于外部浏览器' }
+    // The shell frame has no harness view of its own; resolve the origin from
+    // the workspace it belongs to so a second local service (a preview server
+    // on another port) is still recognised as an external page.
+    const harnessUrl = workspaceForEvent(event)?.loadedUrl ?? ''
+    if (!isExternalUrl(target, harnessUrl) || !isBrowserSafeUrl(target)) return { ok: false, error: '地址不属于外部浏览器' }
     shell.openExternal(target)
     return { ok: true }
   })

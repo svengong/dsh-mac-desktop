@@ -112,11 +112,16 @@ fun HarnessWebView(
                         override fun shouldOverrideUrlLoading(
                             view: WebView,
                             request: WebResourceRequest,
-                        ): Boolean = handleUrl(context, request.url, view)
+                        ): Boolean = handleUrl(
+                            context,
+                            request.url,
+                            view,
+                            harnessUrl = url,
+                        )
 
                         @Deprecated("Legacy callback for API < 24")
-                        override fun shouldOverrideUrlLoading(view: WebView, url: String): Boolean =
-                            handleUrl(context, Uri.parse(url), view)
+                        override fun shouldOverrideUrlLoading(view: WebView, target: String): Boolean =
+                            handleUrl(context, Uri.parse(target), view, harnessUrl = url)
                     }
                     webView = this
                     // Load here, once: the factory runs when the instance is
@@ -162,13 +167,39 @@ private fun documentIdentity(url: String): String {
     return withoutFragment.substringBefore("?")
 }
 
-private fun handleUrl(context: android.content.Context, uri: Uri, view: WebView): Boolean {
+/**
+ * Decide who owns a navigation.
+ *
+ * "Is this the harness?" is an ORIGIN question - host AND port. The shell
+ * revives exactly one page, the harness service root; the harness's real routes
+ * are hash routes underneath it. So a loopback URL on the harness's OWN port is
+ * ours (its non-root paths included: the SPA may legitimately request them),
+ * while a loopback URL on ANOTHER port is a different local server - a preview
+ * server, a docs site - and belongs to the system browser.
+ *
+ * The port-blind version of this rule ("any loopback stays in the shell")
+ * handed every second local service to the WebView, which then replaced the
+ * conversation with a page the user could not get back from.
+ */
+private fun handleUrl(
+    context: android.content.Context,
+    uri: Uri,
+    view: WebView,
+    harnessUrl: String,
+): Boolean {
     val scheme = uri.scheme?.lowercase().orEmpty()
     val host = uri.host?.lowercase().orEmpty()
     val isLoopback = host == "127.0.0.1" || host == "localhost" || host == "[::1]"
     if (scheme == "http" || scheme == "https") {
-        // Loopback stays inside the shell; everything else is an external site.
-        if (isLoopback) return false
+        // Non-loopback destinations are always somebody else's site.
+        if (!isLoopback) return openExternally(context, uri)
+        // Loopback: ours only on the harness's own port. An unparsable or
+        // port-less harness URL yields -1, which never equals a real port, so
+        // there is no safe "ours" claim and the page is handed off.
+        val harnessPort = Uri.parse(harnessUrl).port
+        val port = if (uri.port == -1) 80 else uri.port
+        val isHarness = harnessPort != -1 && harnessPort == port
+        if (isHarness) return false
         return openExternally(context, uri)
     }
     // mailto:, tel:, intent: and custom app links.
