@@ -510,11 +510,17 @@ async function cancelSessionTask(session) {
 
   // Cooperative cancellation is authoritative; only when it cannot settle in
   // time do we fall back to the old timeout behaviour.
-  await Promise.race([
-    Promise.allSettled(pending),
-    session.updater !== null ? session.updater.awaitCancelled() : Promise.resolve(),
-    new Promise(resolve => setTimeout(resolve, TASK_CANCEL_TIMEOUT_MS)),
-  ])
+  //
+  // The updater branch is CONDITIONAL: with no updater there is no
+  // `awaitCancelled()` to wait for, and substituting `Promise.resolve()` would
+  // make the race resolve on the first microtask — reporting 「已取消」and
+  // returning while the killed child's promise had not settled yet, so the
+  // caller's `taskPromise` check saw a still-running task. Only include the
+  // candidates that actually exist.
+  const waits = [Promise.allSettled(pending)]
+  if (session.updater !== null) waits.push(session.updater.awaitCancelled())
+  waits.push(new Promise(resolve => setTimeout(resolve, TASK_CANCEL_TIMEOUT_MS)))
+  await Promise.race(waits)
 
   // Update intents are now settled: any leftover pending file would be
   // resumable garbage. This is deliberately idempotent — the pipeline's
