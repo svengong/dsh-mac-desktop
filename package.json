@@ -41,8 +41,8 @@
     "dist:publish:win": "node scripts/build-win.js --publish always"
   },
   "devDependencies": {
-    "electron": "^35.0.0",
-    "electron-builder": "^26.18.0"
+    "electron": "^45.3.2",
+    "electron-builder": "^26.18.1"
   },
   "build": {
     "appId": "com.deepseek.harness.desktop",
@@ -104,7 +104,7 @@
     }
   },
   "allowScripts": {
-    "electron@35.7.5": true,
+    "electron@45.3.2": true,
     "electron-winstaller@5.4.0": true
   }
 }
