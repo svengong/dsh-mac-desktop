@@ -27,7 +27,8 @@ function presentWindow(win) {
  * Give a window's WebContentsView (harness or settings) the keyboard, but ONLY
  * when that window is already the key window.
  *
- * Why the guard is not optional — measured on Electron 35 / macOS:
+ * Why the guard is not optional — measured on Electron 35 / macOS, and
+ * re-verified unchanged on Electron 45:
  *
  *  - `win.webContents.focus()` on a window that is not key does nothing.
  *  - `view.webContents.focus()` on a WebContentsView of a window that is not

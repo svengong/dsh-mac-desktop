@@ -3,7 +3,7 @@
 ## 1. 快速开始
 
 ```sh
-# 安装依赖（Electron 35 + electron-builder）
+# 安装依赖（Electron 45 + electron-builder）
 npm install
 
 # 开发模式：userData 固定在 ~/.dsh-dev，不影响已安装应用

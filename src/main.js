@@ -1264,7 +1264,8 @@ function installHarnessNavigationGuard(workspace) {
 /**
  * Undo the loading state a blocked navigation leaves behind.
  *
- * Measured event order for a denied in-page navigation (Electron 35):
+ * Measured event order for a denied in-page navigation (Electron 35;
+ * unchanged on 45):
  *
  *   did-start-loading → will-navigate → preventDefault → did-stop-loading
  *
@@ -3125,7 +3126,11 @@ function registerIpc() {
             break
           case 'copy-log':
             if (sessionLogFile !== '' && fs.existsSync(sessionLogFile)) {
-              clipboard.writeText(fs.readFileSync(sessionLogFile, 'utf8'))
+              // Awaited: `clipboard.writeText` has returned a Promise since
+              // Electron 44 (W3C clipboard rearchitecture). Awaiting also
+              // surfaces a rejected write as `{ ok: false }` instead of an
+              // unhandled rejection, so the panel can report 复制失败.
+              await clipboard.writeText(fs.readFileSync(sessionLogFile, 'utf8'))
             }
             break
           case 'reveal-log':
@@ -3136,7 +3141,9 @@ function registerIpc() {
           case 'copy-about': {
             // Built here from aboutInfo(), never from renderer payload.
             const info = aboutInfo()
-            clipboard.writeText([
+            // Awaited for the same reason as `copy-log`: Electron 44+ returns
+            // a Promise, and the renderer reports 复制失败 on `{ ok: false }`.
+            await clipboard.writeText([
               `${info.productName} 桌面壳 v${info.shellVersion}`,
               `平台：${info.platform} ${info.arch}${info.packaged ? '' : '（开发版）'}`,
               `Electron ${info.electron} · Chromium ${info.chrome} · Node.js ${info.node}`,
