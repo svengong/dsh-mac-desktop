@@ -639,7 +639,8 @@ async function main() {
   assert.strictEqual(presentWindow(hidden), hidden)
   assert.deepStrictEqual(calls, ['show', 'focus'])
 
-  // View focus must never activate a window. Measured on Electron 35: focusing
+  // View focus must never activate a window. Measured on Electron 35 (and
+  // re-verified on 45 — still activates): focusing
   // a WebContentsView's webContents ACTIVATES its owner window, even when that
   // window is in the background — so an unguarded call in a session-wide
   // broadcast (every window of one terminal) made two windows trade front-most
@@ -680,7 +681,10 @@ async function main() {
   // itself with showOpenDialog(parented to the asking window). These assertions
   // pin the parts that are invisible at the call site.
   {
-    const { pickedPath, pickDirectory, DIRECTORY_PROPERTIES } = require('../src/picker')
+    const {
+      pickedPath, pickDirectory, DIRECTORY_PROPERTIES,
+      rememberedDirectory, forgetRememberedDirectory,
+    } = require('../src/picker')
     const owner = { isDestroyed: () => false }
     const shown = []
     const fakeDialog = {
@@ -699,6 +703,33 @@ async function main() {
     assert.deepStrictEqual(shown[0][1].properties, [...DIRECTORY_PROPERTIES])
     assert.ok(DIRECTORY_PROPERTIES.includes('openDirectory'), 'directories, not files')
     assert.ok(DIRECTORY_PROPERTIES.includes('createDirectory'), 'a new workspace folder is not an error path')
+
+    // Electron 42 stopped the OS deciding the initial directory: without an
+    // explicit `defaultPath`, showOpenDialog now opens in Downloads. Neither
+    // caller passes one, so the shell remembers the previous pick's PARENT and
+    // passes it back. Assert the option actually reaches the chooser.
+    forgetRememberedDirectory()
+    shown.length = 0
+    await pickDirectory(owner, fakeDialog)
+    assert.strictEqual(shown[0][1].defaultPath, undefined,
+      'the very first pick has nothing remembered yet, so no defaultPath is injected')
+    assert.strictEqual(rememberedDirectory(), '/Users/x')
+    shown.length = 0
+    await pickDirectory(owner, fakeDialog)
+    assert.strictEqual(shown[0][1].defaultPath, '/Users/x',
+      'a later pick must reopen where the previous one ended, not in Downloads')
+    // An explicit defaultPath always wins over the remembered one.
+    shown.length = 0
+    await pickDirectory(owner, fakeDialog, { defaultPath: '/tmp' })
+    assert.strictEqual(shown[0][1].defaultPath, '/tmp')
+    // A cancel changes nothing, so the remembered directory stays put.
+    shown.length = 0
+    await pickDirectory({ isDestroyed: () => true }, { showOpenDialog: async (...args) => {
+      shown.push(args)
+      return { canceled: true, filePaths: ['/Users/x/elsewhere'] }
+    } })
+    assert.strictEqual(rememberedDirectory(), '/Users/x', 'a cancelled pick must not move the remembered directory')
+    forgetRememberedDirectory()
 
     // Cancel must stay cancel even though a cancelled macOS panel still reports
     // the highlighted directory in filePaths.

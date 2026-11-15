@@ -3433,7 +3433,16 @@ async function runSmoke() {
   })
   // Child probes run THIS process's node with an inline script: /bin/echo and
   // /bin/sleep do not exist on Windows, and the smoke must cover all platforms.
-  const nodeChild = body => ({ cmd: process.execPath, args: ['-e', body] })
+  // Inside the Electron smoke, `process.execPath` is the ELECTRON binary, not
+  // node: without ELECTRON_RUN_AS_NODE it ignores `-e` and boots a GUI main
+  // process instead, so the child exits non-zero with no output. The app's own
+  // spawn sites (runner.js, the update worker) already set this; the probe must
+  // match them or the test exercises a spawn shape the app never uses.
+  const nodeChild = body => ({
+    cmd: process.execPath,
+    args: ['-e', body],
+    env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+  })
   await check('runner echo', async () => {
     const result = await runCommand(nodeChild('process.stdout.write("dsh-smoke\\n")'))
     if (result.code !== 0 || result.lines[0] !== 'dsh-smoke') throw new Error('runner failed')
@@ -3449,12 +3458,38 @@ async function runSmoke() {
     throw new Error('owner child was not cancelled: ' + JSON.stringify(result))
   })
   await check('session task cancellation', async () => {
-    const fakeSession = { key: 'smoke-session', owner: () => 'session:smoke-session', taskPromise: null, connectionTaskPromise: null, windows: new Set(), progress: null }
+    // Mirrors the fields `sessionFor()` builds that this path touches. The
+    // fixture used to omit `logRing`/`updater`/`workerPollTimer`, which went
+    // unnoticed only because the earlier `runner echo` probe failed first and
+    // aborted the run; `cancelSessionTask` routes a log line and reads both
+    // fields, so a session without them throws on the first cancel.
+    const fakeSession = {
+      key: 'smoke-session',
+      owner: () => 'session:smoke-session',
+      taskPromise: null,
+      connectionTaskPromise: null,
+      windows: new Set(),
+      progress: null,
+      logRing: [],
+      updater: null,
+      updateManager: null,
+      workerPollTimer: null,
+    }
     const child = runCommand({ ...nodeChild('setTimeout(() => {}, 30000)'), owner: fakeSession.owner() })
     trackSessionTask(fakeSession, child)
     await new Promise(resolve => setTimeout(resolve, 250))
     await cancelSessionTask(fakeSession)
-    if (fakeSession.taskPromise !== null) throw new Error('session task promise did not settle after cancel')
+    // `cancelSessionTask` must not return until the cancelled task settled:
+    // a session with no updater used to race `Promise.resolve()` into the mix
+    // and win instantly, reporting 已取消 while the child was still alive.
+    // The assertion is deliberately immediate — no yielding — because that is
+    // exactly the contract: once the cancel returns, the promise is settled.
+    // `trackSessionTask` clears `taskPromise` in its own continuation, so one
+    // macrotask confirms the continuation ran after the awaited settle.
+    await new Promise(resolve => setImmediate(resolve))
+    if (fakeSession.taskPromise !== null) {
+      throw new Error('cancelSessionTask returned before the task settled (taskPromise still set)')
+    }
     const result = await child
     if (result.code !== null || result.signal !== null) return
     throw new Error('session child was not cancelled: ' + JSON.stringify(result))
@@ -3522,6 +3557,15 @@ if (!gotLock) {
 
   app.whenReady().then(() => {
     if (process.env.DSH_DESKTOP_SMOKE === '1') {
+      // The smoke drives real session helpers (`cancelSessionTask` reaches
+      // `routeSessionLine` → `broadcastSession` → `refreshTrayAndMenu`, which
+      // read the settings document). Without this the checks run against
+      // `settingsDocument === null` and only LOOK green while every such path
+      // is dead code — the very thing these checks exist to prove. Load the
+      // same state the real bootstrap does, minus windows/tray.
+      settingsStore = new SettingsStore(path.join(app.getPath('userData'), 'settings.json'))
+      settingsDocument = cleanDocument(settingsStore.load())
+      windowManager = new WindowManager(path.join(app.getPath('userData'), 'window-state.json'))
       runSmoke()
       return
     }
