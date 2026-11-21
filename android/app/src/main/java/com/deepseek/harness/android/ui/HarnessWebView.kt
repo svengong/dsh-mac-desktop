@@ -5,7 +5,7 @@ import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.graphics.Bitmap
 import android.net.Uri
-import android.os.Build
+import android.view.View
 import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.WebChromeClient
@@ -20,10 +20,10 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -42,28 +42,20 @@ import androidx.compose.ui.viewinterop.AndroidView
 @Composable
 fun HarnessWebView(
     url: String,
+    pageActive: Boolean,
     onLoadingChanged: (Boolean) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
     var webView by remember { mutableStateOf<WebView?>(null) }
     var canGoBack by remember { mutableStateOf(false) }
+    val currentUrl by rememberUpdatedState(url)
+    val loadingChanged by rememberUpdatedState(onLoadingChanged)
 
-    // The harness keeps local state (scroll, open panel) across reconnects as
-    // long as the WebView survives; we therefore recreate it only when the URL
-    // authority changes, which is the only case where the old document is
-    // meaningless anyway.
-    // The URL whose DOCUMENT is currently loaded. Compared on the part that
-    // identifies a document (scheme+host+port+path), not the whole string: the
-    // launch token lives in the query and may legitimately change after a
-    // re-adopt, without that being a different page.
     val loadedIdentity = remember { mutableStateOf<String?>(null) }
-    val targetIdentity = remember(url) { documentIdentity(url) }
+    val targetIdentity = remember(url) { harnessDocumentIdentity(url) }
 
-    // Android's back button means "go back inside the page" while there is
-    // history, and "leave" otherwise. Without this, back closes the whole app
-    // from a deep conversation, which loses the scroll position.
-    BackHandler(enabled = canGoBack) {
+    BackHandler(enabled = pageActive && canGoBack) {
         webView?.let { view ->
             if (view.canGoBack()) view.goBack() else canGoBack = false
         }
@@ -101,12 +93,16 @@ fun HarnessWebView(
                     webChromeClient = WebChromeClient()
                     webViewClient = object : WebViewClient() {
                         override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
-                            onLoadingChanged(true)
+                            loadingChanged(true)
                         }
 
                         override fun onPageFinished(view: WebView?, url: String?) {
-                            onLoadingChanged(false)
+                            loadingChanged(false)
                             canGoBack = view?.canGoBack() == true
+                        }
+
+                        override fun doUpdateVisitedHistory(view: WebView, url: String?, isReload: Boolean) {
+                            canGoBack = view.canGoBack()
                         }
 
                         override fun shouldOverrideUrlLoading(
@@ -122,14 +118,13 @@ fun HarnessWebView(
                             return handleUrl(
                                 context,
                                 request.url,
-                                view,
-                                harnessUrl = url,
+                                harnessUrl = currentUrl,
                             )
                         }
 
                         @Deprecated("Legacy callback for API < 24")
                         override fun shouldOverrideUrlLoading(view: WebView, target: String): Boolean =
-                            handleUrl(context, Uri.parse(target), view, harnessUrl = url)
+                            handleUrl(context, Uri.parse(target), harnessUrl = currentUrl)
                     }
                     webView = this
                     // Load here, once: the factory runs when the instance is
@@ -139,6 +134,9 @@ fun HarnessWebView(
                 }
             },
             update = { view ->
+                view.importantForAccessibility = if (pageActive) View.IMPORTANT_FOR_ACCESSIBILITY_AUTO
+                    else View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+                if (!pageActive && view.hasFocus()) view.clearFocus()
                 // Only a DIFFERENT document justifies a load. Rotation, a pane
                 // switch and plain recomposition all recompose with the same
                 // identity and must be no-ops - reloading would lose the
@@ -150,10 +148,8 @@ fun HarnessWebView(
         )
     }
 
-    // Destroy only when this composable really leaves the tree. Rotation and
-    // narrow/wide switches move the WebView to a different parent, which used to
-    // destroy and reload it; keeping the instance alive is what makes a rotation
-    // free. `key` inside the callers is what pins the instance across layouts.
+    // The caller moves this pane between layouts and layers the drawer and log
+    // over it, so those actions never dispose the live document.
     DisposableEffect(Unit) {
         onDispose {
             webView?.apply {
@@ -170,7 +166,7 @@ fun HarnessWebView(
  * query parameter and does not change which page is loaded, so a re-adopt that
  * only rotates the token must not trigger a reload.
  */
-private fun documentIdentity(url: String): String {
+internal fun harnessDocumentIdentity(url: String): String {
     val withoutFragment = url.substringBefore("#")
     return withoutFragment.substringBefore("?")
 }
@@ -192,7 +188,6 @@ private fun documentIdentity(url: String): String {
 private fun handleUrl(
     context: android.content.Context,
     uri: Uri,
-    view: WebView,
     harnessUrl: String,
 ): Boolean {
     val scheme = uri.scheme?.lowercase().orEmpty()

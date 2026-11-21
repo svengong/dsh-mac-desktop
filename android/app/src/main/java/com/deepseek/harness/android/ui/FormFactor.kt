@@ -9,8 +9,8 @@ import androidx.compose.ui.unit.dp
 /**
  * Layout shape for the two form factors this app must serve:
  *
- * - **Portrait**: one column. The terminal list and the harness are full-screen
- *   routes; there is no horizontal room to show both.
+ * - **Portrait**: one column. The harness fills the window and the terminal
+ *   drawer opens over it.
  * - **Landscape**: two columns. A persistent navigation rail on the left
  *   (terminals + actions) and the harness on the right, so switching terminals
  *   never costs a full-screen navigation.

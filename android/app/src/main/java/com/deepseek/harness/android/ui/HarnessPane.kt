@@ -14,7 +14,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Article
 import androidx.compose.material.icons.filled.CheckCircle
@@ -22,6 +21,7 @@ import androidx.compose.material.icons.filled.Computer
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.LightMode
+import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.CircularProgressIndicator
@@ -39,8 +39,8 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -51,7 +51,6 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import com.deepseek.harness.android.connection.ConnectionManager
 import com.deepseek.harness.android.connection.ConnectionState
 import com.deepseek.harness.android.data.Device
 
@@ -67,38 +66,26 @@ import com.deepseek.harness.android.data.Device
  */
 @Composable
 fun HarnessPane(
-    manager: ConnectionManager,
     selected: Device?,
     connection: ConnectionState,
-    showLog: Boolean,
-    onShowLog: (Boolean) -> Unit,
+    pageActive: Boolean,
     onReconnect: () -> Unit,
     onAdd: () -> Unit,
-    onConnectionChanged: (Boolean) -> Unit,
     maxWidth: Dp,
     modifier: Modifier = Modifier,
-    onBackToList: (() -> Unit)? = null,
+    onShowTerminals: (() -> Unit)? = null,
     topBar: (@Composable () -> Unit)? = null,
 ) {
-    if (showLog) {
-        // The log belongs HERE, in the right pane. It used to render a placeholder
-        // saying the log lived in the left rail — but the rail only ever holds the
-        // toggle, so on a tablet the log was unreachable: tapping "日志" replaced
-        // the harness with a sentence pointing at nothing. The phone route stack
-        // has always rendered it in place; the two-pane layout now does too.
-        LogScreen(manager = manager, onBack = { onShowLog(false) })
-        // Returning from the log must land back on the harness, not on a blank pane.
-        return
-    }
     when (connection) {
-        is ConnectionState.Ready -> ReadyPane(
-            device = selected,
-            state = connection,
-            maxWidth = maxWidth,
-            modifier = modifier,
-            topBar = topBar,
-            onConnectionChanged = onConnectionChanged,
-        )
+        is ConnectionState.Ready -> key(connection.deviceId) {
+            ReadyPane(
+                state = connection,
+                maxWidth = maxWidth,
+                modifier = modifier,
+                topBar = topBar,
+                pageActive = pageActive,
+            )
+        }
         is ConnectionState.Connecting -> ShellPanel(
             modifier = modifier,
             topBar = topBar,
@@ -153,7 +140,7 @@ fun HarnessPane(
                 Spacer(Modifier.height(20.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     FilledTonalButton(onClick = onReconnect) { Text("重试") }
-                    if (onBackToList != null) TextButton(onClick = onBackToList) { Text("返回终端列表") }
+                    if (onShowTerminals != null) TextButton(onClick = onShowTerminals) { Text("返回终端列表") }
                 }
             }
         }
@@ -193,26 +180,21 @@ fun HarnessPane(
 
 /**
  * Ready state: the page, with the shell's loading cover until it has painted.
- *
- * [onConnectionChanged] is called once per URL so the foreground service tracks
- * the real connection lifetime rather than the user's taps.
+
  */
 @Composable
 private fun ReadyPane(
-    device: Device?,
     state: ConnectionState.Ready,
     maxWidth: Dp,
     modifier: Modifier,
     topBar: (@Composable () -> Unit)?,
-    onConnectionChanged: (Boolean) -> Unit,
+    pageActive: Boolean,
 ) {
-    var loading by remember(state.url) { mutableStateOf(true) }
+    var loading by remember(harnessDocumentIdentity(state.url)) { mutableStateOf(true) }
     val context = LocalContext.current
     // Checked once per page load, not per frame: the answer only changes when the
     // user installs a WebView update, which restarts the process anyway.
     val support = remember(state.url) { WebViewSupport.check(context) }
-
-    LaunchedEffect(state.url) { onConnectionChanged(true) }
 
     Column(modifier.fillMaxSize()) {
         topBar?.invoke()
@@ -224,6 +206,7 @@ private fun ReadyPane(
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
                 HarnessWebView(
                     url = state.url,
+                    pageActive = pageActive,
                     onLoadingChanged = { loading = it },
                     modifier = Modifier.fillMaxSize().widthIn(max = maxWidth),
                 )
@@ -336,7 +319,7 @@ private fun ShellPanel(
 fun PhoneHarnessTopBar(
     device: Device?,
     connection: ConnectionState,
-    onBack: () -> Unit,
+    onShowTerminals: () -> Unit,
     onReconnect: () -> Unit,
     onShowLog: () -> Unit,
     onAdd: () -> Unit,
@@ -350,8 +333,8 @@ fun PhoneHarnessTopBar(
     var menuOpen by remember { mutableStateOf(false) }
     TopAppBar(
         navigationIcon = {
-            IconButton(onClick = onBack) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
+            IconButton(onClick = onShowTerminals) {
+                Icon(Icons.Filled.Menu, contentDescription = "打开终端列表")
             }
         },
         title = {

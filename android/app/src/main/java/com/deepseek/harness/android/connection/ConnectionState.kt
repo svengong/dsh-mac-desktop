@@ -3,8 +3,9 @@ package com.deepseek.harness.android.connection
 /** What the shell is doing right now, per device. */
 sealed interface ConnectionState {
     data object Idle : ConnectionState
-    data class Connecting(val step: String) : ConnectionState
+    data class Connecting(val deviceId: String, val step: String) : ConnectionState
     data class Ready(
+        val deviceId: String,
         val url: String,
         val localPort: Int,
         val remotePort: Int?,
@@ -12,6 +13,12 @@ sealed interface ConnectionState {
     ) : ConnectionState
     data class Failed(val message: String, val hint: String? = null) : ConnectionState
     data object Stopped : ConnectionState
+}
+
+internal fun ConnectionState.canReuseFor(deviceId: String): Boolean = when (this) {
+    is ConnectionState.Ready -> this.deviceId == deviceId
+    is ConnectionState.Connecting -> this.deviceId == deviceId
+    else -> false
 }
 
 /**

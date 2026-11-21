@@ -58,11 +58,16 @@ class ConnectionManager(
 
     private fun emit(text: String) = log.add(text)
 
+    /** Selecting the live terminal just reveals its existing page. */
+    fun open(target: Device) {
+        if (!_state.value.canReuseFor(target.id)) connect(target)
+    }
+
     fun connect(target: Device) {
         disconnect(silent = true)
         epoch += 1
         val myEpoch = epoch
-        _state.value = ConnectionState.Connecting("正在连接…")
+        _state.value = ConnectionState.Connecting(target.id, "正在连接…")
         // Dispatchers.IO is load-bearing: this body opens sockets (the TCP probe
         // that waits for the forward, and the HTTP probes). On the Main dispatcher
         // Android throws NetworkOnMainThreadException, the probe swallows it as
@@ -72,7 +77,7 @@ class ConnectionManager(
             try {
                 when (target.mode) {
                     ConnectionMode.SSH -> connectSsh(target, myEpoch)
-                    ConnectionMode.URL -> connectUrl(target)
+                    ConnectionMode.URL -> connectUrl(target, myEpoch)
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -109,7 +114,7 @@ class ConnectionManager(
     // ── ssh mode ────────────────────────────────────────────────────────────
 
     private suspend fun connectSsh(target: Device, myEpoch: Int) {
-        _state.value = ConnectionState.Connecting("正在建立 SSH 连接…")
+        _state.value = ConnectionState.Connecting(target.id, "正在建立 SSH 连接…")
         emit("连接 SSH ${target.displayTarget()} …")
 
         val keys = store.authKeys.value.filter { it.id == target.authKeyId }
@@ -136,7 +141,7 @@ class ConnectionManager(
             // Tunnel-only: the user runs the service themselves. Probe before
             // spending a forward on it so a dead recorded port fails as a
             // stated error instead of a tunnel that answers nothing.
-            _state.value = ConnectionState.Connecting("正在探测已有服务…")
+            _state.value = ConnectionState.Connecting(target.id, "正在探测已有服务…")
             val unattended = RemoteService(shell, homeFor(target))
             val state = unattended.readState()
                 ?: throw IllegalStateException("远端没有可复用的服务，且已关闭「托管服务」。请先在桌面端启动，或重新开启托管。")
@@ -154,7 +159,7 @@ class ConnectionManager(
         }
 
         val service = RemoteService(shell, homeFor(target))
-        _state.value = ConnectionState.Connecting("正在检查远端运行时…")
+        _state.value = ConnectionState.Connecting(target.id, "正在检查远端运行时…")
         if (!service.hasRuntime()) {
             throw IllegalStateException("远端缺少 DSH 运行时（~/.dsh/runtime/current）。请先用桌面端连接一次以完成安装。")
         }
@@ -170,10 +175,10 @@ class ConnectionManager(
         // rendering and started a replacement on a new port with a new launch
         // token. One host per home stays the invariant; only a connect that
         // found NOTHING serving may rebuild it (see docs/android-parity.md #15).
-        _state.value = ConnectionState.Connecting("正在检查已有服务…")
+        _state.value = ConnectionState.Connecting(target.id, "正在检查已有服务…")
         val existing = service.readState()
         if (existing != null && service.probePort(existing.port)) {
-            _state.value = ConnectionState.Connecting("正在复用已有服务…")
+            _state.value = ConnectionState.Connecting(target.id, "正在复用已有服务…")
             val verdict = openTunnel(target, shell, existing.port, existing.url, myEpoch)
             emit("复用远端 dsh web（端口 ${existing.port}，版本 ${existing.version}）")
             if (existing.version != activeVersion) {
@@ -216,7 +221,7 @@ class ConnectionManager(
         // two hosts over one dsh home and one session store. Waiting for the peer
         // to publish is the only thing that closes that window — see
         // RemoteService.awaitPeerService for why a lock does not.
-        _state.value = ConnectionState.Connecting("正在确认其他终端是否在启动…")
+        _state.value = ConnectionState.Connecting(target.id, "正在确认其他终端是否在启动…")
         val peer = service.awaitPeerService(activeVersion)
         if (peer != null) {
             emit("跟随其他终端已启动的远端 dsh web（端口 ${peer.port}）")
@@ -262,7 +267,7 @@ class ConnectionManager(
         // `launch()` reports as a failure, so it is handled AFTER the attempt,
         // below. Killing first optimises the rare wedged case at the expense of
         // the common one — and the common one is another client's live window.
-        _state.value = ConnectionState.Connecting("正在启动远端服务…")
+        _state.value = ConnectionState.Connecting(target.id, "正在启动远端服务…")
         val launched = try {
             service.launch()
         } catch (error: Exception) {
@@ -334,7 +339,7 @@ class ConnectionManager(
         announcedUrl: String,
         myEpoch: Int,
     ): Boolean? {
-        _state.value = ConnectionState.Connecting("正在建立本地转发…")
+        _state.value = ConnectionState.Connecting(target.id, "正在建立本地转发…")
         val active = session ?: throw IllegalStateException("SSH 会话已断开，无法建立转发。")
         // Ask JSch to bind a free loopback port itself and report which one it
         // got. Probing for a free port and then binding it is a race, and the
@@ -354,6 +359,7 @@ class ConnectionManager(
             throw IllegalStateException("隧道已建立，但本地端口没有响应。")
         }
         _state.value = ConnectionState.Ready(
+            deviceId = target.id,
             url = webUrl,
             localPort = port,
             remotePort = remotePort,
@@ -365,8 +371,7 @@ class ConnectionManager(
 
     // ── url mode ────────────────────────────────────────────────────────────
 
-    private suspend fun connectUrl(target: Device) {
-        _state.value = ConnectionState.Connecting("正在连接…")
+    private suspend fun connectUrl(target: Device, myEpoch: Int) {
         val url = target.url.trim().let { if (it.endsWith("/")) it else "$it/" }
         val probe = HttpProbe.probe(url)
         if (!probe.isDsh) {
@@ -386,8 +391,10 @@ class ConnectionManager(
                     "也可以改用 SSH 模式由本应用自动完成隧道。",
             )
         }
+        if (epoch != myEpoch) return
         emit("已连接 ${target.url}")
         _state.value = ConnectionState.Ready(
+            deviceId = target.id,
             url = url,
             localPort = 0,
             remotePort = null,
@@ -413,8 +420,7 @@ class ConnectionManager(
             while (isActive && epoch == myEpoch) {
                 delay(HEALTH_INTERVAL_MS)
                 if (epoch != myEpoch) return@launch
-                if (_state.value !is ConnectionState.Ready) return@launch
-                val ready = _state.value as ConnectionState.Ready
+                val ready = _state.value as? ConnectionState.Ready ?: return@launch
                 val probe = HttpProbe.probe(ready.url, timeoutMs = 3000)
                 if (probe.up) {
                     failures = 0

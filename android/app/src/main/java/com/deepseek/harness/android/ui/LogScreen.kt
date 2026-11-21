@@ -1,5 +1,6 @@
 package com.deepseek.harness.android.ui
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -63,12 +64,14 @@ fun LogScreen(manager: ConnectionManager, onBack: () -> Unit) {
         }
     }
 
+    BackHandler(onBack = onBack)
     Scaffold(
+        modifier = Modifier.fillMaxSize(),
         topBar = {
             TopAppBar(
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "关闭日志")
                     }
                 },
                 title = { Text("连接日志", style = MaterialTheme.typography.titleMedium) },

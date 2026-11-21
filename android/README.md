@@ -62,14 +62,14 @@ The decision is made from the **window** size (`FormFactor`), not the device
 screen: on Android 12+ a tablet in split-screen has a phone-width window, and
 forcing the two-pane layout there would squeeze a 264dp rail into 400dp.
 
-Rotating a tablet therefore switches layouts live, without dropping the page:
-the harness WebView is recreated only when the URL authority changes, so a
-rotation keeps the conversation and its scroll position.
+Rotating a tablet moves the live page into the new layout, keeping the
+conversation and scroll position. Opening connection logs also keeps the
+page in place.
 
-The phone layout is a route stack, not a drawer: tapping a terminal replaces the
-list with the harness full-screen, because on a phone every dp belongs to the
-conversation, and the back arrow returns to the list. The tablet layout keeps
-both visible at all times so switching terminals costs no navigation.
+On a phone the terminal list is the launcher before you connect. Once
+connected, the upper-left terminal button opens a drawer over the page.
+Close the drawer or tap the active terminal to continue on the same page
+and SSH tunnel. The tablet layout provides a permanent terminal rail.
 
 ## Connection sequence (SSH)
 

@@ -1,10 +1,6 @@
 package com.deepseek.harness.android.ui
 
-import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.core.tween
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.togetherWith
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -19,12 +15,14 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Article
 import androidx.compose.material.icons.filled.Cloud
@@ -45,14 +43,19 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.DrawerValue
+import androidx.compose.material3.ModalDrawerSheet
+import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.NavigationDrawerItem
+import androidx.compose.material3.rememberDrawerState
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.movableContentOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -71,6 +74,7 @@ import com.deepseek.harness.android.data.AppSettings
 import com.deepseek.harness.android.data.AuthKey
 import com.deepseek.harness.android.data.ConnectionMode
 import com.deepseek.harness.android.data.Device
+import kotlinx.coroutines.launch
 
 /**
  * The shell's whole surface.
@@ -79,9 +83,8 @@ import com.deepseek.harness.android.data.Device
  *
  * - [TwoPaneLayout] — tablet landscape: navigation rail + harness, side by side.
  *   Switching terminals keeps the WebView on screen; only its URL changes.
- * - [OnePaneLayout] — phone portrait: a single route stack (terminals → harness,
- *   or terminals → editor). The harness takes the whole screen because every
- *   pixel of a phone belongs to the conversation.
+ * - [OnePaneLayout] — phone portrait: the harness fills the screen, with
+ *   the terminal drawer and log layered over it.
  */
 @Composable
 fun DshRoot(
@@ -115,10 +118,21 @@ fun DshRoot(
     // must see the list first, and an automatic connection would hide it behind
     // a loading screen.
     var autoConnected by rememberSaveable { mutableStateOf(false) }
-    if (!autoConnected && form.isTwoPane && selected != null && connection is ConnectionState.Idle) {
-        autoConnected = true
-        onTouchDevice(selected.id)
-        manager.connect(selected)
+    LaunchedEffect(form.isTwoPane, selected?.id, connection) {
+        if (!autoConnected && form.isTwoPane && selected != null && connection is ConnectionState.Idle) {
+            autoConnected = true
+            onTouchDevice(selected.id)
+            manager.open(selected)
+        }
+    }
+
+    val connected = connection is ConnectionState.Ready
+    LaunchedEffect(connected) { onConnectionChanged(connected) }
+
+    val openDevice: (Device) -> Unit = { device ->
+        selectedId = device.id
+        onTouchDevice(device.id)
+        manager.open(device)
     }
 
     // ONE harness instance, MOVED between layouts instead of rebuilt.
@@ -132,17 +146,14 @@ fun DshRoot(
     val harnessContent = remember(manager) {
         movableContentOf<HarnessSlot> { slot ->
             HarnessPane(
-                manager = manager,
                 selected = slot.selected,
                 connection = slot.connection,
-                showLog = slot.showLog,
-                onShowLog = slot.onShowLog,
+                pageActive = slot.pageActive,
                 onReconnect = slot.onReconnect,
                 onAdd = slot.onAdd,
-                onConnectionChanged = slot.onConnectionChanged,
                 maxWidth = slot.maxWidth,
                 modifier = Modifier.fillMaxSize(),
-                onBackToList = slot.onBackToList,
+                onShowTerminals = slot.onShowTerminals,
                 topBar = slot.topBar,
             )
         }
@@ -157,17 +168,12 @@ fun DshRoot(
             showLog = showLog,
             onShowLog = { showLog = it },
             onShowAbout = { showAbout = true },
-            onSelect = { device ->
-                selectedId = device.id
-                onTouchDevice(device.id)
-                manager.connect(device)
-            },
+            onSelect = openDevice,
             onAdd = { editorTarget = null; showEditor = true },
             onEdit = { editorTarget = it; showEditor = true },
             onReconnect = { selected?.let(manager::connect) },
             onThemeChange = onThemeChange,
             themeMode = settings?.themeMode ?: "system",
-            onConnectionChanged = onConnectionChanged,
             railCollapsed = railCollapsed,
             onCollapse = { railCollapsed = true },
             onExpand = { railCollapsed = false },
@@ -182,17 +188,12 @@ fun DshRoot(
             showLog = showLog,
             onShowLog = { showLog = it },
             onShowAbout = { showAbout = true },
-            onSelect = { device ->
-                selectedId = device.id
-                onTouchDevice(device.id)
-                manager.connect(device)
-            },
+            onSelect = openDevice,
             onAdd = { editorTarget = null; showEditor = true },
             onEdit = { editorTarget = it; showEditor = true },
             onReconnect = { selected?.let(manager::connect) },
             onThemeChange = onThemeChange,
             themeMode = settings?.themeMode ?: "system",
-            onConnectionChanged = onConnectionChanged,
             harness = { slot -> harnessContent(slot) },
         )
     }
@@ -235,7 +236,6 @@ private fun TwoPaneLayout(
     onReconnect: () -> Unit,
     onThemeChange: (String) -> Unit,
     themeMode: String,
-    onConnectionChanged: (Boolean) -> Unit,
     railCollapsed: Boolean,
     onCollapse: () -> Unit,
     onExpand: () -> Unit,
@@ -313,16 +313,15 @@ private fun TwoPaneLayout(
                 HarnessSlot(
                     selected = selected,
                     connection = connection,
-                    showLog = showLog,
-                    onShowLog = onShowLog,
+                    pageActive = !showLog,
                     onReconnect = onReconnect,
                     onAdd = onAdd,
-                    onConnectionChanged = onConnectionChanged,
                     maxWidth = form.contentMaxWidth,
-                    onBackToList = null,
+                    onShowTerminals = null,
                     topBar = null,
                 )
             )
+            if (showLog) LogScreen(manager = manager, onBack = { onShowLog(false) })
         }
     }
 }
@@ -473,69 +472,95 @@ private fun OnePaneLayout(
     onReconnect: () -> Unit,
     onThemeChange: (String) -> Unit,
     themeMode: String,
-    onConnectionChanged: (Boolean) -> Unit,
     harness: @Composable (HarnessSlot) -> Unit,
 ) {
-    // Which of the two phone routes is showing. A connection to a terminal is
-    // what puts the user on the harness route; disconnecting returns to the list
-    // so they are never stranded on an empty page.
-    var route by rememberSaveable { mutableStateOf(if (connection is ConnectionState.Ready) Route.Harness else Route.Terminals) }
-    if (connection is ConnectionState.Ready && route == Route.Terminals && devices.isNotEmpty()) {
-        // Keep the user where they are; only auto-advance on an explicit select.
+    val drawer = rememberDrawerState(DrawerValue.Closed)
+    val scope = rememberCoroutineScope()
+    val showLauncher = connection is ConnectionState.Idle || connection is ConnectionState.Stopped
+    val drawerVisible = drawer.isOpen || drawer.targetValue == DrawerValue.Open
+
+    fun openDrawer() {
+        scope.launch { drawer.open() }
     }
 
-    AnimatedContent(
-        targetState = if (showLog) Route.Log else route,
-        transitionSpec = { fadeIn(tween(160)) togetherWith fadeOut(tween(120)) },
-        label = "phone-route",
-    ) { current ->
-        when (current) {
-            Route.Log -> LogScreen(manager = manager, onBack = { onShowLog(false) })
-            Route.Terminals -> TerminalsScreen(
-                devices = devices,
-                selected = selected,
-                connection = connection,
-                themeMode = themeMode,
-                onSelect = { device ->
-                    onSelect(device)
-                    route = Route.Harness
-                },
-                onAdd = onAdd,
-                onEdit = onEdit,
-                onShowLog = { onShowLog(true) },
-                onShowAbout = onShowAbout,
-                onThemeChange = onThemeChange,
-            )
-            Route.Harness -> harness(
-                HarnessSlot(
-                    selected = selected,
-                    connection = connection,
-                    showLog = false,
-                    onShowLog = onShowLog,
-                    onReconnect = onReconnect,
-                    onAdd = onAdd,
-                    onConnectionChanged = onConnectionChanged,
-                    maxWidth = FormFactor.current().contentMaxWidth,
-                    onBackToList = { route = Route.Terminals },
-                    topBar = {
-                        PhoneHarnessTopBar(
-                            device = selected,
-                            connection = connection,
-                            onBack = { route = Route.Terminals },
-                            onReconnect = onReconnect,
-                            onShowLog = { onShowLog(true) },
-                            onAdd = onAdd,
-                            onThemeChange = onThemeChange,
-                            themeMode = themeMode,
-                        )
-                    },
+    fun closeDrawer() {
+        scope.launch { drawer.close() }
+    }
+
+    LaunchedEffect(showLauncher) {
+        if (showLauncher) drawer.snapTo(DrawerValue.Closed)
+    }
+
+    val terminals: @Composable (Boolean) -> Unit = { inDrawer ->
+        TerminalsScreen(
+            devices = devices,
+            selected = selected,
+            connection = connection,
+            themeMode = themeMode,
+            onSelect = { device ->
+                onSelect(device)
+                if (inDrawer) closeDrawer()
+            },
+            onAdd = {
+                if (inDrawer) closeDrawer()
+                onAdd()
+            },
+            onEdit = { device ->
+                if (inDrawer) closeDrawer()
+                onEdit(device)
+            },
+            onShowLog = { onShowLog(true) },
+            onShowAbout = onShowAbout,
+            onThemeChange = onThemeChange,
+            onClose = if (inDrawer) ::closeDrawer else null,
+        )
+    }
+
+    Box(Modifier.fillMaxSize()) {
+        ModalNavigationDrawer(
+            drawerState = drawer,
+            gesturesEnabled = !showLog && drawerVisible,
+            drawerContent = {
+                if (!showLauncher) {
+                    ModalDrawerSheet(
+                        modifier = Modifier.widthIn(max = 360.dp).fillMaxWidth(0.9f),
+                    ) {
+                        terminals(true)
+                    }
+                }
+            },
+        ) {
+            Box(Modifier.fillMaxSize()) {
+                harness(
+                    HarnessSlot(
+                        selected = selected,
+                        connection = connection,
+                        pageActive = !showLog && !drawerVisible,
+                        onReconnect = onReconnect,
+                        onAdd = onAdd,
+                        maxWidth = FormFactor.current().contentMaxWidth,
+                        onShowTerminals = ::openDrawer,
+                        topBar = {
+                            PhoneHarnessTopBar(
+                                device = selected,
+                                connection = connection,
+                                onShowTerminals = ::openDrawer,
+                                onReconnect = onReconnect,
+                                onShowLog = { onShowLog(true) },
+                                onAdd = onAdd,
+                                onThemeChange = onThemeChange,
+                                themeMode = themeMode,
+                            )
+                        },
+                    )
                 )
-            )
+                if (showLauncher) terminals(false)
+            }
         }
+        BackHandler(enabled = drawerVisible) { closeDrawer() }
+        if (showLog) LogScreen(manager = manager, onBack = { onShowLog(false) })
     }
 }
-
-private enum class Route { Terminals, Harness, Log }
 
 /**
  * Everything the harness pane needs, bundled so ONE movable composable can serve
@@ -545,13 +570,11 @@ private enum class Route { Terminals, Harness, Log }
 private data class HarnessSlot(
     val selected: Device?,
     val connection: ConnectionState,
-    val showLog: Boolean,
-    val onShowLog: (Boolean) -> Unit,
+    val pageActive: Boolean,
     val onReconnect: () -> Unit,
     val onAdd: () -> Unit,
-    val onConnectionChanged: (Boolean) -> Unit,
     val maxWidth: Dp,
-    val onBackToList: (() -> Unit)?,
+    val onShowTerminals: (() -> Unit)?,
     val topBar: (@Composable () -> Unit)?,
 )
 
@@ -568,13 +591,22 @@ private fun TerminalsScreen(
     onShowLog: () -> Unit,
     onShowAbout: () -> Unit,
     onThemeChange: (String) -> Unit,
+    onClose: (() -> Unit)?,
 ) {
     Scaffold(
+        modifier = Modifier.fillMaxSize(),
         topBar = {
             TopAppBar(
+                navigationIcon = {
+                    if (onClose != null) {
+                        IconButton(onClick = onClose) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "关闭终端列表")
+                        }
+                    }
+                },
                 title = {
                     Column {
-                        Text("DeepSeek Harness", style = MaterialTheme.typography.titleMedium)
+                        Text(if (onClose == null) "DeepSeek Harness" else "终端列表", style = MaterialTheme.typography.titleMedium)
                         Text(
                             if (devices.isEmpty()) "选择一个终端开始" else "${devices.size} 个终端",
                             style = MaterialTheme.typography.labelMedium,
