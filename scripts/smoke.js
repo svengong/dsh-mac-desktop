@@ -32,7 +32,7 @@ const { WindowManager } = require('../src/window-manager')
 const { mergeUpdates } = require('../src/device-merge')
 const { resolveTools, engineOk } = require('../src/tools')
 const { presentWindow, focusViewInKeyWindow } = require('../src/windows')
-const { isExternalUrl, isExternalSubFrameUrl } = require('../src/external-open')
+const { isExternalUrl, isBlockedSubFrameUrl } = require('../src/external-open')
 const { BOOT_FAILURE_PROBE, shouldReloadAfterBootFailure } = require('../src/boot-watch')
 const {
   IS_WINDOWS, cmdQuote, expandHome, extractNodeArchive, isPidAlive, killTree,
@@ -801,19 +801,32 @@ async function main() {
   assert.strictEqual(isExternalUrl(''), false)
   assert.strictEqual(isExternalUrl('not a url'), false)
 
-  // Sub-frames belong to the plugin that embedded them, so the shell only
-  // expels off-origin content and lets a plugin route its own frame in place.
-  // Loopback paths — the sidebar preview's included — are NOT intercepted:
-  // hijacking them sent a preview click to the system browser.
-  assert.strictEqual(isExternalSubFrameUrl('https://example.com/page'), true)
-  assert.strictEqual(isExternalSubFrameUrl('http://192.168.1.10:3080'), true)
-  assert.strictEqual(isExternalSubFrameUrl('file:///tmp/x.html'), true)
-  assert.strictEqual(isExternalSubFrameUrl('http://127.0.0.1:3080/'), false)
-  assert.strictEqual(isExternalSubFrameUrl('http://localhost:3080/preview'), false)
-  assert.strictEqual(isExternalSubFrameUrl('http://127.0.0.1:3080/docs/x.html'), false)
-  assert.strictEqual(isExternalSubFrameUrl('about:blank'), false)
-  assert.strictEqual(isExternalSubFrameUrl(''), false)
-  assert.strictEqual(isExternalSubFrameUrl('not a url'), false)
+  // Sub-frames belong to the plugin that embedded them: the shell never sends
+  // one to the browser, whatever its origin — the sidebar preview, the sidebar
+  // browser, billion-context's 上下文统计 panel on its OWN loopback port. Only
+  // schemes no web frame may render are denied (in place, never launched).
+  assert.strictEqual(isBlockedSubFrameUrl('https://example.com/page'), false)
+  assert.strictEqual(isBlockedSubFrameUrl('http://192.168.1.10:3080'), false)
+  assert.strictEqual(isBlockedSubFrameUrl('http://127.0.0.1:3080/'), false)
+  assert.strictEqual(isBlockedSubFrameUrl('http://localhost:3080/preview'), false)
+  assert.strictEqual(isBlockedSubFrameUrl('http://127.0.0.1:3080/docs/x.html'), false)
+  // The plugin panel that regressed in 0.11.1: a different loopback port.
+  assert.strictEqual(isBlockedSubFrameUrl('http://127.0.0.1:18787/__bili/?embed=1#/session/x'), false)
+  assert.strictEqual(isBlockedSubFrameUrl('blob:http://127.0.0.1:3080/uuid'), false)
+  assert.strictEqual(isBlockedSubFrameUrl('data:text/html,<p>x</p>'), false)
+  assert.strictEqual(isBlockedSubFrameUrl('about:blank'), false)
+  assert.strictEqual(isBlockedSubFrameUrl('file:///tmp/x.html'), true)
+  assert.strictEqual(isBlockedSubFrameUrl('smb://host/share'), true)
+  assert.strictEqual(isBlockedSubFrameUrl(''), false)
+  assert.strictEqual(isBlockedSubFrameUrl('not a url'), false)
+  // The guard must not route sub-frames to the browser at all.
+  {
+    const guardSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'main.js'), 'utf8')
+    const guard = guardSource.slice(guardSource.indexOf("webContents.on('will-frame-navigate'"))
+    const body = guard.slice(0, guard.indexOf('\n  })'))
+    assert.ok(!body.includes('openHarnessPopupUrl') && !body.includes('openExternal'),
+      'will-frame-navigate must never launch the system browser')
+  }
 
   // A loaded page is not a booted harness: the frontend can fail to activate
   // its plugin graph and leave a "Failed to load plugins" card on screen with

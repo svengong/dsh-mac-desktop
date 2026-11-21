@@ -112,12 +112,20 @@ fun HarnessWebView(
                         override fun shouldOverrideUrlLoading(
                             view: WebView,
                             request: WebResourceRequest,
-                        ): Boolean = handleUrl(
-                            context,
-                            request.url,
-                            view,
-                            harnessUrl = url,
-                        )
+                        ): Boolean {
+                            // Sub-frames belong to the plugin that embedded
+                            // them (a sidebar preview, a plugin panel on its
+                            // own loopback port). The shell never reroutes
+                            // them to the system browser; only main-frame
+                            // navigations fall through to the shell.
+                            if (!request.isForMainFrame) return false
+                            return handleUrl(
+                                context,
+                                request.url,
+                                view,
+                                harnessUrl = url,
+                            )
+                        }
 
                         @Deprecated("Legacy callback for API < 24")
                         override fun shouldOverrideUrlLoading(view: WebView, target: String): Boolean =

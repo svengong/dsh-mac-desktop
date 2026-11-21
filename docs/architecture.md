@@ -114,7 +114,8 @@ BrowserWindow (shell.html 边框)
 壳只在 harness 视图内渲染**一个**页面：服务根 `http://127.0.0.1:<port>/`。导航护栏分主/子框架两套规则（`installHarnessNavigationGuard`）：
 
 - **主框架**（`will-navigate`，用 `isExternalUrl`）：只保留根路径（harness 是 hash 路由，真实应用路由的 `pathname` 恒为 `/`）；其他 loopback 路径、`https:`、`file:` 一律交系统默认浏览器。点 workspace `.html` 就是走这条——服务对这些路径回 404 空页，若不拦会得到一张无法自愈的空白 harness 视图。
-- **子框架**（`will-frame-navigate`，用 `isExternalSubFrameUrl`）：子框架属于嵌入它的插件（如 sidebar 文件预览），壳只驱逐真正跨源内容（非 loopback、`file:`），其余让插件自行路由。把主框架规则套到子框架上会劫持插件 UI——预览点击被顶到系统浏览器。
+- **子框架**（`will-frame-navigate`，用 `isBlockedSubFrameUrl`）：子框架属于嵌入它的插件（sidebar 文件预览、sidebar 浏览器、billion-context「上下文统计」面板——后者在插件**自己的** loopback 端口上），去哪儿由插件决定。壳**永不**把子框架导航转成系统浏览器，只就地拒绝 `file:` 等 web 框架不该渲染的协议。0.11.1 曾按「端口 ≠ harness 端口即外部」处理子框架，把 bili 面板顶到了浏览器。
+- **归属顺序**（谁先决定）：① DSH/插件页面自己的点击处理（应用内打开、侧栏 tab 等，`preventDefault` 后壳看不到）→ ② 子框架由插件自行路由 → ③ 只有落到壳的才可能开浏览器：主框架离开 harness 根路径，或任意框架发出的弹窗（`window.open`/`target="_blank"`，经 `setWindowOpenHandler`）。壳之外没有任何地方会拉起浏览器。Android 同理：`shouldOverrideUrlLoading` 对 `!isForMainFrame` 直接放行。
 
 两个关键状态机细节（实测于 Electron 35）：
 

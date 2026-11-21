@@ -48,7 +48,7 @@ const {
   IS_MAC, IS_WINDOWS, isPidAlive, killTree, platformName,
 } = require('./platform')
 const { WindowManager } = require('./window-manager')
-const { isExternalUrl, isExternalSubFrameUrl, isBrowserSafeUrl } = require('./external-open')
+const { isExternalUrl, isBlockedSubFrameUrl, isBrowserSafeUrl } = require('./external-open')
 const { BOOT_FAILURE_PROBE, shouldReloadAfterBootFailure } = require('./boot-watch')
 
 const BUILD_DIR = path.join(__dirname, '..', 'build')
@@ -1256,14 +1256,16 @@ function installHarnessNavigationGuard(workspace) {
   })
 
   // Sub-frame navigations, which `will-navigate` does not cover. A sub-frame
-  // belongs to the plugin that embedded it — the sidebar's file preview among
-  // them — so the shell only expels genuinely off-origin content and lets the
-  // plugin route everything else in place. Intercepting those here hijacked
-  // the plugin's UI (a preview click jumped to the system browser).
+  // belongs to the plugin that embedded it — the sidebar's file preview, the
+  // billion-context 上下文统计 panel on its own loopback port — so where it
+  // goes is the plugin's decision. The shell NEVER turns a sub-frame
+  // navigation into a browser launch (that pulled plugin panels out of DSH);
+  // it only denies schemes no web frame may render. A plugin that wants the
+  // browser opens a popup, which reaches the window-open handler above.
   webContents.on('will-frame-navigate', (event) => {
-    if (event.isMainFrame || !isExternalSubFrameUrl(event.url, workspace.loadedUrl)) return
+    if (event.isMainFrame || !isBlockedSubFrameUrl(event.url)) return
     event.preventDefault()
-    openHarnessPopupUrl(workspace, event.url)
+    if (workspace.session !== null) workspace.session.connection.log('[window] 插件子框架导航 → 已拦截 ' + event.url)
   })
 }
 

@@ -32,7 +32,7 @@ npm 产物渠道（`@deepseek-ai/dsh`）与 `dsh plugin` 命令。
 | 设置定位菜单 | `src/ui/settings.html`、`src/ui/shell.css` | 左侧 208px 菜单只**定位**分区（更新/连接/外观/日志，全部平铺不折叠），随滚动高亮；菜单是贴左边缘的实体面板（背景 + 右边框 + 底部终端标识），正文列 940px 左对齐；有可用更新时「更新」带橙点 |
 | 设置入口焦点 | `src/main.js#setWorkspaceView`、`src/dialogs.js`、`src/ui/settings.html` | 只有「连接」语义的入口（终端启动器／⌘,／终端徽标／失败页「连接设置」）才锚定到「连接」；顶栏「设置」等普通入口锚点为 `null`，面板停在顶部。初始焦点在 boot 状态与 `updates.getState()` **两次渲染都完成后**才施加，否则偏移量按旧布局计算会落空 |
 | 多屏焦点抖动 | `src/windows.js#focusViewInKeyWindow`、`src/main.js#updateHarnessVisibility`、`src/dialogs.js` | 聚焦 `WebContentsView.webContents` 会**激活其宿主窗口**（实测 Electron 35）：会话级广播会给同终端所有窗口重设视图焦点，后台窗口因此抢走前窗；双屏下表现为窗口与顶部菜单在两个屏幕间来回闪。所有视图聚焦统一走「仅当窗口已是 key window 才聚焦」 |
-| harness 导航护栏 | `src/external-open.js`、`src/main.js#installHarnessNavigationGuard` | 主框架 `isExternalUrl` 只保留 harness 根路径，其余交系统浏览器；子框架 `isExternalSubFrameUrl` 只驱逐跨源内容（插件 iframe 归插件）。拦截后 `restoreHarnessAfterBlockedNav()` 恢复就绪态；`did-start-navigation`(isMainFrame) 才代表文档被替换 |
+| harness 导航护栏 | `src/external-open.js`、`src/main.js#installHarnessNavigationGuard` | 主框架 `isExternalUrl` 只保留 harness 根路径，其余交系统浏览器；子框架 `isBlockedSubFrameUrl` 永不开浏览器、只拒 `file:` 等协议（插件 iframe 归插件，含插件自己的 loopback 端口）。拦截后 `restoreHarnessAfterBlockedNav()` 恢复就绪态；`did-start-navigation`(isMainFrame) 才代表文档被替换 |
 | `--no-open` 门控 | `src/connection.js` | `dsh web --no-open` 只在运行时 ≥ `NO_OPEN_MIN_VERSION` 时传（旧产物遇未知选项启动即失败）；`unknown` 版本按旧处理 |
 | 平台抽象 | `src/platform.js` | **唯一**平台差异层：`killTree`（POSIX 进程组 / Windows `taskkill /T`）、可执行文件命名、PATH 键与分隔符、node 分发归档、`current` 指针（symlink / junction）、ssh 配置路径。业务模块禁止出现 `process.platform` 分支 |
 | 进程/端口发现 | `src/process-scan.js` | **唯一**发现层：`lsof`+`ps`（POSIX，`ps` 被拒回退 `pgrep -fl`）/ `netstat -ano`+CIM（Windows）。`processUsesHome` 用于**杀进程决策**，Windows 走命令行路径前缀，判定不出来必须是 false |
@@ -86,9 +86,11 @@ npm 产物渠道（`@deepseek-ai/dsh`）与 `dsh plugin` 命令。
     worker（`update-worker.js`）不注册进进程登记表，壳退出不杀它；壳通过
     `runtime/update-status.json` 观察，`done` 后重启服务，下次连接按版本不匹配兜底。
 18. **导航分类分主/子框架，且子框架归插件。** `will-navigate` 用 `isExternalUrl`
-    （只保留 harness 根路径）；`will-frame-navigate` 用 `isExternalSubFrameUrl`
-    （只驱逐真正跨源内容）。子框架属于嵌入它的插件（sidebar 的文件预览就是），
-    壳拦截会把插件 UI 顶到系统浏览器。**不要**把主框架规则套到子框架上。
+    （只保留 harness 根路径）；`will-frame-navigate` 用 `isBlockedSubFrameUrl`
+    （永不开浏览器，只就地拒 `file:` 等协议）。子框架属于嵌入它的插件（sidebar
+    文件预览、billion-context 上下文统计面板——在插件自己的 loopback 端口），壳拦截
+    会把插件 UI 顶到系统浏览器。**不要**把主框架/端口规则套到子框架上；插件要开浏览器
+    就发弹窗（`window.open`），由 `setWindowOpenHandler` 交给壳。
 19. **拦截导航后必须自己恢复就绪态。** 被 `preventDefault()` 的导航不会发出
     `did-finish-load`，`harnessReady` 不会自动恢复，加载面板会永久盖住 harness。
     `will-navigate` 里必须调 `restoreHarnessAfterBlockedNav()`。
@@ -214,7 +216,7 @@ for f in /tmp/settings.html.js /tmp/shell.html.js; do node --check "$f"; done
 - 想改日志 → `ConnectionManager.logRing` 是 300 行 ring；面板晚创建用
   `updates:get-log` 回填，不要只依赖实时 push。
 - 想改 harness 导航/外部链接规则 → `external-open.js`（`isExternalUrl` 主框架 /
-  `isExternalSubFrameUrl` 子框架）+ `main.js#installHarnessNavigationGuard`。
+  `isBlockedSubFrameUrl` 子框架）+ `main.js#installHarnessNavigationGuard`。
 - 想改设置面板布局/入口焦点 → `settings.html`、`shell.css`、`dialogs.js`、
   `main.js#setWorkspaceView`（锚点语义）。
 - 想用平台特有 API（杀进程/找工具/路径/归档/链接）→ 先看 `platform.js` 有没有；

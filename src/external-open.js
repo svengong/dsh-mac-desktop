@@ -10,6 +10,18 @@
  * third-party content, so any external page must be delegated to the system
  * default browser instead of being shown in a new window here.
  *
+ * Ownership order for a click (who gets to decide, first to last):
+ *   1. DSH / plugin page code. A click handler that routes in-app (an
+ *      open-in-app action, a sidebar tab) calls preventDefault; the shell
+ *      never sees it. DSH's own features stay in DSH, plugin features stay in
+ *      the plugin.
+ *   2. Sub-frames: a plugin's iframe navigates wherever the plugin points it.
+ *      The shell does not reroute it (see `isBlockedSubFrameUrl`).
+ *   3. The shell, last: only what falls through to it — a main-frame
+ *      navigation away from the harness, or a popup (`window.open`,
+ *      `target="_blank"`) from any frame — may reach the system browser.
+ *      Nothing else in the app launches a browser.
+ *
  * Two rules, because the two frame kinds have different owners:
  *
  * `isExternalUrl` — the harness view's MAIN frame. The harness service lives
@@ -31,11 +43,10 @@
  * actually rendering, `isExternalUrl` treats that origin's root as internal,
  * and every OTHER origin — loopback or not — leaves for the default browser.
  *
- * `isExternalSubFrameUrl` — SUB-FRAMES. A sub-frame belongs to whoever
- * embedded it. Plugin-provided panels (the sidebar's file preview among them)
- * route their own content in their own frame; the shell hijacking those
- * navigations breaks the plugin's UI, so the shell stays out of the way and
- * only expels genuinely off-origin content it must never render.
+ * `isBlockedSubFrameUrl` — SUB-FRAMES. A sub-frame belongs to whoever
+ * embedded it. Plugin-provided panels route their own content in their own
+ * frame — including on their own loopback port — so the shell never sends a
+ * sub-frame to the browser; it only denies schemes no web frame may render.
  *
  * Both functions are pure (no Electron imports) so the smoke test can cover
  * them without booting an app.
@@ -105,38 +116,36 @@ function isExternalUrl(url, harnessUrl) {
 }
 
 /**
- * True when a SUB-FRAME navigation must leave the shell.
+ * True when a SUB-FRAME navigation must be DENIED in place.
  *
- * Sub-frames belong to whoever embedded them: plugin-provided panels (the
- * sidebar's file preview among them) render their own content in their own
- * frame, and their routing is theirs to decide. Intercepting those navigations
- * hijacks the plugin's UI — a preview click would jump to the system browser
- * instead of rendering in place.
+ * Sub-frames belong to whoever embedded them. A plugin panel renders its own
+ * content in its own frame — the sidebar's file preview, the sidebar browser,
+ * billion-context's 上下文统计 panel (an iframe on the plugin's OWN loopback
+ * port, `http://127.0.0.1:<bili-port>/__bili/?embed=1`) — and where that frame
+ * goes is the plugin's decision, not the shell's. The shell therefore never
+ * turns a sub-frame navigation into a system-browser launch: doing so pulled
+ * the plugin's own UI out of DSH (the 0.11.1 port rule classified the bili
+ * panel's port as "another local service" and sent it to the browser).
  *
- * So the shell only expels a sub-frame when the destination is genuinely
- * off-origin content it must never render (a real external web page), and
- * otherwise stays out of the way. "Off-origin" is measured against the harness
- * origin for loopback, exactly like the main frame: `127.0.0.1:8811` is a
- * different server from the harness on its own port, so a frame pointed at it
- * is third-party content.
+ * A plugin that wants something in the browser says so by opening a popup
+ * (`window.open`, `target="_blank"`); THAT reaches the shell's window-open
+ * handler, which is the only place a browser is ever launched.
+ *
+ * The only sub-frame destinations refused are ones no web frame may render:
+ * `file:` (local disk) and non-web schemes. They are denied, never launched.
  * @param {string} url - the navigation target.
- * @param {string} [harnessUrl] - the URL the harness view is rendering.
  * @returns {boolean}
  */
-function isExternalSubFrameUrl(url, harnessUrl) {
+function isBlockedSubFrameUrl(url) {
   const parsed = parseUrl(url)
   if (parsed === null) return false
-  // Off-origin content (public web, file:) never renders inside the shell.
-  if (parsed.protocol === 'file:') return true
-  if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
-    if (!LOOPBACK_HOSTS.includes(parsed.hostname)) return true
-    // Loopback: only the harness's own port is ours; another port is a
-    // different local service and is not the plugin's own content.
-    const harness = parseUrl(harnessUrl)
-    return harness !== null && parsed.port !== harness.port
-  }
-  return EXTERNAL_PROTOCOLS.includes(parsed.protocol)
+  return !SUB_FRAME_PROTOCOLS.includes(parsed.protocol)
 }
+
+// Schemes a plugin frame may navigate to on its own. `blob:`/`data:` carry
+// generated documents (previews render through them); `about:` is the blank
+// placeholder; `javascript:` never navigates.
+const SUB_FRAME_PROTOCOLS = ['http:', 'https:', 'about:', 'blob:', 'data:', 'javascript:']
 
 /**
  * Schemes the shell may hand to the OS via `shell.openExternal`.
@@ -157,4 +166,4 @@ function isBrowserSafeUrl(url) {
   return parsed !== null && BROWSER_PROTOCOLS.includes(parsed.protocol)
 }
 
-module.exports = { isExternalUrl, isExternalSubFrameUrl, isBrowserSafeUrl }
+module.exports = { isExternalUrl, isBlockedSubFrameUrl, isBrowserSafeUrl }
