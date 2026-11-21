@@ -38,6 +38,8 @@ const { sshCommandArgs, parseTarget, listSshHosts, isSshConfigAlias } = require(
 const { ConnectionManager } = require('./connection')
 const runtimeStore = require('./runtime-store')
 const { Updater } = require('./update')
+const { resolveArtifactNodeFloor } = require('./artifact')
+const { runtimeNodeEngine } = require('./runtime-layout')
 const { UpdateManager } = require('./update-manager')
 const { SetupDialog, registerDialogIpc } = require('./dialogs')
 const { pickDirectory } = require('./picker')
@@ -579,8 +581,8 @@ function pidAliveLocal(pid) {
  * start observing its status file. The worker survives shell quit; on the
  * next launch `resumePendingUpdate` picks the outcome back up.
  */
-function spawnUpdateWorker(session, view, version) {
-  if (session.workerPollTimer !== null) return
+function spawnUpdateWorker(session, view, version, nodeFloor) {
+  if (session.workerPollTimer !== null) return true
   const root = runtimeStore.localRuntimeRoot(view)
   const taskPath = path.join(root, 'update-task.json')
   try {
@@ -593,12 +595,13 @@ function spawnUpdateWorker(session, view, version) {
       repoUrl: view.local.repoUrl,
       toolPaths: view.toolPaths,
       version,
+      nodeFloor,
       registryUrl: view.update?.registryUrl ?? '',
     }, null, 2))
     runtimeStore.writePendingUpdate(view, { intent: 'artifact', version })
   } catch (error) {
     routeSessionLine(session, `✗ 无法准备更新任务：${error.message}`)
-    return
+    return false
   }
   routeSessionLine(session, `启动后台更新任务：官方预构建版 v${version}（壳可正常关闭，任务会继续完成）`)
   const child = spawnDetached({
@@ -615,8 +618,18 @@ function spawnUpdateWorker(session, view, version) {
   if (child !== null && child !== undefined && Number.isInteger(child.pid)) {
     session.workerPid = child.pid
   }
+  child.once('error', error => {
+    stopObservingWorker(session)
+    runtimeStore.clearPendingUpdate(view)
+    const message = `无法启动后台更新任务：${error.message}`
+    routeSessionLine(session, `✗ ${message}`)
+    setSessionProgress(session, { title: '更新失败', status: message, actions: [
+      { label: '重试', name: 'run-update', primary: true },
+    ] })
+  })
   session.workerPollTimer = setInterval(() => observeUpdateWorker(session), 800)
   session.workerPollTimer.unref()
+  return true
 }
 
 /** Set the progress banner directly on a session, even with no open window. */
@@ -800,8 +813,14 @@ async function startArtifactUpdateIfPossible(session) {
     routeSessionLine(session, query.reason)
     return false
   }
-  spawnUpdateWorker(session, view, query.version)
-  return true
+  const floor = await resolveArtifactNodeFloor({
+    version: query.version,
+    nodeEngine: query.nodeEngine,
+    registryUrl: view.update?.registryUrl,
+    installedEngine: () => runtimeNodeEngine(runtimeStore.localActiveRuntimeDir(view)),
+  })
+  if (session.cancelRequested === true) return false
+  return spawnUpdateWorker(session, view, query.version, floor)
 }
 
 /**
@@ -2474,7 +2493,8 @@ async function startWithSettingsInner(workspace) {
     // worker survives shell quit.
     session.connection.log('[3/4] 查询官方预构建产物…')
     const usedWorker = await startArtifactUpdateIfPossible(session)
-    session.connection.log(`[3/4] 官方产物结果：${usedWorker ? '已交给后台下载任务' : '不可用，回退到源码构建'}`)
+    session.connection.log(`[3/4] ${usedWorker ? '已交给后台下载任务' : '通过当前会话安装官方产物'}`)
+    if (session.cancelRequested === true) return
     if (workspace.session !== session) {
       session.connection.log('[诊断] 窗口已切换到其他终端，连接链在此结束。')
       return
@@ -2484,8 +2504,8 @@ async function startWithSettingsInner(workspace) {
       return
     }
     setProgress(workspace, {
-      title: '初始化构建',
-      status: '首次使用：确保仓库 → 工具链引导 → pnpm install → pnpm run build → 启动服务',
+      title: '初始化（官方产物）',
+      status: '正在检查 Node.js 并安装官方产物…',
     })
     session.connection.log('[4/4] 开始构建流水线…')
     const outcome = await session.updater.runPipeline({ includePull: true, toleratePullFailure: true })
@@ -2496,8 +2516,8 @@ async function startWithSettingsInner(workspace) {
     }
     if (outcome.ok === false) {
       setProgress(workspace, {
-        title: '初始化构建',
-        status: '构建失败。可修复后重试（日志已写入文件）。',
+        title: '初始化失败',
+        status: String(outcome.error?.message || outcome.error || '安装官方产物失败。'),
         actions: [{ label: '重试', name: 'run-init', primary: true }],
       })
       return
@@ -2524,12 +2544,12 @@ async function runInitInner(workspace) {
   const session = workspace.session
   if (canStartBusyTask(session) === false) return
   const usedWorker = await startArtifactUpdateIfPossible(session)
-  if (workspace.session !== session) return
+  if (workspace.session !== session || session.cancelRequested === true) return
   if (usedWorker) {
     setProgress(workspace, { title: '初始化（官方产物）', status: '正在后台下载官方预构建版…' })
     return
   }
-  setProgress(workspace, { title: '初始化构建', status: '执行中…' })
+  setProgress(workspace, { title: '初始化（官方产物）', status: '正在检查 Node.js 并安装官方产物…' })
   const outcome = await session.updater.runPipeline({ includePull: true, toleratePullFailure: true })
   if (workspace.session !== session || session.connection.stopped === true) return
   if (outcome.ok) {
@@ -2539,8 +2559,8 @@ async function runInitInner(workspace) {
     connectSession(session)
   } else {
     setProgress(workspace, {
-      title: '初始化构建',
-      status: '构建失败。可修复后重试（日志已写入文件）。',
+      title: '初始化失败',
+      status: String(outcome.error?.message || outcome.error || '安装官方产物失败。'),
       actions: [{ label: '重试', name: 'run-init', primary: true }],
     })
   }
@@ -2760,7 +2780,7 @@ const actions = {
       // Phase 2/3: local official-artifact updates go through the detached
       // worker: no source checkout, no pnpm build, survives shell quit.
       const usedWorker = await startArtifactUpdateIfPossible(session)
-      if (target.session !== session) return
+      if (target.session !== session || session.cancelRequested === true) return
       if (usedWorker) {
         setProgress(target, { title: '更新并重启（官方产物）', status: '正在后台下载官方预构建版…' })
         return

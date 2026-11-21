@@ -25,7 +25,7 @@
  * shell (or the next launch) knows the intent file must not be resumed.
  *
  * Usage: node src/update-worker.js <task.json>
- * task.json: { dshHome, repoDir, repoUrl, toolPaths, version, registryUrl }
+ * task.json: { dshHome, repoDir, repoUrl, toolPaths, version, registryUrl, nodeFloor }
  *
  * `version` is already resolved by the shell to the newest published release.
  */
@@ -33,10 +33,10 @@
 const fs = require('node:fs')
 const path = require('node:path')
 const { normalizeSettings, DEFAULT_DSH_HOME } = require('./settings')
-const { resolveTools } = require('./tools')
-const { ensurePortableNode } = require('./node-bootstrap')
-const { installNpmArtifact } = require('./artifact')
-const { NPM_PACKAGE } = require('./runtime-layout')
+const { prepareLocalNode } = require('./node-bootstrap')
+const { parseNodeFloor } = require('./node-engine')
+const { installNpmArtifact, resolveArtifactNodeFloor, verifyNpmArtifact } = require('./artifact')
+const { NPM_PACKAGE, runtimeNodeEngine } = require('./runtime-layout')
 
 const runtimeStore = require('./runtime-store')
 
@@ -102,31 +102,6 @@ async function main() {
     if (shouldAbort()) throw cancelError()
     status({ phase: 'starting', version })
     log(`更新任务开始：${NPM_PACKAGE}@${version}`)
-    // A CLEAN machine has no node at all (no system Node, no checkout tooling),
-    // and installing the official artifact needs one. The shell's connect chain
-    // hands off to this worker BEFORE it would ever bootstrap a toolchain, so
-    // failing here used to dead-end the very first connect: the worker wrote
-    // phase 'error', the shell had already stopped watching the log, and the
-    // user saw an endless "正在连接". Bootstrap in-place instead — the download
-    // itself needs no node.
-    let tools = resolveTools(settings)
-    if (tools.node === '') {
-      log('未找到兼容的 node，尝试自动下载便携版 node…')
-      status({ phase: 'toolchain', version })
-      const toolRoot = path.join(settings.local.repoDir, '.dsh-tools')
-      const bootstrapped = await ensurePortableNode({
-        toolRoot,
-        isRunnable: () => resolveTools(settings).node !== '',
-        onLine: line => log(line),
-        env: tools.env,
-      })
-      if (!bootstrapped.ok) throw new Error(bootstrapped.error || '便携版 node 引导失败。')
-      tools = resolveTools(settings)
-      if (tools.node === '') throw new Error('便携版 node 已就位但仍无法运行。')
-      log(`便携版 node 已就位：${tools.node}`)
-    }
-    if (shouldAbort()) throw cancelError()
-    status({ phase: 'downloading', version })
     // The worker is a separate PROCESS from the shell, so in-process busy
     // gates cannot serialize it against a shell-side update of the same
     // dshHome. It must take the SAME local lock the shell pipeline uses:
@@ -139,6 +114,21 @@ async function main() {
       settings,
       lockName,
       async () => {
+        const active = runtimeStore.localActiveRuntimeDir(settings)
+        const floor = parseNodeFloor(task.nodeFloor) || await resolveArtifactNodeFloor({
+          version,
+          registryUrl: task.registryUrl,
+          installedEngine: () => runtimeNodeEngine(active),
+        })
+        if (shouldAbort()) throw cancelError()
+        status({ phase: 'toolchain', version })
+        const tools = await prepareLocalNode(settings, { floor, artifactVersion: version, onLine: log })
+        if (shouldAbort()) throw cancelError()
+        if (active !== null && verifyNpmArtifact(active) === `npm:${version}`) {
+          log(`官方产物 v${version} 已安装，跳过下载。`)
+          return
+        }
+        status({ phase: 'downloading', version })
         const buildDir = runtimeStore.localVersionDir(settings, `npm:${version}`)
         fs.rmSync(buildDir, { recursive: true, force: true })
         fs.mkdirSync(buildDir, { recursive: true })
@@ -149,9 +139,11 @@ async function main() {
             runtimeDir: buildDir,
             spec: `${NPM_PACKAGE}@${version}`,
             env: tools.env,
+            registryUrl: task.registryUrl,
             onLine: line => log(line),
             shouldAbort,
           })
+          if (installed !== `npm:${version}`) throw new Error(`官方产物版本校验失败：预期 v${version}，安装结果为 ${installed}。`)
         } catch (error) {
           // A cancelled install must not leave a half-written version dir that a
           // later rollback could mistake for a real runtime.

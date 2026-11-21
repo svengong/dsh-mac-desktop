@@ -1,31 +1,16 @@
 'use strict'
 
-/**
- * Portable-node bootstrap, shared by the shell and the detached update worker.
- *
- * WHY this is its own module: the very first connect on a clean machine has no
- * node, and the official artifact cannot be installed without one. The shell
- * used to own that download inside `Updater.bootstrapLocalNode`, which the
- * DETACHED WORKER cannot call (it has no ConnectionManager). So on a fresh
- * Windows install the worker started, ran `resolveTools()`, found no node, and
- * exited with `phase: 'error'` — while the shell's connect chain had already
- * handed off to it. Net effect for the user: a connecting screen that never
- * resolves and no hint that node is what is missing.
- *
- * Downloading node needs no node (plain `fetch` + `tar`), so it can run
- * anywhere. Keep it dependency-light: this file must stay requireable from the
- * worker's minimal environment.
- */
-
 const fs = require('node:fs')
 const path = require('node:path')
 const { Readable } = require('node:stream')
 const { pipeline } = require('node:stream/promises')
 const { runCommand } = require('./runner')
-const { extractNodeArchive, nodeDistArchive } = require('./platform')
+const { extractNodeArchive, findExecutableIn, nodeDistArchive } = require('./platform')
 
-/** The node version the shell vendors. Keep in sync with the engine range. */
-const PORTABLE_NODE_VERSION = '22.19.0'
+const { nodeVersionAt, resolveTools } = require('./tools')
+const { fetchJson } = require('./update-manager')
+const { withLocalLock } = require('./runtime-store')
+const { DEFAULT_NODE_FLOOR, PORTABLE_NODE_BUNDLED, nodeVersionMeets, resolvePortableNodeVersion, nodeRequirementError } = require('./node-engine')
 
 /**
  * Download a URL to a file. Returns false (never throws) so callers can fall
@@ -55,49 +40,111 @@ async function downloadFile(url, dest, { onLine = () => {}, timeoutMs = 10 * 60_
   }
 }
 
-/**
- * Ensure a runnable portable node exists under `<toolRoot>/node`.
- *
- * Idempotent: when `isRunnable()` already reports a usable node the download is
- * skipped entirely, so calling this on every connect costs one stat.
- *
- * @param {object} options
- * @param {string} options.toolRoot - directory that receives `node/` (the
- *   `.dsh-tools` folder beside the checkout).
- * @param {() => boolean} options.isRunnable - whether node already resolves.
- * @param {(line: string) => void} options.onLine - progress sink.
- * @param {object} [options.env] - child environment for tar/curl.
- * @param {string} [options.version] - override the vendored version.
- * @returns {Promise<{ok: boolean, nodeDir: string, error?: string}>}
- */
-async function ensurePortableNode({ toolRoot, isRunnable, onLine, env, version = PORTABLE_NODE_VERSION }) {
-  const nodeDir = path.join(toolRoot, 'node')
-  if (typeof isRunnable === 'function' && isRunnable()) return { ok: true, nodeDir }
-  const dist = nodeDistArchive(version)
-  fs.mkdirSync(nodeDir, { recursive: true })
-  const archive = path.join(toolRoot, `node.${dist.kind === 'zip' ? 'zip' : 'tar.gz'}`)
-  onLine(`未找到兼容的 node，正在下载便携版 node v${version} 到 ${nodeDir} …`)
-  let fetched = await downloadFile(dist.url, archive, { onLine, timeoutMs: 10 * 60_000 })
-  if (!fetched) {
-    // A host that blocks node's fetch may still ship curl.
-    const curl = await runCommand({
-      cmd: process.platform === 'win32' ? 'curl.exe' : '/usr/bin/curl',
-      args: ['-fsSL', '-o', archive, dist.url],
-      env,
-      timeoutMs: 10 * 60_000,
-      onLine: line => onLine(`[curl] ${line}`),
-    }).catch(() => null)
-    if (curl === null || curl.code !== 0) {
-      return { ok: false, nodeDir, error: `便携版 node 下载失败（${dist.url}）。请检查网络。` }
-    }
-  }
-  const unpack = await extractNodeArchive({ runCommand, archive, destDir: nodeDir, kind: dist.kind, env, timeoutMs: 5 * 60_000 })
-  fs.rmSync(archive, { force: true })
-  if (unpack.code !== 0) return { ok: false, nodeDir, error: '便携版 node 解压失败。' }
-  if (typeof isRunnable === 'function' && !isRunnable()) {
-    return { ok: false, nodeDir, error: '便携版 node 已就位但仍无法运行。' }
-  }
-  return { ok: true, nodeDir }
+function portableVersion(nodeDir) {
+  return nodeVersionAt(findExecutableIn(path.join(nodeDir, 'bin'), 'node') || findExecutableIn(nodeDir, 'node'))
 }
 
-module.exports = { PORTABLE_NODE_VERSION, downloadFile, ensurePortableNode }
+function removeStaging(dir) {
+  try {
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 2 })
+  } catch {
+    // Windows can keep the previous executable open while dsh web is running.
+    // A later bootstrap can retry cleanup without invalidating the new Node.
+  }
+}
+
+/** Verify a staged archive before replacing the existing portable runtime. */
+async function ensurePortableNode({ toolRoot, floor = DEFAULT_NODE_FLOOR, version, artifactVersion, onLine = () => {}, env }) {
+  const nodeDir = path.join(toolRoot, 'node')
+  const backup = path.join(toolRoot, 'node.old')
+  let currentVersion = ''
+  try {
+    // Tool directories can be shared by workspaces with different data homes.
+    return await withLocalLock({ local: { dshHome: toolRoot } }, 'portable-node', async () => {
+      // Recover a process killed between the two renames.
+      if (!fs.existsSync(nodeDir) && fs.existsSync(backup)) fs.renameSync(backup, nodeDir)
+      currentVersion = portableVersion(nodeDir)
+      if (nodeVersionMeets(currentVersion, floor)) return { ok: true, nodeDir }
+
+      version ??= await resolvePortableNodeVersion({ floor, fetchJson, distFile: nodeDistArchive(PORTABLE_NODE_BUNDLED).indexFile })
+      if (!nodeVersionMeets(version, floor)) throw new Error('下载版本低于运行要求。')
+      const dist = nodeDistArchive(version)
+      const staging = fs.mkdtempSync(path.join(toolRoot, `node.download-${process.pid}-`))
+      try {
+        const archive = path.join(staging, `node.${dist.kind}`)
+        const extracted = path.join(staging, 'node')
+        fs.mkdirSync(extracted)
+        onLine(`正在下载便携版 Node.js v${version}（产物要求 >=${floor}）…`)
+        let fetched = await downloadFile(dist.url, archive, { onLine })
+        if (!fetched) {
+          const curl = await runCommand({
+            cmd: process.platform === 'win32' ? 'curl.exe' : '/usr/bin/curl',
+            args: ['-fsSL', '-o', archive, dist.url],
+            env,
+            timeoutMs: 10 * 60_000,
+            onLine: line => onLine(`[curl] ${line}`),
+          }).catch(() => null)
+          fetched = curl?.code === 0
+        }
+        if (!fetched) throw new Error('下载失败。')
+        const unpack = await extractNodeArchive({ runCommand, archive, destDir: extracted, kind: dist.kind, env })
+        if (unpack.code !== 0) throw new Error(`解压失败：${unpack.lines.slice(-3).join(' ')}`)
+        const installed = portableVersion(extracted)
+        if (installed !== version || !nodeVersionMeets(installed, floor)) throw new Error('下载的 Node.js 未通过版本自检。')
+
+        // A nonempty directory can't be overwritten with rename. Keep the
+        // previous directory until the staged tree is in its final location.
+        fs.rmSync(backup, { recursive: true, force: true, maxRetries: 2 })
+        const hadOld = fs.existsSync(nodeDir)
+        if (hadOld) fs.renameSync(nodeDir, backup)
+        try {
+          fs.renameSync(extracted, nodeDir)
+        } catch (error) {
+          if (hadOld) fs.renameSync(backup, nodeDir)
+          throw error
+        }
+        removeStaging(backup)
+        onLine(currentVersion
+          ? `便携版 Node.js 升级：v${currentVersion} → v${installed}（产物要求 >=${floor}）`
+          : `便携版 Node.js v${installed} 已就绪（产物要求 >=${floor}）`)
+        return { ok: true, nodeDir }
+      } finally {
+        removeStaging(staging)
+      }
+    }, { timeoutMs: 30 * 60_000 })
+  } catch (error) {
+    return {
+      ok: false,
+      nodeDir,
+      error: nodeRequirementError({ floor, artifactVersion, currentVersion, targetVersion: version, detail: error.message }),
+    }
+  }
+}
+
+async function prepareLocalNode(settings, { floor, artifactVersion, onLine }) {
+  let tools = resolveTools(settings, { floor, refresh: true })
+  const toolRoot = path.join(settings.local.repoDir, '.dsh-tools')
+  const portable = path.join(toolRoot, 'node')
+  if (tools.node !== '' && (
+    tools.node === settings.toolPaths?.node ||
+    tools.node.startsWith(portable + path.sep) ||
+    (!fs.existsSync(portable) && !fs.existsSync(path.join(toolRoot, 'node.old')))
+  )) return tools
+  const outcome = await ensurePortableNode({
+    toolRoot,
+    floor,
+    artifactVersion,
+    onLine,
+    env: tools.env,
+  })
+  if (!outcome.ok) {
+    if (tools.node === '') throw new Error(outcome.error)
+    onLine(`${outcome.error} 本次使用已验证的 Node.js：${tools.node}`)
+    return tools
+  }
+  tools = resolveTools(settings, { floor, refresh: true })
+  if (tools.node === '') throw new Error(nodeRequirementError({ floor, artifactVersion }))
+  return tools
+}
+
+module.exports = { ensurePortableNode, prepareLocalNode }

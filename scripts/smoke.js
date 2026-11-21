@@ -19,7 +19,7 @@ const {
   compareVersions, isNewerVersion, versionOf, versionToken,
 } = require('../src/components')
 const {
-  resolveChannelVersion, notargetPackage, npmInstallDirs, describeInstallFailure,
+  resolveChannelVersion, notargetPackage, npmInstallDirs, describeInstallFailure, resolveArtifactNodeFloor,
 } = require('../src/artifact')
 const { UpdateManager } = require('../src/update-manager')
 const { parseTarget, shellQuote, remotePath, tunnelArgs, parseSshConfig, listSshHosts } = require('../src/ssh')
@@ -30,7 +30,12 @@ const { findFreePort, releasePort, reservePort } = require('../src/ports')
 const runtimeStore = require('../src/runtime-store')
 const { WindowManager } = require('../src/window-manager')
 const { mergeUpdates } = require('../src/device-merge')
-const { resolveTools, engineOk } = require('../src/tools')
+const { resolveTools, engineOk, childEnv } = require('../src/tools')
+const {
+  DEFAULT_NODE_FLOOR, PORTABLE_NODE_BUNDLED, parseNodeFloor, nodeVersionMeets, resolvePortableNodeVersion,
+} = require('../src/node-engine')
+const { ensurePortableNode } = require('../src/node-bootstrap')
+const { prepareRemoteNode } = require('../src/remote-node')
 const { presentWindow, focusViewInKeyWindow } = require('../src/windows')
 const { isExternalUrl, isBlockedSubFrameUrl } = require('../src/external-open')
 const { BOOT_FAILURE_PROBE, shouldReloadAfterBootFailure } = require('../src/boot-watch')
@@ -64,6 +69,104 @@ function echoCommand(text) {
 /** `sleep <seconds>` equivalent that works everywhere. */
 function sleepCommand(seconds) {
   return nodeChild(`setTimeout(() => {}, ${Number(seconds) * 1000})`)
+}
+
+async function smokePortableNode() {
+  const newer = parseNodeFloor(process.version)
+  assert.ok(nodeVersionMeets(newer, DEFAULT_NODE_FLOOR), 'run smoke with a supported Node')
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-portable-'))
+  const root = path.join(fixture, 'tools')
+  const nodeDir = path.join(root, 'node')
+  const bin = IS_WINDOWS ? 'node.exe' : 'bin/node'
+  const originalFetch = global.fetch
+  const originalRename = fs.renameSync
+  try {
+    fs.mkdirSync(path.dirname(path.join(nodeDir, bin)), { recursive: true })
+    fs.writeFileSync(path.join(nodeDir, bin), IS_WINDOWS ? 'invalid exe' : '#!/bin/sh\necho v22.19.0\n', { mode: 0o755 })
+    fs.writeFileSync(path.join(nodeDir, 'previous'), 'preserve me')
+    const packaged = path.join(fixture, 'node-fixture', bin)
+    fs.mkdirSync(path.dirname(packaged), { recursive: true })
+    fs.copyFileSync(process.execPath, packaged)
+    const archive = path.join(fixture, IS_WINDOWS ? 'test.zip' : 'test.tar.gz')
+    const zipArgs = IS_WINDOWS ? ['-a', '-cf'] : ['-czf']
+    const tar = await runCommand({ cmd: 'tar', args: [...zipArgs, archive, '-C', fixture, 'node-fixture'] })
+    assert.strictEqual(tar.code, 0, tar.lines.join('\n'))
+    const archivedNode = fs.readFileSync(archive)
+    let downloads = 0
+    global.fetch = async () => {
+      downloads++
+      return new Response('invalid archive')
+    }
+    const request = { toolRoot: root, floor: DEFAULT_NODE_FLOOR, version: newer, artifactVersion: '0.2.2-rc.5' }
+    const failed = await ensurePortableNode(request)
+    assert.strictEqual(failed.ok, false)
+    assert.match(failed.error, /0\.2\.2-rc\.5.*>=24\.9\.0.*解压失败/)
+    assert.strictEqual(fs.readFileSync(path.join(nodeDir, 'previous'), 'utf8'), 'preserve me')
+
+    global.fetch = async () => {
+      downloads++
+      return new Response(archivedNode)
+    }
+    fs.renameSync = (from, to) => {
+      if (to === nodeDir && from.includes('node.download-')) throw new Error('simulated rename failure')
+      return originalRename(from, to)
+    }
+    const rolledBack = await ensurePortableNode(request)
+    assert.strictEqual(rolledBack.ok, false)
+    assert.match(rolledBack.error, /simulated rename failure/)
+    assert.ok(fs.existsSync(path.join(nodeDir, 'previous')))
+    fs.renameSync = originalRename
+
+    // Recovery also works after interruption between backup and activation.
+    fs.renameSync(nodeDir, path.join(root, 'node.old'))
+    const upgraded = await ensurePortableNode(request)
+    assert.strictEqual(upgraded.ok, true, upgraded.error)
+    assert.ok(fs.existsSync(path.join(nodeDir, bin)))
+    assert.deepStrictEqual(fs.readdirSync(root).sort(), ['locks', 'node'])
+    assert.strictEqual((await ensurePortableNode(request)).ok, true)
+    assert.strictEqual(downloads, 3, 'already-compatible portable Node should avoid the download')
+  } finally {
+    fs.renameSync = originalRename
+    global.fetch = originalFetch
+    fs.rmSync(fixture, { recursive: true, force: true })
+  }
+}
+
+async function smokeRemoteNode() {
+  if (IS_WINDOWS) return
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-remote-node-'))
+  try {
+    const bin = path.join(home, '.dsh-tools', 'node', 'bin')
+    const shims = path.join(home, 'shims')
+    fs.mkdirSync(bin, { recursive: true })
+    fs.mkdirSync(shims)
+    fs.writeFileSync(path.join(bin, 'node'), '#!/bin/sh\necho v22.19.0\n', { mode: 0o755 })
+    fs.writeFileSync(path.join(shims, 'curl'), '#!/bin/sh\ntouch "$4"\n', { mode: 0o755 })
+    fs.writeFileSync(path.join(shims, 'tar'), `#!/bin/sh
+mkdir -p "$5/bin"
+printf '#!/bin/sh\\necho v${PORTABLE_NODE_BUNDLED}\\n' > "$5/bin/node"
+chmod +x "$5/bin/node"
+`, { mode: 0o755 })
+    fs.writeFileSync(path.join(shims, 'mv'), `#!/bin/sh
+case "$1" in
+  */node.download-*/node) if [ -f "$HOME/fail-rename" ]; then exit 1; fi ;;
+esac
+exec /bin/mv "$@"
+`, { mode: 0o755 })
+    const env = { ...process.env, HOME: home, PATH: `${shims}:/usr/bin:/bin` }
+    const settings = { mode: 'ssh', ssh: { host: 'fixture' } }
+    const remoteRun = (_host, command, options) => runCommand({ cmd: '/bin/sh', args: ['-c', command], env, ...options })
+    const request = { floor: DEFAULT_NODE_FLOOR, artifactVersion: 'test', fetchIndex: async () => [] }
+    fs.writeFileSync(path.join(home, 'fail-rename'), '')
+    await assert.rejects(prepareRemoteNode(settings, remoteRun, request), /v22\.19\.0.*替换失败/)
+    assert.match(fs.readFileSync(path.join(bin, 'node'), 'utf8'), /22\.19\.0/)
+    fs.unlinkSync(path.join(home, 'fail-rename'))
+    assert.strictEqual(await prepareRemoteNode(settings, remoteRun, request), PORTABLE_NODE_BUNDLED)
+    assert.match(fs.readFileSync(path.join(bin, 'node'), 'utf8'), new RegExp(PORTABLE_NODE_BUNDLED))
+    assert.deepStrictEqual(fs.readdirSync(path.join(home, '.dsh-tools')), ['node'])
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true })
+  }
 }
 
 async function main() {
@@ -873,8 +976,42 @@ async function main() {
   assert.deepStrictEqual(gated.webArgs(3080, '0.1.1-rc.2'), ['web', '--port', '3080', '--no-open'])
 
   // tools: engine filter + a pnpm that actually runs under the clean env
+  assert.strictEqual(parseNodeFloor('>=24.9.0'), '24.9.0')
+  assert.strictEqual(parseNodeFloor('^22.19.0'), '22.19.0')
+  assert.strictEqual(parseNodeFloor('24.9.0'), '24.9.0')
+  assert.strictEqual(parseNodeFloor('>=24.9.0 <25'), '')
+  assert.strictEqual(nodeVersionMeets('v24.9.0-rc.1', '24.9.0'), false)
+  assert.strictEqual(nodeVersionMeets('v24.9.0', '24.9.0'), true)
+  assert.strictEqual(nodeVersionMeets('v26.1.0', '24.9.0'), true)
+  const releases = async () => [
+    { version: 'v26.5.1', lts: 'Test', files: ['linux-x64'] },
+    { version: 'v26.12.1', lts: 'Test', files: ['linux-x64'] },
+    { version: 'v26.13.0', lts: false, files: ['linux-x64'] },
+    { version: 'v26.14.0', lts: 'Test', files: ['linux-arm64'] },
+    { version: 'v28.0.0', lts: false, files: ['linux-x64'] },
+  ]
+  assert.strictEqual(await resolvePortableNodeVersion({ floor: '26.1.0', fetchJson: releases, distFile: 'linux-x64' }), '26.12.1')
+  assert.strictEqual(await resolvePortableNodeVersion({ floor: '28.0.0', fetchJson: releases }), '28.0.0')
+  const offline = async () => { throw new Error('offline') }
+  assert.strictEqual(await resolvePortableNodeVersion({ floor: '24.9.0', fetchJson: offline }), PORTABLE_NODE_BUNDLED)
+  await assert.rejects(resolvePortableNodeVersion({ floor: '28.0.0', fetchJson: offline }), /兜底.*低于要求/)
+  const requirement = { version: '0.2.2-rc.5', registryUrl: 'https://registry.invalid' }
+  assert.strictEqual(await resolveArtifactNodeFloor({
+    ...requirement,
+    fetchManifest: async url => {
+      assert.strictEqual(url, 'https://registry.invalid/@deepseek-ai/dsh/0.2.2-rc.5')
+      return { engines: { node: '>=26.1.0' } }
+    },
+    installedEngine: async () => '>=24.9.0',
+  }), '26.1.0')
+  assert.strictEqual(await resolveArtifactNodeFloor({
+    ...requirement, fetchManifest: offline, installedEngine: async () => '^22.19.0',
+  }), '22.19.0')
+  assert.strictEqual(await resolveArtifactNodeFloor({ ...requirement, fetchManifest: offline }), DEFAULT_NODE_FLOOR)
+  await smokePortableNode()
+  await smokeRemoteNode()
   assert.strictEqual(engineOk('v23.11.0'), false)
-  assert.strictEqual(engineOk('v22.19.0'), true)
+  assert.strictEqual(engineOk('v22.19.0'), false)
   assert.strictEqual(engineOk('v24.16.0'), true)
   const tools = resolveTools({ local: { repoDir: '', repoUrl: '' }, toolPaths: { node: '', git: '', pnpm: '', shell: require('../src/tools').defaultLoginShell() } })
   assert.ok(tools.node !== '', 'node not resolved')
@@ -2109,17 +2246,17 @@ async function main() {
   {
     // The POSIX shape is asserted with an explicit target so the assertion
     // means the same thing on a Windows host.
-    const mac = nodeDistArchive('22.19.0', 'arm64', { windows: false, platform: 'darwin' })
+    const mac = nodeDistArchive(PORTABLE_NODE_BUNDLED, 'arm64', { windows: false, platform: 'darwin' })
     assert.ok(mac.url.endsWith('.tar.gz'), 'POSIX node distributions are tarballs')
-    assert.ok(mac.url.includes('node-v22.19.0-'), 'the url carries the version')
-    assert.ok(/22\.19\.0-darwin-arm64\.tar\.gz$/.test(mac.url), 'arch and platform are carried through')
+    assert.ok(mac.url.includes(`node-v${PORTABLE_NODE_BUNDLED}-`), 'the url carries the version')
+    assert.ok(mac.url.endsWith(`v${PORTABLE_NODE_BUNDLED}-darwin-arm64.tar.gz`), 'arch and platform are carried through')
     assert.strictEqual(mac.kind, 'tar.gz')
     // The archive kind follows the TARGET OS, so both shapes are assertable
     // from either host (a Windows installer may be built on a macOS runner).
-    const win = nodeDistArchive('22.19.0', 'x64', { windows: true })
+    const win = nodeDistArchive(PORTABLE_NODE_BUNDLED, 'x64', { windows: true })
     assert.strictEqual(win.kind, 'zip', 'Windows node distributions are zips')
     assert.ok(win.url.includes('-win-x64.zip'), `Windows url must use the win-x64 shape, got ${win.url}`)
-    const ia32 = nodeDistArchive('22.19.0', 'ia32')
+    const ia32 = nodeDistArchive(PORTABLE_NODE_BUNDLED, 'ia32')
     assert.ok(ia32.url.includes('-x86.'), 'ia32 maps to the x86 archive')
   }
 
@@ -2230,7 +2367,20 @@ async function main() {
       local: { repoDir: path.join(__dirname, '..', 'deepseek-harness') },
       toolPaths: { node: '', git: '', pnpm: '', shell: require('../src/tools').defaultLoginShell() },
     }
-    const env = require('../src/tools').childEnv(settings, '')
+    const env = childEnv(settings, '')
+    const node = path.join(settings.local.repoDir, '.dsh-tools', 'node', IS_WINDOWS ? 'node.exe' : 'bin/node')
+    const selectedEnv = childEnv(settings, node)
+    const selectedPath = selectedEnv[IS_WINDOWS ? 'Path' : 'PATH'].split(path.delimiter)
+    assert.strictEqual(selectedPath[0], path.dirname(node), 'pnpm shebangs must start with the selected Node')
+    assert.strictEqual(childEnv(settings, process.execPath)[IS_WINDOWS ? 'Path' : 'PATH'].split(path.delimiter)[0],
+      path.dirname(process.execPath), 'an unselected portable Node must not shadow a compatible system Node')
+    const connection = new ConnectionManager({ getSettings: () => ({ ...settings, toolPaths: { node: process.execPath } }) })
+    assert.strictEqual(connection.resolvedTools().node, process.execPath)
+    connection.setNodeFloor('>=999.0.0')
+    assert.strictEqual(connection.resolvedTools({ refresh: true }).node, '', 'a changed floor must reject previously selected tools')
+    connection.setNodeFloor(DEFAULT_NODE_FLOOR)
+    assert.strictEqual(connection.resolvedTools().node, process.execPath)
+
     const pathKey = IS_WINDOWS ? 'Path' : 'PATH'
     assert.ok(typeof env[pathKey] === 'string' && env[pathKey] !== '', 'the child PATH must be set')
     const parts = env[pathKey].split(path.delimiter)
@@ -2523,40 +2673,34 @@ async function main() {
     )
   }
 
-  // The detached worker must be able to bootstrap node itself.
-  //
-  // On a clean machine the shell hands the FIRST connect to the worker before
-  // any toolchain exists; a worker that just errors out dead-ends the very
-  // first run. Bootstrap is shared so the shell and worker cannot drift.
+  // Retrying the active version must leave its directory and contents intact.
   {
-    const { ensurePortableNode, PORTABLE_NODE_VERSION } = require('../src/node-bootstrap')
-    assert.strictEqual(typeof ensurePortableNode, 'function', 'node bootstrap must be shared, not shell-only')
-    assert.ok(/^\d+\.\d+\.\d+$/u.test(PORTABLE_NODE_VERSION), 'the vendored node version must be pinned')
-    // Already-runnable hosts must not download anything.
-    const skipped = await ensurePortableNode({
-      toolRoot: path.join(os.tmpdir(), 'dsh-should-not-exist'),
-      isRunnable: () => true,
-      onLine: () => {},
-    })
-    assert.strictEqual(skipped.ok, true, 'an already-working node must short-circuit')
-    assert.ok(!fs.existsSync(path.join(os.tmpdir(), 'dsh-should-not-exist')), 'a working node must not create dirs')
-    // The worker must reference it, not re-implement or skip it.
-    // The worker must CALL it (an import alone would still dead-end), and must
-    // not fall back to the old "no node -> throw" behaviour.
-    const worker = fs.readFileSync(path.join(__dirname, '..', 'src', 'update-worker.js'), 'utf8')
-    assert.ok(
-      /await\s+ensurePortableNode\(/u.test(worker),
-      'the update worker must CALL ensurePortableNode rather than fail on a clean machine',
-    )
-    assert.ok(
-      !/if \(tools\.node === ''\)\s*\{\s*throw new Error\('未找到兼容的 node/u.test(worker),
-      'the worker must not hard-fail when no node is found',
-    )
-    const shell = fs.readFileSync(path.join(__dirname, '..', 'src', 'update.js'), 'utf8')
-    assert.ok(
-      /await\s+ensurePortableNode\(/u.test(shell),
-      'the shell must use the same bootstrap',
-    )
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-worker-retry-'))
+    try {
+      const version = '0.2.2-rc.5'
+      const settings = { mode: 'local', local: { dshHome: root, repoDir: root } }
+      const runtime = runtimeStore.localVersionDir(settings, `npm:${version}`)
+      const pkgDir = path.join(runtime, 'node_modules', '@deepseek-ai', 'dsh')
+      fs.mkdirSync(path.join(pkgDir, 'lib'), { recursive: true })
+      fs.writeFileSync(path.join(pkgDir, 'lib', 'bin.js'), '// original active runtime')
+      fs.writeFileSync(path.join(pkgDir, 'package.json'), JSON.stringify({ version }))
+      runtimeStore.activateLocalRuntime(settings, `npm:${version}`)
+      const task = path.join(root, 'task.json')
+      fs.writeFileSync(task, JSON.stringify({
+        dshHome: root, repoDir: root, version, nodeFloor: DEFAULT_NODE_FLOOR,
+        registryUrl: 'https://invalid.example', toolPaths: { node: process.execPath },
+      }))
+      const worker = await runCommand({
+        cmd: process.execPath,
+        args: [path.resolve(__dirname, '..', 'src', 'update-worker.js'), task],
+        timeoutMs: 30_000,
+      })
+      assert.strictEqual(worker.code, 0, JSON.stringify(runtimeStore.readUpdateStatus(settings)))
+      assert.strictEqual(runtimeStore.readUpdateStatus(settings).phase, 'done')
+      assert.strictEqual(fs.readFileSync(path.join(pkgDir, 'lib', 'bin.js'), 'utf8'), '// original active runtime')
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true })
+    }
   }
 
 
@@ -2664,7 +2808,7 @@ async function main() {
     assert.strictEqual(win.spawnInvocation('C:\\nodejs\\node.exe', ['x']).cmd, 'C:\\nodejs\\node.exe')
 
     // Windows node distributions are zips named -win-<cpu>.zip.
-    const winDist = win.nodeDistArchive('22.19.0', 'arm64')
+    const winDist = win.nodeDistArchive(PORTABLE_NODE_BUNDLED, 'arm64')
     assert.strictEqual(winDist.kind, 'zip')
     assert.ok(winDist.url.includes('win-arm64.zip'), winDist.url)
     // OpenSSH ships inside System32 on Windows and must be on the clean PATH,

@@ -31,9 +31,12 @@ const {
   parseRemoteLoginShell,
   parseRemoteProbe,
 } = require('./remote-protocol')
-const { resolveTools, forgetResolvedTools } = require('./tools')
+const { resolveTools } = require('./tools')
+const { DEFAULT_NODE_FLOOR, parseNodeFloor } = require('./node-engine')
+const { prepareLocalNode } = require('./node-bootstrap')
+const { prepareRemoteNode, readRemoteNodeEngine } = require('./remote-node')
 const { findFreePort, releasePort, reservePort, tcpProbe } = require('./ports')
-const { runtimeLayout } = require('./runtime-layout')
+const { runtimeLayout, runtimeNodeEngine } = require('./runtime-layout')
 const runtimeStore = require('./runtime-store')
 const { compareVersions } = require('./components')
 const {
@@ -338,6 +341,7 @@ class ConnectionManager extends EventEmitter {
     this.stopped = false
     this.logRing = []
     this.tools = null
+    this.nodeFloor = DEFAULT_NODE_FLOOR
     this.cachedRemoteShell = ''
     this.localPort = null
     this.remotePort = null
@@ -476,12 +480,17 @@ class ConnectionManager extends EventEmitter {
     return this.logRing.join('\n')
   }
 
+  setNodeFloor(spec) {
+    const floor = parseNodeFloor(spec) || DEFAULT_NODE_FLOOR
+    if (floor !== this.nodeFloor) {
+      this.nodeFloor = floor
+      this.tools = null
+    }
+    return floor
+  }
+
   resolvedTools({ refresh = false } = {}) {
-    // A refresh must ALSO drop the module-level memo, otherwise a tool the user
-    // just installed stays invisible: `resolveTools` would return the cached
-    // "not found" result for the same settings/PATH key.
-    if (refresh) forgetResolvedTools()
-    if (this.tools === null || refresh) this.tools = resolveTools(this.getSettings())
+    if (this.tools === null || refresh) this.tools = resolveTools(this.getSettings(), { floor: this.nodeFloor, refresh })
     return this.tools
   }
 
@@ -973,10 +982,6 @@ class ConnectionManager extends EventEmitter {
   // ── local mode ────────────────────────────────────────────────────────────
 
   async connectLocal(settings) {
-    const tools = this.resolvedTools()
-    if (tools.node === '') {
-      throw new Error('未找到兼容的 node（需 22.19+ 或 24+）。请安装 Node.js，或在「设置 → 高级」中手动指定 node 路径。')
-    }
     // No source checkout is required anymore: the runtime is installed from
     // the official npm artifact, so connecting never clones or validates a git
     // repo — it just resolves the active runtime and serves it.
@@ -1202,7 +1207,6 @@ class ConnectionManager extends EventEmitter {
   }
 
   async spawnLocalService(settings, port = 0, version = null) {
-    const tools = this.resolvedTools()
     const serveVersion = version ?? this.localVersion ?? 'unknown'
     // `--port 0` lets the OS choose the port; the CLI prints the real URL on
     // stdout as `dsh web: http://127.0.0.1:<port>`. Keep localPort null until
@@ -1222,6 +1226,10 @@ class ConnectionManager extends EventEmitter {
         `运行时尚未构建（${runtimeDir} 缺少 apps/cli/lib/bin.js 或官方产物）。请在顶部菜单「更新 → 更新并重启」完成首次构建/安装。`,
       )
     }
+    const floor = this.setNodeFloor(runtimeNodeEngine(runtimeDir))
+    const artifactVersion = serveVersion.startsWith('npm') ? serveVersion.slice(3) : ''
+    const tools = await prepareLocalNode(settings, { floor, artifactVersion, onLine: line => this.log(line) })
+    this.tools = tools
     const binPath = layout.bin
     this.log(`启动 dsh web（${port === 0 ? '由系统分配端口' : `端口 ${port}`}，数据目录 ${settings.local.dshHome}，运行时 ${runtimeDir}）…`)
     this.prepareLocalHome(settings)
@@ -2091,6 +2099,10 @@ class ConnectionManager extends EventEmitter {
    */
   async launchRemoteService(settings, remotePort = 0, version = 'unknown') {
     const dir = await this.remoteServiceDir(settings)
+    const remoteRun = (host, inner, options) => this.remoteRun(host, inner, options)
+    const floor = parseNodeFloor(await readRemoteNodeEngine(settings, remoteRun, dir)) || DEFAULT_NODE_FLOOR
+    const artifactVersion = version.startsWith('npm') ? version.slice(3) : ''
+    await prepareRemoteNode(settings, remoteRun, { floor, artifactVersion, onLine: line => this.log(line) })
     const logFile = runtimeStore.REMOTE_LOG_FILE
     const pidFile = runtimeStore.REMOTE_PID_FILE
     const portFile = runtimeStore.REMOTE_PORT_FILE

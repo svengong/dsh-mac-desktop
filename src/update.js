@@ -14,34 +14,18 @@ const fs = require('node:fs')
 const path = require('node:path')
 const { runCommand } = require('./runner')
 const { remotePath, shellQuote, remoteToolchainPrefix } = require('./ssh')
-const { engineOk } = require('./tools')
+const { resolveTools } = require('./tools')
 const { isNewerVersion } = require('./components')
-const { DEFAULT_REGISTRY, queryNpmArtifact, installNpmArtifact } = require('./artifact')
-const { NPM_PACKAGE, npmArtifactVersion } = require('./runtime-layout')
+const { DEFAULT_REGISTRY, queryNpmArtifact, resolveArtifactNodeFloor, installNpmArtifact } = require('./artifact')
+const { NPM_PACKAGE, npmArtifactVersion, runtimeNodeEngine } = require('./runtime-layout')
 const { OFFICIAL_REPO_URL } = require('./settings')
 const runtimeStore = require('./runtime-store')
 const { npmFor } = require('./platform')
-const { downloadFile, ensurePortableNode } = require('./node-bootstrap')
+const { prepareLocalNode } = require('./node-bootstrap')
+const { prepareRemoteNode, readRemoteNodeEngine } = require('./remote-node')
 
 const LONG_TIMEOUT_MS = 45 * 60 * 1000
 const REMOTE_PREFIX = remoteToolchainPrefix()
-
-/**
- * Return the first non-empty line of a remote command's output that satisfies
- * `predicate`, or '' when none matches. `remoteRun` already isolates the
- * command payload from any login-shell banner, so this only has to pick the
- * one reporting line (e.g. the node version) out of a command's own output.
- */
-function firstLineMatching(lines, predicate) {
-  for (const line of lines) {
-    const trimmed = line.trim()
-    if (trimmed !== '' && predicate(trimmed)) return trimmed
-  }
-  return ''
-}
-
-// `downloadFile` now lives in ./node-bootstrap, because the detached update
-// worker needs it too and it must not depend on anything the shell has.
 
 class Updater {
   constructor({ getSettings, connection, onLine, onBusyChange }) {
@@ -378,20 +362,26 @@ class Updater {
       throw new Error(query.reason)
     }
     this.setPhase('preparing')
-    await this.ensureToolchain(settings)
-    if (this.cancelled) this.throwCancelled()
     const version = query.version
-    if (settings.mode === 'ssh') {
-      return this.remoteArtifactPipeline(settings, version)
-    }
-    const tools = this.connection.resolvedTools({ refresh: true })
-    if (tools.node === '') {
-      throw new Error('未找到兼容的 node（需 22.19+ 或 24+）。请安装 Node.js，或在「设置 → 高级」中手动指定 node 路径。')
-    }
+    const remoteRun = (host, inner, options) => this.connection.remoteRun(host, inner, options)
+    const floor = await resolveArtifactNodeFloor({
+      version,
+      nodeEngine: query.nodeEngine,
+      registryUrl: this.registryUrl(settings),
+      installedEngine: async () => {
+        if (settings.mode === 'local') return runtimeNodeEngine(runtimeStore.localActiveRuntimeDir(settings))
+        const dir = await runtimeStore.remoteActiveRuntimeDir(settings, remoteRun)
+        return dir === null ? '' : readRemoteNodeEngine(settings, remoteRun, dir)
+      },
+    })
+    if (this.cancelled) this.throwCancelled()
+    const tools = await this.ensureToolchain(settings, { floor, artifactVersion: version, onLine: this.onLine })
+    if (this.cancelled) this.throwCancelled()
+    if (settings.mode === 'ssh') return this.remoteArtifactPipeline(settings, version)
     runtimeStore.writePendingUpdate(settings, { intent: 'artifact', version })
     this.pendingWritten = true
     const active = runtimeStore.localActiveRuntimeDir(settings)
-    const currentNpm = this.npmCurrentVersion(settings)
+    const currentNpm = await this.npmCurrentVersion(settings)
     if (currentNpm === `npm:${version}` && active !== null) {
       this.onLine(`官方产物 v${version} 已安装，跳过下载。`)
       return { choseArtifact: true, fresh: false, version }
@@ -416,6 +406,7 @@ class Updater {
         owner: this.owner(),
         shouldAbort: () => this.cancelled,
       })
+      if (installed !== `npm:${version}`) throw new Error(`官方产物版本校验失败：预期 v${version}，安装结果为 ${installed}。`)
     } catch (error) {
       // A cancelled local install reaps its half-written version dir right
       // away (the child is dead by then, or the abort raced the cleanup and
@@ -484,7 +475,7 @@ class Updater {
     const registry = String(this.registryUrl(settings) || DEFAULT_REGISTRY).replace(/\/$/, '')
     const install = await remoteRun(
       settings.ssh.host,
-      `rm -rf ${versionDir} && mkdir -p ${versionDir} && ${remoteToolchainPrefix()} cd ${versionDir} && npm install --prefix ${versionDir} --no-audit --no-fund --registry ${registry} ${NPM_PACKAGE}@${version}`,
+      `rm -rf ${versionDir} && mkdir -p ${versionDir} && ${remoteToolchainPrefix()} cd ${versionDir} && npm install --prefix ${versionDir} --no-audit --no-fund --engine-strict --force=false --registry ${shellQuote(registry)} ${shellQuote(`${NPM_PACKAGE}@${version}`)}`,
       { timeoutMs: 20 * 60_000, onLine: line => this.onLine(line), shouldAbort: () => this.cancelled },
     )
     if (install.aborted === true) {
@@ -494,6 +485,7 @@ class Updater {
       this.throwCancelled()
     }
     if (install.code !== 0) {
+      await remoteRun(settings.ssh.host, `rm -rf ${versionDir} 2>/dev/null || true`, { timeoutMs: 15_000 })
       const tail = install.lines.slice(-8).join('\n')
       // An ETARGET here is the same stale-metadata failure the local path
       // retries: name it plainly instead of letting npm's raw wording stand.
@@ -550,70 +542,20 @@ class Updater {
     return { choseArtifact: true, fresh: true, version }
   }
 
-  /**
-   * Make the toolchain self-contained for the configured mode — the system
-   * environment is never a dependency.
-   *
-   * Local: when no engine-compatible node resolves, download the portable
-   * node tarball into `<repo>/.dsh-tools/node`; when no pnpm runs, install
-   * the repo-pinned pnpm into `<repo>/.dsh-tools` via npm.
-   *
-   * Remote: same, but everything happens in `~/.dsh-tools` on the remote
-   * through ssh; a remote system toolchain (however old) is never required.
-   */
-  async ensureToolchain(settings) {
+  async ensureToolchain(settings, requirement) {
     if (settings.mode === 'ssh') {
-      await this.ensureRemoteToolchain(settings)
+      await this.ensureRemoteToolchain(settings, requirement)
       return
     }
-    let tools = this.connection.resolvedTools()
-    if (tools.node === '') await this.bootstrapLocalNode(settings)
-    tools = this.connection.resolvedTools({ refresh: true })
-    // A corepack-only "pnpm" is not enough for the official `dsh plugin`
-    // path, which execs a real `pnpm` from PATH. Install a standalone pnpm
-    // into `.dsh-tools` so child processes (and harness upgrades) always see
-    // a real pnpm executable.
-    if (tools.pnpm !== '' && tools.pnpmPrefix.length === 0) return
-    await this.installLocalPnpm(settings, tools.node)
+    const tools = await prepareLocalNode(settings, requirement)
+    // Plugins launch a real pnpm from PATH, so a corepack-only probe isn't enough.
+    if (tools.pnpm !== '' && tools.pnpmPrefix.length === 0) return tools
+    return this.installLocalPnpm(settings, tools, requirement.floor)
   }
 
-  /**
-   * Download a portable node into `<repo>/.dsh-tools/node` when no
-   * engine-compatible node resolves.
-   *
-   * The archive is per-platform: a `.tar.gz` on macOS/Linux (its `bin/node`
-   * must be stripped of the archive's leading directory) and a `.zip` on
-   * Windows (`node.exe` sits at the archive root). Both unpack so the
-   * executable lands where that platform expects it; `tools.js` probes BOTH
-   * layouts (`node/bin/node` and `node/node.exe`), so either can serve.
-   *
-   * Windows has no bundled curl before Windows 10 1803, but node itself is
-   * already running here (the shell is Electron), so the download uses node's
-   * own fetch instead of shelling out to a tool that may not exist.
-   */
-  /**
-   * Install the portable node into `.dsh-tools`.
-   *
-   * The download/extract itself lives in `node-bootstrap` so the detached
-   * update WORKER can use the identical code — it must, because on a clean
-   * machine the worker is the one that needs node first. See that module for
-   * the deadlock this avoids.
-   */
-  async bootstrapLocalNode(settings) {
-    const tools = this.connection.resolvedTools()
-    const toolRoot = path.join(settings.local.repoDir, '.dsh-tools')
-    const outcome = await ensurePortableNode({
-      toolRoot,
-      isRunnable: () => this.connection.resolvedTools({ refresh: true }).node !== '',
-      onLine: line => this.onLine(line),
-      env: tools.env,
-    })
-    if (!outcome.ok) throw new Error(outcome.error || '便携版 node 引导失败。')
-  }
-
-  async installLocalPnpm(settings, nodePath) {
+  async installLocalPnpm(settings, tools, floor) {
     // npm ships beside node: `npm` on POSIX, `npm.cmd` on Windows.
-    const npmPath = npmFor(nodePath)
+    const npmPath = npmFor(tools.node)
     if (npmPath === '') throw new Error('node 目录中没有 npm，无法安装 pnpm。')
     const version = await this.pnpmVersionFromPackageManager(settings) || '11.7.0'
     const installDir = path.join(settings.local.repoDir, '.dsh-tools')
@@ -621,40 +563,21 @@ class Updater {
     const result = await runCommand({
       cmd: npmPath,
       args: ['install', '--prefix', installDir, `pnpm@${version}`],
-      env: this.connection.resolvedTools().env,
+      env: tools.env,
       timeoutMs: 10 * 60_000,
       onLine: line => this.onLine(`[npm] ${line}`),
       owner: this.owner(),
     })
     if (result.code !== 0) throw new Error(`pnpm 本地安装失败：${result.lines.join('\n')}`)
-    const resolved = this.connection.resolvedTools({ refresh: true })
+    const resolved = resolveTools(settings, { floor, refresh: true })
     if (resolved.pnpm === '') throw new Error('pnpm 已安装到 .dsh-tools 但仍无法运行，请打开服务日志查看详情。')
+    return resolved
   }
 
-  async ensureRemoteToolchain(settings) {
+  async ensureRemoteToolchain(settings, requirement) {
     const target = settings.ssh.host
-    const nodeProbe = await this.connection.remoteRun(target, `${REMOTE_PREFIX} node --version`, { timeoutMs: 60_000 })
-    const nodeLine = firstLineMatching(nodeProbe.lines, engineOk)
-    if (nodeProbe.code !== 0 || nodeLine === '') {
-      const archOut = await this.connection.remoteRun(target, 'uname -m', { timeoutMs: 30_000 })
-      const rawArch = firstLineMatching(archOut.lines, line => /^(aarch64|arm64|x86_64|x64|amd64)$/.test(line))
-      const arch = rawArch === 'aarch64' || rawArch === 'arm64' ? 'arm64' : 'x64'
-      const version = '22.19.0'
-      const url = `https://nodejs.org/dist/v${version}/node-v${version}-linux-${arch}.tar.gz`
-      this.onLine(`远程缺少兼容的 node，正在把便携版 node v${version} 下载到远端 ~/.dsh-tools/node …`)
-      const bootstrap = await this.connection.remoteRun(target, [
-        'set -e;',
-        'mkdir -p "$HOME"/.dsh-tools/node "$HOME"/.dsh-tools/tmp;',
-        `curl -fsSL ${shellQuote(url)} -o "$HOME"/.dsh-tools/tmp/node.tar.gz;`,
-        'tar -xzf "$HOME"/.dsh-tools/tmp/node.tar.gz --strip-components=1 -C "$HOME"/.dsh-tools/node;',
-        'rm -f "$HOME"/.dsh-tools/tmp/node.tar.gz;',
-        '"$HOME"/.dsh-tools/node/bin/node --version;',
-      ].join(' '), {
-        timeoutMs: 15 * 60_000,
-        onLine: line => this.onLine(`[remote-bootstrap] ${line}`),
-      })
-      if (bootstrap.code !== 0) throw new Error(`远程便携版 node 安装失败：${bootstrap.lines.join('\n')}`)
-    }
+    const remoteRun = (host, inner, options) => this.connection.remoteRun(host, inner, options)
+    const nodeVersion = await prepareRemoteNode(settings, remoteRun, requirement)
     const pnpmProbe = await this.connection.remoteRun(target, `${REMOTE_PREFIX} pnpm --version`, { timeoutMs: 60_000 })
     if (pnpmProbe.code !== 0) {
       const version = await this.pnpmVersionFromPackageManager(settings) || '11.7.0'
@@ -667,11 +590,9 @@ class Updater {
       if (pnpmInstall.code !== 0) throw new Error(`远程 pnpm 安装失败：${pnpmInstall.lines.join('\n')}`)
     }
     await this.publishRemotePnpm(settings)
-    const verify = await this.connection.remoteRun(target, `${REMOTE_PREFIX} node --version && pnpm --version`, { timeoutMs: 60_000 })
-    if (verify.code !== 0 || firstLineMatching(verify.lines, engineOk) === '') {
-      throw new Error(`远程自包含工具链安装后仍不可用：${verify.lines.join('\n')}`)
-    }
-    this.onLine(`远程自包含工具链就绪：${verify.lines.map(line => line.trim()).filter(Boolean).join('，')}`)
+    const verify = await this.connection.remoteRun(target, `${REMOTE_PREFIX} pnpm --version`, { timeoutMs: 60_000 })
+    if (verify.code !== 0) throw new Error(`远程 pnpm 安装后仍不可用：${verify.lines.join('\n')}`)
+    this.onLine(`远程自包含工具链就绪：Node.js v${nodeVersion}，pnpm ${verify.lines.join(' ')}`)
   }
 
   /**

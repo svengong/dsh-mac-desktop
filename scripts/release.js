@@ -11,8 +11,8 @@
  *     refactor= patch, docs/test/ci only = no bump);
  *  2. published check: is v<package.json version> already on origin?
  *     yes -> bump a new version; no -> publish the current version as-is;
- *  3. execute: npm version <type> (auto commit + tag), push main, push
- *     the tag -> the GitHub Actions release workflow takes over.
+ *  3. execute: npm version <type> (auto commit + tag), atomically push main
+ *     with the tag so GitHub Actions can start the release workflow.
  *
  * Usage: node scripts/release.js [--dry-run] [--yes] [--bump major|minor|patch]
  *   --dry-run   analyze and print the plan, change nothing
@@ -58,6 +58,9 @@ async function main() {
   const currentVersion = pkg.version
   const currentTag = 'v' + currentVersion
 
+  if (sh('git branch --show-current') !== 'main') {
+    throw new Error('请在 main 分支执行发布。')
+  }
   const localHead = sh('git rev-parse HEAD')
   // ls-remote MUST fail loudly. It used to run with allowFail, so a dead
   // remote (SSH blocked, no network, bad URL) returned '' and every check
@@ -83,10 +86,11 @@ async function main() {
     process.exit(1)
   }
   if (remoteHead !== localHead) {
-    console.error('本地 main 与 origin/main 不一致（需要先 git pull 或 git push）。')
-    console.error('  local : ' + localHead.slice(0, 12))
-    console.error('  origin: ' + remoteHead.slice(0, 12))
-    process.exit(1)
+    try {
+      sh('git merge-base --is-ancestor ' + remoteHead + ' HEAD')
+    } catch {
+      throw new Error('本地 main 未包含 origin/main 的提交，请先同步。')
+    }
   }
 
   // ── 2. what changed since the last tag ──────────────────────────────
@@ -157,7 +161,9 @@ async function main() {
   } else {
     action = forcedBump !== '' ? 'bump' : 'publish-current'
     newTag = currentTag
-    console.log('\n结论：' + currentTag + ' 未发布，直接发布当前版本（含自上次标签以来的 ' + commits.length + ' 个提交）。')
+    console.log(action === 'bump'
+      ? '\n结论：按指定的 ' + bumpType + ' 类型创建新版本。'
+      : '\n结论：' + currentTag + ' 未发布，直接发布当前版本（含自上次标签以来的 ' + commits.length + ' 个提交）。')
   }
 
   if (action === 'nothing') {
@@ -166,9 +172,19 @@ async function main() {
   }
 
   if (dryRun) {
-    if (action === 'bump') console.log('[dry-run] 将执行: npm version ' + bumpType + ' → push main → push 新 tag')
-    else console.log('[dry-run] 将执行: git push origin main && git push origin ' + newTag)
+    if (action === 'bump') console.log('[dry-run] 将执行: npm version ' + bumpType + '，再同时推送 main 和新标签')
+    else console.log('[dry-run] 将执行: git push --atomic origin main ' + newTag)
     process.exit(0)
+  }
+
+  if (!yes) {
+    const readline = require('node:readline').createInterface({ input: process.stdin, output: process.stdout })
+    const answer = await new Promise(resolve => readline.question('确认' + (action === 'bump' ? '创建 ' + bumpType + ' 版本' : '发布 ' + newTag) + '并推送？[y/N] ', resolve))
+    readline.close()
+    if (!['y', 'Y'].includes(answer.trim())) {
+      console.log('已取消。')
+      return
+    }
   }
 
   // ── 5. execute ───────────────────────────────────────────────────────
@@ -189,30 +205,16 @@ async function main() {
       sh('git tag -a ' + newTag + ' -m "' + newTag + '"')
       console.log('\n已创建标签 ' + newTag + '。')
     } else {
+      if (sh('git rev-list -n 1 ' + newTag) !== localHead) {
+        throw new Error('本地标签 ' + newTag + ' 未指向当前 main，请核对标签后再发布。')
+      }
       console.log('\n标签 ' + newTag + ' 已存在（本地）。')
     }
     console.log('将发布当前版本 ' + currentTag + '。')
   }
 
-  if (!yes) {
-    const readline = require('node:readline').createInterface({ input: process.stdin, output: process.stdout })
-    const answer = await new Promise(resolve => readline.question('确认' + (action === 'bump' ? '执行 npm version ' + bumpType : '发布 ' + newTag) + '并推送？[y/N] ', resolve))
-    readline.close()
-    if (!['y', 'Y'].includes(answer.trim())) {
-      console.log('已取消。')
-      if (action === 'bump') {
-        sh('git tag -d ' + newTag, { allowFail: true })
-        sh('git reset --hard HEAD~1', { allowFail: true })
-        sh('git checkout -- package.json package-lock.json', { allowFail: true })
-      }
-      process.exit(0)
-    }
-  }
-
-  sh('git push origin main')
-  console.log('已推送 main。')
-  sh('git push origin ' + newTag)
-  console.log('已推送标签 ' + newTag + '，GitHub Actions 将自动构建并发布。')
+  sh('git push --atomic origin main refs/tags/' + newTag)
+  console.log('已推送 main 和标签 ' + newTag + '，GitHub Actions 将自动构建并发布。')
   const repoSlug = sh('git remote get-url origin').replace(/^git@github.com:|https:\/\/github.com\//, '').replace(/\.git$/, '')
   console.log('查看进度：https://github.com/' + repoSlug + '/actions')
 }

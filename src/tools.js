@@ -4,8 +4,8 @@
  * Tool discovery for the local machine — self-contained by design.
  *
  * An app launched from Finder inherits the minimal launchservices PATH, where
- * brew/nvm tools do not live, and a brew node may even violate the repo's
- * engine range (node ^22.19 || >=24). Windows has its own variant of the same
+ * brew/nvm tools do not live, and a brew node may be too old for the runtime.
+ * Windows has its own variant of the same
  * problem: a shortcut launch inherits the Explorer PATH, where nvm-windows,
  * fnm, volta and a per-user npm prefix are frequently absent. The shell
  * therefore:
@@ -32,6 +32,7 @@ const {
   IS_WINDOWS, PATH_KEY, SYSTEM_PATH_DIRS, findExecutableIn, findExecutableInDirs,
   isExecutable, joinPath, spawnInvocation, splitPath,
 } = require('./platform')
+const { DEFAULT_NODE_FLOOR, nodeVersionMeets, parseNodeVersion } = require('./node-engine')
 
 const COMMON_DIRS = IS_WINDOWS
   ? [
@@ -270,13 +271,14 @@ function resolveTool(name, manualPath, shellPath) {
   return findInDirs(name, COMMON_DIRS)
 }
 
-/** The repo's engine range: node ^22.19.0 || >=24. */
-function engineOk(versionText) {
-  const match = /^v?(\d+)\.(\d+)\.(\d+)/.exec(String(versionText).trim())
-  if (!match) return false
-  const major = Number(match[1])
-  const minor = Number(match[2])
-  return major >= 24 || (major === 22 && minor >= 19)
+function engineOk(versionText, floor = DEFAULT_NODE_FLOOR) {
+  return nodeVersionMeets(versionText, floor)
+}
+
+function nodeVersionAt(nodePath) {
+  if (nodePath === '') return ''
+  const result = spawnSync(nodePath, ['--version'], { encoding: 'utf8', timeout: PROBE_TIMEOUT_MS, windowsHide: true })
+  return result.status === 0 ? parseNodeVersion(result.stdout) : ''
 }
 
 function nodeCandidates(settings) {
@@ -300,13 +302,12 @@ function nodeCandidates(settings) {
 }
 
 /** Pick the first node candidate whose real version satisfies the engine range. */
-function pickNode(settings) {
+function pickNode(settings, floor) {
   const candidates = nodeCandidates(settings)
   for (const candidate of candidates) {
-    const result = spawnSync(candidate, ['--version'], { encoding: 'utf8', timeout: 10_000, windowsHide: true })
-    if (result.status === 0 && engineOk(result.stdout)) return candidate
+    if (engineOk(nodeVersionAt(candidate), floor)) return candidate
   }
-  return candidates.length > 0 ? candidates[0] : ''
+  return ''
 }
 
 function pnpmCandidates(settings, nodePath) {
@@ -427,17 +428,17 @@ function detectSystemLocale() {
 const toolsCache = new Map()
 
 /** Resolve the tools the shell needs; a missing tool is an empty string. */
-function resolveTools(settings) {
+function resolveTools(settings, { floor = DEFAULT_NODE_FLOOR, refresh = false } = {}) {
   const toolPaths = settings.toolPaths ?? {}
   // `PATH` is part of the key because the probes resolve through it: a shell
   // started from a different parent can legitimately see different tools.
   const cacheKey = JSON.stringify([
     toolPaths.node ?? '', toolPaths.git ?? '', toolPaths.pnpm ?? '', toolPaths.shell ?? '',
-    settings.local?.repoDir ?? '', process.env[PATH_KEY] ?? '',
+    settings.local?.repoDir ?? '', process.env[PATH_KEY] ?? '', floor,
   ])
   const cached = toolsCache.get(cacheKey)
-  if (cached !== undefined) return cached
-  const resolved = resolveToolsUncached(settings)
+  if (cached !== undefined && !refresh) return cached
+  const resolved = resolveToolsUncached(settings, floor)
   toolsCache.set(cacheKey, resolved)
   return resolved
 }
@@ -447,13 +448,13 @@ function forgetResolvedTools() {
   toolsCache.clear()
 }
 
-function resolveToolsUncached(settings) {
+function resolveToolsUncached(settings, floor) {
   const toolPaths = settings.toolPaths ?? {}
-  const node = pickNode(settings)
+  const node = pickNode(settings, floor)
   const env = childEnv(settings, node)
   let pnpm = ''
   let pnpmPrefix = []
-  for (const candidate of pnpmCandidates(settings, node)) {
+  for (const candidate of node === '' ? [] : pnpmCandidates(settings, node)) {
     const base = path.basename(candidate).toLowerCase()
     const isCorepack = base === 'corepack' || base === 'corepack.exe' || base === 'corepack.cmd'
     // pnpm on Windows is a .cmd shim, which node cannot exec directly. Route
@@ -484,6 +485,6 @@ function resolveToolsUncached(settings) {
 }
 
 module.exports = {
-  resolveTools, forgetResolvedTools, childEnv, engineOk, defaultLoginShell, nvmBinDirs, bestWindowsPath,
+  resolveTools, forgetResolvedTools, childEnv, engineOk, nodeVersionAt, defaultLoginShell, nvmBinDirs, bestWindowsPath,
   PROBE_TIMEOUT_MS,
 }

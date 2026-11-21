@@ -329,10 +329,11 @@ function nodeDistArchive(version, arch = process.arch, target = {}) {
   const windows = target.windows !== undefined ? target.windows : IS_WINDOWS
   const cpu = arch === 'arm64' ? 'arm64' : arch === 'ia32' ? 'x86' : 'x64'
   if (windows) {
-    return { kind: 'zip', url: `https://nodejs.org/dist/v${version}/node-v${version}-win-${cpu}.zip` }
+    return { kind: 'zip', indexFile: `win-${cpu}-zip`, url: `https://nodejs.org/dist/v${version}/node-v${version}-win-${cpu}.zip` }
   }
   const platform = target.platform || (IS_MAC ? 'darwin' : 'linux')
-  return { kind: 'tar.gz', url: `https://nodejs.org/dist/v${version}/node-v${version}-${platform}-${cpu}.tar.gz` }
+  const indexFile = platform === 'darwin' ? `osx-${cpu}-tar` : `${platform}-${cpu}`
+  return { kind: 'tar.gz', indexFile, url: `https://nodejs.org/dist/v${version}/node-v${version}-${platform}-${cpu}.tar.gz` }
 }
 
 /**

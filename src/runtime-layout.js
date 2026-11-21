@@ -73,4 +73,18 @@ function npmArtifactVersion(runtimeDir) {
   return ''
 }
 
-module.exports = { NPM_PACKAGE, runtimeLayout, runtimeBin, runtimeIsBuilt, npmArtifactVersion }
+/** Engine of the installed CLI, or of a legacy source checkout. */
+function runtimeNodeEngine(runtimeDir) {
+  const layout = runtimeLayout(runtimeDir)
+  if (layout === null) return ''
+  const manifest = layout.kind === 'npm'
+    ? path.join(runtimeDir, 'node_modules', NPM_PACKAGE, 'package.json')
+    : path.join(runtimeDir, 'package.json')
+  try {
+    return JSON.parse(fs.readFileSync(manifest, 'utf8')).engines?.node ?? ''
+  } catch {
+    return ''
+  }
+}
+
+module.exports = { NPM_PACKAGE, runtimeLayout, runtimeBin, runtimeIsBuilt, npmArtifactVersion, runtimeNodeEngine }
