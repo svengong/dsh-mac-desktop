@@ -1474,9 +1474,8 @@ function setWorkspaceView(workspace, view) {
       // natively (state.connForm + state.devices); no embedded view needed.
       workspace.harnessView.setVisible(false)
       sendWorkspaceState(workspace)
-    } else if (session !== null && session.connection.status.state === 'ready' && url !== ''
-      && (workspace.loadedUrl !== url || !workspace.harnessReady)) {
-      loadHarnessUrl(workspace, url)
+    } else if (session !== null && session.connection.status.state === 'ready' && url !== '') {
+      syncWorkspaceHarness(workspace, session)
     } else {
       updateHarnessVisibility(workspace)
     }
@@ -1630,7 +1629,7 @@ function syncWorkspaceHarness(workspace, session, keepPending = false) {
     return
   }
   const url = session.connection.url()
-  if (workspace.loadedUrl !== url || workspace.harnessReady === false) {
+  if (workspace.loadedUrl !== url || workspace.loadError !== '') {
     loadHarnessUrl(workspace, url)
   } else {
     updateHarnessVisibility(workspace)
@@ -2002,8 +2001,8 @@ function createWorkspace(deviceKey = null, options = {}) {
   // replaced, so the view is no longer showing a loaded page. Tracked here
   // (not in did-start-loading) because that event fires for SUB-FRAME loads
   // too — see the did-start-loading handler below.
-  harnessView.webContents.on('did-start-navigation', (_event, url, isInPlace, isMainFrame) => {
-    if (!isMainFrame) return
+  harnessView.webContents.on('did-start-navigation', details => {
+    if (!details.isMainFrame || details.isSameDocument) return
     if (workspace.loadedUrl === '') return
     // Snapshot readiness BEFORE clearing it: a navigation denied in
     // `will-navigate` (which fires after this event) needs to know whether a
@@ -2042,13 +2041,13 @@ function createWorkspace(deviceKey = null, options = {}) {
     // committed the old page while the service was being replaced.
     scheduleBootWatch(workspace)
   })
-  harnessView.webContents.on('did-fail-load', (_event, code, description) => {
-    if (code === -3) return
+  harnessView.webContents.on('did-fail-load', (_event, code, description, _url, isMainFrame) => {
+    if (!isMainFrame || code === -3 || workspace.loadedUrl === '') return
     workspace.harnessReady = false
     workspace.loadError = description
     workspace.blockedNavRestore = undefined
-    if (session !== null) {
-      session.connection.log('[window] load failed ' + code + ' ' + description)
+    if (workspace.session !== null) {
+      workspace.session.connection.log('[window] load failed ' + code + ' ' + description)
     }
     updateHarnessVisibility(workspace)
   })
@@ -2507,9 +2506,10 @@ async function startWithSettingsInner(workspace) {
       title: '初始化（官方产物）',
       status: '正在检查 Node.js 并安装官方产物…',
     })
-    session.connection.log('[4/4] 开始构建流水线…')
-    const outcome = await session.updater.runPipeline({ includePull: true, toleratePullFailure: true })
-    session.connection.log(`[4/4] 构建流水线结束：${outcome.ok === false ? `失败（${String((outcome.error && outcome.error.message) || outcome.error || '未知')}）` : '成功'}`)
+    session.connection.log('[4/4] 安装官方产物…')
+    // The first connection owns the service launch and SSH tunnel. Restarting
+    // here would publish a URL whose tunnel connect() immediately tears down.
+    const outcome = await session.updater.runPipeline({ restartAfterInstall: false })
     if (!alive()) {
       session.connection.log('[诊断] 构建结束后会话已失效，不再继续连接。')
       return
@@ -2550,7 +2550,7 @@ async function runInitInner(workspace) {
     return
   }
   setProgress(workspace, { title: '初始化（官方产物）', status: '正在检查 Node.js 并安装官方产物…' })
-  const outcome = await session.updater.runPipeline({ includePull: true, toleratePullFailure: true })
+  const outcome = await session.updater.runPipeline({ restartAfterInstall: false })
   if (workspace.session !== session || session.connection.stopped === true) return
   if (outcome.ok) {
     setProgress(workspace, null)
@@ -3532,6 +3532,72 @@ async function runSmoke() {
     if (shouldReloadAfterBootFailure({ ...base, reloads: BOOT_RELOAD_LIMIT }) !== false) throw new Error('cap must stop reloading')
     if (!BOOT_FAILURE_PROBE.includes('Failed to load plugins')) throw new Error('probe must match the failure card text')
   })
+  await check('first SSH install loads the ready tunnel once', async () => {
+    const { createServer } = require('node:http')
+    const { once } = require('node:events')
+    let requests = 0
+    const server = createServer((request, response) => {
+      response.setHeader('Content-Type', 'text/html; charset=utf-8')
+      if (request.url === '/') requests++
+      response.end('<!doctype html><main>Harness startup fixture</main>')
+    })
+    server.listen(0, '127.0.0.1')
+    await once(server, 'listening')
+    const url = `http://127.0.0.1:${server.address().port}/`
+    const savedWindowManager = windowManager
+    windowManager = null
+    let workspace
+    let timer
+    try {
+      workspace = createWorkspace('ssh:first-connect-smoke', { autoOpen: false })
+      const session = workspace.session
+      const contents = workspace.harnessView.webContents
+      let installs = 0
+      let connections = 0
+      session.updater.runPipeline = async options => {
+        if (options.restartAfterInstall !== false) throw new Error('first installation tried to restart the service')
+        installs++
+        return { ok: true }
+      }
+      session.connection.isBuilt = async () => false
+      session.connection.url = () => url
+      session.connection.connect = async () => {
+        connections++
+        session.connection.setStatus({ mode: 'ssh', state: 'ready', url, detail: 'ready' })
+      }
+      const loaded = new Promise(resolve => {
+        contents.on('did-finish-load', () => {
+          if (contents.getURL() === url && workspace.harnessReady) resolve()
+        })
+      })
+      await startWithSettingsInner(workspace)
+      syncWorkspaceHarness(workspace, session)
+      await Promise.race([
+        loaded,
+        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('Harness document did not load')), 10_000) }),
+      ])
+      if (installs !== 1 || connections !== 1 || requests !== 1) {
+        throw new Error(`expected one install, connect and navigation, got ${installs}, ${connections}, ${requests}`)
+      }
+      const navigated = once(contents, 'did-navigate-in-page')
+      await contents.executeJavaScript("history.pushState({}, '', '#ready')")
+      await navigated
+      contents.emit('did-fail-load', {}, -105, 'fixture iframe failed', url, false)
+      if (!workspace.harnessReady || workspace.loadError !== '') {
+        throw new Error('the document lost readiness after in-page navigation or an iframe failure')
+      }
+    } finally {
+      clearTimeout(timer)
+      if (workspace !== undefined) {
+        clearTimeout(workspace.session.autoCheckTimer)
+        workspace.session.connection.stopHealthMonitor()
+        workspace.window.destroy()
+      }
+      windowManager = savedWindowManager
+      server.close()
+    }
+  })
+
   await check('action surface complete', () => {
     for (const name of ['newWindow', 'openMain', 'openSettings', 'openUpdates', 'checkUpdates', 'updateAll', 'updateAndRestart', 'resetBackend', 'rollbackHarness', 'quit']) {
       if (typeof actions[name] !== 'function') throw new Error(`actions.${name} missing`)

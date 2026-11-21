@@ -209,7 +209,7 @@ jobs:
           GRADLE_USER_HOME: ${{ github.workspace }}/android/.gradle-home
         run: |
           chmod +x ./gradlew
-          ./gradlew :app:assembleRelease --no-daemon
+          ./gradlew :app:testReleaseUnitTest :app:assembleRelease --no-daemon
           # Name the artifact after the version so the release page shows it.
           # release is signed with the checked-in debug key (see
           # app/build.gradle.kts), so the output is app-release.apk rather than

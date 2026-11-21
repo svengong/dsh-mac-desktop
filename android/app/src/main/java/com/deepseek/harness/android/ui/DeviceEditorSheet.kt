@@ -1,5 +1,8 @@
 package com.deepseek.harness.android.ui
 
+import android.provider.OpenableColumns
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -44,13 +47,20 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.deepseek.harness.android.data.AuthKey
 import com.deepseek.harness.android.data.ConnectionMode
 import com.deepseek.harness.android.data.Device
+import com.deepseek.harness.android.data.PrivateKeyImportException
+import com.deepseek.harness.android.data.readPrivateKeyText
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.IOException
 
 /**
  * Add or edit a terminal.
@@ -78,7 +88,6 @@ fun DeviceEditorSheet(
     onDeleteKey: (String) -> Unit,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    val scope = rememberCoroutineScope()
 
     var name by remember { mutableStateOf(device?.name ?: "") }
     var mode by remember { mutableStateOf(device?.mode ?: ConnectionMode.SSH) }
@@ -312,66 +321,124 @@ fun DeviceEditorSheet(
         KeyImportDialog(
             onDismiss = { showKeyImport = false },
             onImport = { keyName, pem, pass ->
-                scope.launch {
-                    val key = onImportKey(keyName, pem, pass)
-                    keyId = key.id
-                    showKeyImport = false
-                }
+                val key = onImportKey(keyName, pem, pass)
+                keyId = key.id
+                showKeyImport = false
             },
         )
     }
 }
 
-/**
- * Paste an OpenSSH private key.
- *
- * The key is written straight to app-private storage and never shown again, so
- * the dialog only asks for the material, a display name, and an optional
- * passphrase.
- */
 @Composable
 private fun KeyImportDialog(
     onDismiss: () -> Unit,
-    onImport: (String, String, String?) -> Unit,
+    onImport: suspend (String, String, String?) -> Unit,
 ) {
+    val resolver = LocalContext.current.contentResolver
+    val scope = rememberCoroutineScope()
     var name by remember { mutableStateOf("") }
     var pem by remember { mutableStateOf("") }
+    var fileName by remember { mutableStateOf<String?>(null) }
     var passphrase by remember { mutableStateOf("") }
-    val looksLikeKey = pem.contains("PRIVATE KEY")
+    var error by remember { mutableStateOf("") }
+    var busy by remember { mutableStateOf(false) }
+
+    // Pick any file type so extensionless OpenSSH keys (such as id_ed25519)
+    // are selectable. Copy the contents once without retaining URI access.
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        scope.launch {
+            busy = true
+            error = ""
+            val previousFile = fileName
+            fileName = null
+            pem = ""
+            passphrase = ""
+            try {
+                val (displayName, privateKey) = withContext(Dispatchers.IO) {
+                    val privateKey = resolver.openInputStream(uri)?.use(::readPrivateKeyText)
+                        ?: throw IOException()
+                    if (privateKey.isBlank()) throw PrivateKeyImportException("所选私钥文件为空。")
+                    val displayName = runCatching {
+                        resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+                            ?.use { if (it.moveToFirst()) it.getString(0) else null }
+                    }.getOrNull()?.takeIf { it.isNotBlank() } ?: "SSH 私钥"
+                    displayName to privateKey
+                }
+                if (name.isBlank() || name == previousFile) name = displayName
+                fileName = displayName
+                pem = privateKey
+            } catch (failure: CancellationException) {
+                throw failure
+            } catch (failure: PrivateKeyImportException) {
+                error = failure.message.orEmpty()
+            } catch (_: Exception) {
+                error = "无法读取所选文件，请重新选择。"
+            } finally {
+                busy = false
+            }
+        }
+    }
 
     AlertDialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = { if (!busy) onDismiss() },
         title = { Text("导入 SSH 私钥") },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState())) {
+                OutlinedButton(
+                    onClick = { picker.launch(arrayOf("*/*")) },
+                    enabled = !busy,
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("从文件选择私钥") }
+                if (fileName != null) {
+                    Text("已选择 ${fileName.orEmpty()}", style = MaterialTheme.typography.bodyMedium)
+                    TextButton(
+                        onClick = {
+                            fileName = null
+                            pem = ""
+                            passphrase = ""
+                            error = ""
+                        },
+                        enabled = !busy,
+                    ) { Text("改用粘贴") }
+                }
+                Spacer(Modifier.height(12.dp))
                 OutlinedTextField(
                     value = name,
                     onValueChange = { name = it },
                     label = { Text("名称") },
                     placeholder = { Text("home-server") },
                     singleLine = true,
+                    enabled = !busy,
                     modifier = Modifier.fillMaxWidth(),
                 )
-                Spacer(Modifier.height(12.dp))
-                OutlinedTextField(
-                    value = pem,
-                    onValueChange = { pem = it },
-                    label = { Text("私钥内容") },
-                    placeholder = { Text("-----BEGIN OPENSSH PRIVATE KEY-----") },
-                    minLines = 4,
-                    maxLines = 8,
-                    modifier = Modifier.fillMaxWidth(),
-                )
+                if (fileName == null) {
+                    Spacer(Modifier.height(12.dp))
+                    OutlinedTextField(
+                        value = pem,
+                        onValueChange = { pem = it; error = "" },
+                        label = { Text("粘贴私钥内容") },
+                        placeholder = { Text("-----BEGIN OPENSSH PRIVATE KEY-----") },
+                        minLines = 4,
+                        maxLines = 8,
+                        enabled = !busy,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
                 Spacer(Modifier.height(12.dp))
                 OutlinedTextField(
                     value = passphrase,
-                    onValueChange = { passphrase = it },
-                    label = { Text("口令（可留空）") },
+                    onValueChange = { passphrase = it; error = "" },
+                    label = { Text("口令（仅加密私钥需要）") },
                     singleLine = true,
+                    enabled = !busy,
                     visualTransformation = PasswordVisualTransformation(),
                     modifier = Modifier.fillMaxWidth(),
                 )
                 Spacer(Modifier.height(8.dp))
+                if (error.isNotEmpty()) {
+                    Text(error, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                }
                 Text(
                     "私钥只保存在本机应用私有目录，不会上传。",
                     style = MaterialTheme.typography.labelMedium,
@@ -381,10 +448,26 @@ private fun KeyImportDialog(
         },
         confirmButton = {
             TextButton(
-                enabled = looksLikeKey && name.isNotBlank(),
-                onClick = { onImport(name.trim(), pem.trim(), passphrase.ifBlank { null }) },
-            ) { Text("导入") }
+                enabled = !busy && pem.isNotBlank() && name.isNotBlank(),
+                onClick = {
+                    scope.launch {
+                        busy = true
+                        error = ""
+                        try {
+                            onImport(name.trim(), pem, passphrase.takeIf { it.isNotEmpty() })
+                        } catch (failure: CancellationException) {
+                            throw failure
+                        } catch (failure: PrivateKeyImportException) {
+                            error = failure.message.orEmpty()
+                        } catch (_: Exception) {
+                            error = "无法保存私钥，请重试。"
+                        } finally {
+                            busy = false
+                        }
+                    }
+                },
+            ) { Text(if (busy) "处理中…" else "导入") }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+        dismissButton = { TextButton(onClick = onDismiss, enabled = !busy) { Text("取消") } },
     )
 }

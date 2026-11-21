@@ -164,6 +164,35 @@ exec /bin/mv "$@"
     assert.strictEqual(await prepareRemoteNode(settings, remoteRun, request), PORTABLE_NODE_BUNDLED)
     assert.match(fs.readFileSync(path.join(bin, 'node'), 'utf8'), new RegExp(PORTABLE_NODE_BUNDLED))
     assert.deepStrictEqual(fs.readdirSync(path.join(home, '.dsh-tools')), ['node'])
+
+    const { Updater } = require('../src/update')
+    settings.local = { dshHome: path.join(home, 'shell-data') }
+    settings.ssh.remoteRepoDir = '~/harness'
+    fs.writeFileSync(path.join(shims, 'npm'), `#!/bin/sh
+mkdir -p "$3/node_modules/@deepseek-ai/dsh/lib"
+touch "$3/node_modules/@deepseek-ai/dsh/lib/bin.js"
+`, { mode: 0o755 })
+    let restarts = 0
+    let version = '0.2.2-rc.5'
+    const updater = new Updater({
+      getSettings: () => settings,
+      connection: {
+        owner: () => 'remote-smoke',
+        remoteRun,
+        restartService: async () => { restarts++ },
+      },
+    })
+    updater.queryArtifact = async () => ({ ok: true, version, nodeEngine: '>=24.9.0' })
+    updater.ensureToolchain = async () => {}
+    const initial = await updater.runPipeline({ restartAfterInstall: false })
+    assert.strictEqual(initial.ok, true, initial.error?.message)
+    assert.strictEqual(restarts, 0, 'first install must leave service startup to the regular connection')
+    assert.strictEqual((await runtimeStore.readRemoteRootManifest(settings, remoteRun)).current, `npm${version}`)
+    version = '0.2.2-rc.6'
+    const update = await updater.runPipeline()
+    assert.strictEqual(update.ok, true, update.error?.message)
+    assert.strictEqual(restarts, 1, 'an explicit update still restarts the service')
+
   } finally {
     fs.rmSync(home, { recursive: true, force: true })
   }

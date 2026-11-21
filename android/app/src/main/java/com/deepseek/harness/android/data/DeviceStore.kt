@@ -74,16 +74,23 @@ class DeviceStore(private val context: Context) {
      * are listed.
      */
     suspend fun importKey(name: String, pem: String, passphrase: String?): AuthKey = withContext(Dispatchers.IO) {
+        validatePrivateKey(pem, passphrase)
         val id = java.util.UUID.randomUUID().toString()
         val target = File(keysDir, "$id.pem")
-        target.writeText(pem.trim() + NEWLINE)
-        target.setReadable(false, false)
-        target.setReadable(true, true)
+        val passFile = File(keysDir, "$id.pass")
         val key = AuthKey(id = id, name = name, hasPassphrase = !passphrase.isNullOrEmpty(), importedAt = System.currentTimeMillis())
-        _authKeys.value = _authKeys.value + key
-        if (!passphrase.isNullOrEmpty()) File(keysDir, "$id.pass").writeText(passphrase)
-        persist()
-        key
+        try {
+            writePrivateFile(target, pem.trim() + NEWLINE)
+            if (!passphrase.isNullOrEmpty()) writePrivateFile(passFile, passphrase)
+            _authKeys.value = _authKeys.value + key
+            persist()
+            key
+        } catch (error: java.io.IOException) {
+            _authKeys.value = _authKeys.value.filterNot { it.id == id }
+            target.delete()
+            passFile.delete()
+            throw error
+        }
     }
 
     suspend fun deleteKey(keyId: String) = withContext(Dispatchers.IO) {
@@ -97,7 +104,13 @@ class DeviceStore(private val context: Context) {
         runCatching { File(keysDir, "$keyId.pem").readBytes() }.getOrNull()
 
     fun keyPassphrase(keyId: String): String? =
-        runCatching { File(keysDir, "$keyId.pass").readText().trim() }.getOrNull()
+        runCatching { File(keysDir, "$keyId.pass").readText() }.getOrNull()
+
+    private fun writePrivateFile(target: File, data: String) {
+        target.writeText(data)
+        target.setReadable(false, false)
+        target.setReadable(true, true)
+    }
 
     /**
      * Migration path for people who already use the desktop shell: the device

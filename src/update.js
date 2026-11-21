@@ -266,7 +266,7 @@ class Updater {
    * @param {object} _options - retained for call-site compatibility.
    * @returns {Promise<{ok: boolean}>}
    */
-  async runPipeline(_options = {}) {
+  async runPipeline(options = {}) {
     if (this.busy) return { ok: false, error: new Error('已有更新任务执行中') }
     this.setBusy(true)
     this.pendingWritten = false
@@ -279,7 +279,7 @@ class Updater {
     } catch {
       // Best-effort.
     }
-    this._pipelinePromise = this.runPipelineInner(_options)
+    this._pipelinePromise = this.runPipelineInner(options)
     const tracked = this._pipelinePromise
     tracked.finally(() => {
       if (this._pipelinePromise === tracked) this._pipelinePromise = null
@@ -287,7 +287,7 @@ class Updater {
     return this._pipelinePromise
   }
 
-  async runPipelineInner(_options = {}) {
+  async runPipelineInner({ restartAfterInstall = true } = {}) {
     const cancelError = () => {
       const error = new Error(`更新已取消：${this.cancelReason}`)
       error.code = 'CANCELLED'
@@ -298,7 +298,7 @@ class Updater {
       const settings = this.getSettings()
       const remoteRun = (host, inner, options) => this.connection.remoteRun(host, inner, options)
       const executePipeline = async () => {
-        const artifactOutcome = await this.artifactPipeline(settings)
+        const artifactOutcome = await this.artifactPipeline(settings, restartAfterInstall)
         if (artifactOutcome.rolledBack) {
           return { ok: false, error: artifactOutcome.error, rolledBack: true, rollbackVersion: artifactOutcome.rollbackVersion }
         }
@@ -354,7 +354,7 @@ class Updater {
    * The artifact is the ONLY install channel now; an unavailable registry or
    * a broken publish chain throws (no source-build fallback).
    */
-  async artifactPipeline(settings) {
+  async artifactPipeline(settings, restartAfterInstall = true) {
     this.setPhase('querying')
     const query = await this.queryArtifact(settings)
     if (this.cancelled) this.throwCancelled()
@@ -377,7 +377,7 @@ class Updater {
     if (this.cancelled) this.throwCancelled()
     const tools = await this.ensureToolchain(settings, { floor, artifactVersion: version, onLine: this.onLine })
     if (this.cancelled) this.throwCancelled()
-    if (settings.mode === 'ssh') return this.remoteArtifactPipeline(settings, version)
+    if (settings.mode === 'ssh') return this.remoteArtifactPipeline(settings, version, restartAfterInstall)
     runtimeStore.writePendingUpdate(settings, { intent: 'artifact', version })
     this.pendingWritten = true
     const active = runtimeStore.localActiveRuntimeDir(settings)
@@ -423,6 +423,7 @@ class Updater {
     const previous = runtimeStore.readLocalRootManifest(settings).current ?? null
     const activated = runtimeStore.activateLocalRuntime(settings, `npm:${version}`)
     this.onLine(`已切换到官方产物 ${activated}（上一版本：${previous ?? '无'}）。`)
+    if (!restartAfterInstall) return { choseArtifact: true, fresh: true, version }
     try {
       await this.runStep('重启服务', async () => {
         await this.connection.restartService()
@@ -453,7 +454,7 @@ class Updater {
    * remote `current`, then restart the remote service. A failed install
    * throws (and is rolled back if the switch already happened).
    */
-  async remoteArtifactPipeline(settings, version) {
+  async remoteArtifactPipeline(settings, version, restartAfterInstall = true) {
     const remoteRun = (host, inner, options) => this.connection.remoteRun(host, inner, options)
     const token = runtimeStore.versionToken(`npm:${version}`)
     const versionDir = runtimeStore.remoteVersionDir(`npm:${version}`)
@@ -514,6 +515,7 @@ class Updater {
     const previous = manifest.current ?? null
     const activated = await runtimeStore.activateRemoteRuntime(settings, remoteRun, `npm:${version}`)
     this.onLine(`已切换到远端官方产物 ${activated}（上一版本：${previous ?? '无'}）。`)
+    if (!restartAfterInstall) return { choseArtifact: true, fresh: true, version }
     try {
       await this.runStep('重启服务', async () => {
         await this.connection.restartService()

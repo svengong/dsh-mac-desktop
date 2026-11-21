@@ -166,7 +166,7 @@ jobs:
           GRADLE_USER_HOME: ${{ github.workspace }}/android/.gradle-home
         run: |
           chmod +x ./gradlew
-          ./gradlew :app:assembleRelease --no-daemon
+          ./gradlew :app:testReleaseUnitTest :app:assembleRelease --no-daemon
 
       - name: Assert artifact naming and bundle
         shell: bash
