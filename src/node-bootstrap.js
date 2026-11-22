@@ -10,7 +10,7 @@ const { extractNodeArchive, findExecutableIn, nodeDistArchive } = require('./pla
 const { nodeVersionAt, resolveTools } = require('./tools')
 const { fetchJson } = require('./update-manager')
 const { withLocalLock } = require('./runtime-store')
-const { DEFAULT_NODE_FLOOR, PORTABLE_NODE_BUNDLED, nodeVersionMeets, resolvePortableNodeVersion, nodeRequirementError } = require('./node-engine')
+const { DEFAULT_NODE_RANGE, PORTABLE_NODE_BUNDLED, nodeVersionMeets, resolvePortableNodeVersion, nodeRequirementError } = require('./node-engine')
 
 /**
  * Download a URL to a file. Returns false (never throws) so callers can fall
@@ -54,7 +54,7 @@ function removeStaging(dir) {
 }
 
 /** Verify a staged archive before replacing the existing portable runtime. */
-async function ensurePortableNode({ toolRoot, floor = DEFAULT_NODE_FLOOR, version, artifactVersion, onLine = () => {}, env }) {
+async function ensurePortableNode({ toolRoot, nodeRange = DEFAULT_NODE_RANGE, version, artifactVersion, onLine = () => {}, env }) {
   const nodeDir = path.join(toolRoot, 'node')
   const backup = path.join(toolRoot, 'node.old')
   let currentVersion = ''
@@ -64,17 +64,17 @@ async function ensurePortableNode({ toolRoot, floor = DEFAULT_NODE_FLOOR, versio
       // Recover a process killed between the two renames.
       if (!fs.existsSync(nodeDir) && fs.existsSync(backup)) fs.renameSync(backup, nodeDir)
       currentVersion = portableVersion(nodeDir)
-      if (nodeVersionMeets(currentVersion, floor)) return { ok: true, nodeDir }
+      if (nodeVersionMeets(currentVersion, nodeRange)) return { ok: true, nodeDir }
 
-      version ??= await resolvePortableNodeVersion({ floor, fetchJson, distFile: nodeDistArchive(PORTABLE_NODE_BUNDLED).indexFile })
-      if (!nodeVersionMeets(version, floor)) throw new Error('下载版本低于运行要求。')
+      version ??= await resolvePortableNodeVersion({ nodeRange, fetchJson, distFile: nodeDistArchive(PORTABLE_NODE_BUNDLED).indexFile })
+      if (!nodeVersionMeets(version, nodeRange)) throw new Error('下载版本不符合运行要求。')
       const dist = nodeDistArchive(version)
       const staging = fs.mkdtempSync(path.join(toolRoot, `node.download-${process.pid}-`))
       try {
         const archive = path.join(staging, `node.${dist.kind}`)
         const extracted = path.join(staging, 'node')
         fs.mkdirSync(extracted)
-        onLine(`正在下载便携版 Node.js v${version}（产物要求 >=${floor}）…`)
+        onLine(`正在下载便携版 Node.js v${version}（产物要求 ${nodeRange}）…`)
         let fetched = await downloadFile(dist.url, archive, { onLine })
         if (!fetched) {
           const curl = await runCommand({
@@ -90,7 +90,7 @@ async function ensurePortableNode({ toolRoot, floor = DEFAULT_NODE_FLOOR, versio
         const unpack = await extractNodeArchive({ runCommand, archive, destDir: extracted, kind: dist.kind, env })
         if (unpack.code !== 0) throw new Error(`解压失败：${unpack.lines.slice(-3).join(' ')}`)
         const installed = portableVersion(extracted)
-        if (installed !== version || !nodeVersionMeets(installed, floor)) throw new Error('下载的 Node.js 未通过版本自检。')
+        if (installed !== version || !nodeVersionMeets(installed, nodeRange)) throw new Error('下载的 Node.js 未通过版本自检。')
 
         // A nonempty directory can't be overwritten with rename. Keep the
         // previous directory until the staged tree is in its final location.
@@ -105,8 +105,8 @@ async function ensurePortableNode({ toolRoot, floor = DEFAULT_NODE_FLOOR, versio
         }
         removeStaging(backup)
         onLine(currentVersion
-          ? `便携版 Node.js 升级：v${currentVersion} → v${installed}（产物要求 >=${floor}）`
-          : `便携版 Node.js v${installed} 已就绪（产物要求 >=${floor}）`)
+          ? `便携版 Node.js 升级：v${currentVersion} → v${installed}（产物要求 ${nodeRange}）`
+          : `便携版 Node.js v${installed} 已就绪（产物要求 ${nodeRange}）`)
         return { ok: true, nodeDir }
       } finally {
         removeStaging(staging)
@@ -116,13 +116,13 @@ async function ensurePortableNode({ toolRoot, floor = DEFAULT_NODE_FLOOR, versio
     return {
       ok: false,
       nodeDir,
-      error: nodeRequirementError({ floor, artifactVersion, currentVersion, targetVersion: version, detail: error.message }),
+      error: nodeRequirementError({ nodeRange, artifactVersion, currentVersion, targetVersion: version, detail: error.message }),
     }
   }
 }
 
-async function prepareLocalNode(settings, { floor, artifactVersion, onLine }) {
-  let tools = resolveTools(settings, { floor, refresh: true })
+async function prepareLocalNode(settings, { nodeRange, artifactVersion, onLine }) {
+  let tools = resolveTools(settings, { nodeRange, refresh: true })
   const toolRoot = path.join(settings.local.repoDir, '.dsh-tools')
   const portable = path.join(toolRoot, 'node')
   if (tools.node !== '' && (
@@ -132,7 +132,7 @@ async function prepareLocalNode(settings, { floor, artifactVersion, onLine }) {
   )) return tools
   const outcome = await ensurePortableNode({
     toolRoot,
-    floor,
+    nodeRange,
     artifactVersion,
     onLine,
     env: tools.env,
@@ -142,8 +142,8 @@ async function prepareLocalNode(settings, { floor, artifactVersion, onLine }) {
     onLine(`${outcome.error} 本次使用已验证的 Node.js：${tools.node}`)
     return tools
   }
-  tools = resolveTools(settings, { floor, refresh: true })
-  if (tools.node === '') throw new Error(nodeRequirementError({ floor, artifactVersion }))
+  tools = resolveTools(settings, { nodeRange, refresh: true })
+  if (tools.node === '') throw new Error(nodeRequirementError({ nodeRange, artifactVersion }))
   return tools
 }
 

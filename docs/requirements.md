@@ -156,7 +156,7 @@ VS Code Remote——用户可以选择本机或 SSH 远程主机运行 Harness�
 | FR-7.4 | 运行时 `current` 指针必须原子切换且免提权：POSIX 用相对符号链接 + rename；Windows 用目录联接（junction，无需管理员或开发者模式）并保证切换失败时恢复旧指针。 |
 | FR-7.5 | 便携版 node 引导按目标平台选择归档：POSIX 取 `node-v<ver>-<platform>-<arch>.tar.gz`（`--strip-components=1` 解压）；Windows 取 `node-v<ver>-win-<arch>.zip` 并平铺出 `node.exe`。下载优先使用 node 自带 fetch，失败再回退平台 curl。 |
 | FR-7.6 | 进程与端口发现按平台实现：POSIX 用 `lsof`/`ps`，`ps` 被拒时回退 `pgrep -fl`；Windows 用 `netstat -ano`（LISTENING 行的 owner pid）与 `Get-CimInstance Win32_Process`（pid + 命令行）。「该进程是否在用我的 dsh home」在 Windows 上改用**命令行路径前缀**判定（本地 host 必从 `<dshHome>/runtime/…` 启动）；读不到命令行时返回 false（保守不杀）。 |
-| FR-7.7 | 工具发现按平台解析可执行文件：Windows 依次尝试 `.exe`/`.cmd`/`.bat`，PATH 键名用 `Path` 且与 `PATH` 保持一致，`.cmd` 垫片经 shell 执行；登录 shell 探测在 Windows 上改用 PowerShell `Get-Command`。仓库内引擎版本校验（node ^22.19 或 ≥24）在三个平台一致生效。 |
+| FR-7.7 | 工具发现按平台解析可执行文件：Windows 依次尝试 `.exe`/`.cmd`/`.bat`，PATH 键名用 `Path` 且与 `PATH` 保持一致，`.cmd` 垫片经 shell 执行；登录 shell 探测在 Windows 上改用 PowerShell `Get-Command`。引擎版本校验不写死在壳里：下界取自产物 `engines.node`（`src/node-engine.js` 用 semver 比较，失败才退回 `DEFAULT_NODE_RANGE` / `PORTABLE_NODE_BUNDLED`），三个平台一致生效。 |
 | FR-7.8 | 窗口外壳按平台使用不同原生控件：macOS `hiddenInset` + `trafficLightPosition`（左侧红黄绿，壳边框留 84px）；Windows/Linux `hidden` + `titleBarOverlay`（右侧最小化/最大化/关闭，留白改到右侧）。壳边框高度恒为 46px 且等于 overlay 高度。 |
 | FR-7.9 | 菜单与托盘按平台挂载：macOS 用应用菜单承载 连接/更新，并提供 Dock 右键菜单；Windows/Linux 用窗口菜单但默认隐藏菜单栏（保留 `CmdOrCtrl` 加速键），操作入口同时出现在托盘菜单。快捷键文案按平台显示 ⌘ 或 Ctrl。 |
 | FR-7.10 | 托盘图标按平台选取：macOS 用模板图（黑 + alpha，随菜单栏自动着色）；Windows/Linux 用彩色应用图标缩放到 16px（黑色模板图在深色任务栏不可见）。 |

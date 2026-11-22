@@ -38,7 +38,7 @@ const { sshCommandArgs, parseTarget, listSshHosts, isSshConfigAlias } = require(
 const { ConnectionManager } = require('./connection')
 const runtimeStore = require('./runtime-store')
 const { Updater } = require('./update')
-const { resolveArtifactNodeFloor } = require('./artifact')
+const { resolveArtifactNodeRange } = require('./artifact')
 const { runtimeNodeEngine } = require('./runtime-layout')
 const { UpdateManager } = require('./update-manager')
 const { SetupDialog, registerDialogIpc } = require('./dialogs')
@@ -581,7 +581,7 @@ function pidAliveLocal(pid) {
  * start observing its status file. The worker survives shell quit; on the
  * next launch `resumePendingUpdate` picks the outcome back up.
  */
-function spawnUpdateWorker(session, view, version, nodeFloor) {
+function spawnUpdateWorker(session, view, version, nodeRange) {
   if (session.workerPollTimer !== null) return true
   const root = runtimeStore.localRuntimeRoot(view)
   const taskPath = path.join(root, 'update-task.json')
@@ -595,7 +595,7 @@ function spawnUpdateWorker(session, view, version, nodeFloor) {
       repoUrl: view.local.repoUrl,
       toolPaths: view.toolPaths,
       version,
-      nodeFloor,
+      nodeRange,
       registryUrl: view.update?.registryUrl ?? '',
     }, null, 2))
     runtimeStore.writePendingUpdate(view, { intent: 'artifact', version })
@@ -813,14 +813,14 @@ async function startArtifactUpdateIfPossible(session) {
     routeSessionLine(session, query.reason)
     return false
   }
-  const floor = await resolveArtifactNodeFloor({
+  const nodeRange = await resolveArtifactNodeRange({
     version: query.version,
     nodeEngine: query.nodeEngine,
     registryUrl: view.update?.registryUrl,
     installedEngine: () => runtimeNodeEngine(runtimeStore.localActiveRuntimeDir(view)),
   })
   if (session.cancelRequested === true) return false
-  return spawnUpdateWorker(session, view, query.version, floor)
+  return spawnUpdateWorker(session, view, query.version, nodeRange)
 }
 
 /**

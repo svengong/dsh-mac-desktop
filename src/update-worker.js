@@ -25,7 +25,7 @@
  * shell (or the next launch) knows the intent file must not be resumed.
  *
  * Usage: node src/update-worker.js <task.json>
- * task.json: { dshHome, repoDir, repoUrl, toolPaths, version, registryUrl, nodeFloor }
+ * task.json: { dshHome, repoDir, repoUrl, toolPaths, version, registryUrl, nodeRange }
  *
  * `version` is already resolved by the shell to the newest published release.
  */
@@ -34,8 +34,8 @@ const fs = require('node:fs')
 const path = require('node:path')
 const { normalizeSettings, DEFAULT_DSH_HOME } = require('./settings')
 const { prepareLocalNode } = require('./node-bootstrap')
-const { parseNodeFloor } = require('./node-engine')
-const { installNpmArtifact, resolveArtifactNodeFloor, verifyNpmArtifact } = require('./artifact')
+const { normalizeNodeRange } = require('./node-engine')
+const { installNpmArtifact, resolveArtifactNodeRange, verifyNpmArtifact } = require('./artifact')
 const { NPM_PACKAGE, runtimeNodeEngine } = require('./runtime-layout')
 
 const runtimeStore = require('./runtime-store')
@@ -115,14 +115,16 @@ async function main() {
       lockName,
       async () => {
         const active = runtimeStore.localActiveRuntimeDir(settings)
-        const floor = parseNodeFloor(task.nodeFloor) || await resolveArtifactNodeFloor({
+        // Older task files only saved a minimum. Re-read the pinned release
+        // when the complete range is missing.
+        const nodeRange = normalizeNodeRange(task.nodeRange) || await resolveArtifactNodeRange({
           version,
           registryUrl: task.registryUrl,
           installedEngine: () => runtimeNodeEngine(active),
         })
         if (shouldAbort()) throw cancelError()
         status({ phase: 'toolchain', version })
-        const tools = await prepareLocalNode(settings, { floor, artifactVersion: version, onLine: log })
+        const tools = await prepareLocalNode(settings, { nodeRange, artifactVersion: version, onLine: log })
         if (shouldAbort()) throw cancelError()
         if (active !== null && verifyNpmArtifact(active) === `npm:${version}`) {
           log(`官方产物 v${version} 已安装，跳过下载。`)

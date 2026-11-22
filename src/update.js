@@ -18,7 +18,7 @@ const { resolveTools } = require('./tools')
 const { isNewerVersion } = require('./components')
 const {
   DEFAULT_REGISTRY, BOOT_CHECK_ARGS, BOOT_CHECK_TIMEOUT_MS, assertArtifactBoot,
-  queryNpmArtifact, resolveArtifactNodeFloor, installNpmArtifact,
+  queryNpmArtifact, resolveArtifactNodeRange, installNpmArtifact,
 } = require('./artifact')
 const { NPM_PACKAGE, npmArtifactVersion, runtimeNodeEngine } = require('./runtime-layout')
 const { OFFICIAL_REPO_URL } = require('./settings')
@@ -367,7 +367,7 @@ class Updater {
     this.setPhase('preparing')
     const version = query.version
     const remoteRun = (host, inner, options) => this.connection.remoteRun(host, inner, options)
-    const floor = await resolveArtifactNodeFloor({
+    const nodeRange = await resolveArtifactNodeRange({
       version,
       nodeEngine: query.nodeEngine,
       registryUrl: this.registryUrl(settings),
@@ -378,7 +378,7 @@ class Updater {
       },
     })
     if (this.cancelled) this.throwCancelled()
-    const tools = await this.ensureToolchain(settings, { floor, artifactVersion: version, onLine: this.onLine })
+    const tools = await this.ensureToolchain(settings, { nodeRange, artifactVersion: version, onLine: this.onLine })
     if (this.cancelled) this.throwCancelled()
     if (settings.mode === 'ssh') return this.remoteArtifactPipeline(settings, version, restartAfterInstall)
     runtimeStore.writePendingUpdate(settings, { intent: 'artifact', version })
@@ -547,10 +547,10 @@ class Updater {
     const tools = await prepareLocalNode(settings, requirement)
     // Plugins launch a real pnpm from PATH, so a corepack-only probe isn't enough.
     if (tools.pnpm !== '' && tools.pnpmPrefix.length === 0) return tools
-    return this.installLocalPnpm(settings, tools, requirement.floor)
+    return this.installLocalPnpm(settings, tools, requirement.nodeRange)
   }
 
-  async installLocalPnpm(settings, tools, floor) {
+  async installLocalPnpm(settings, tools, nodeRange) {
     // npm ships beside node: `npm` on POSIX, `npm.cmd` on Windows.
     const npmPath = npmFor(tools.node)
     if (npmPath === '') throw new Error('node 目录中没有 npm，无法安装 pnpm。')
@@ -566,7 +566,7 @@ class Updater {
       owner: this.owner(),
     })
     if (result.code !== 0) throw new Error(`pnpm 本地安装失败：${result.lines.join('\n')}`)
-    const resolved = resolveTools(settings, { floor, refresh: true })
+    const resolved = resolveTools(settings, { nodeRange, refresh: true })
     if (resolved.pnpm === '') throw new Error('pnpm 已安装到 .dsh-tools 但仍无法运行，请打开服务日志查看详情。')
     return resolved
   }

@@ -22,7 +22,7 @@ const { runCommand } = require('./runner')
 const { NPM_PACKAGE, npmArtifactVersion } = require('./runtime-layout')
 const { compareVersions } = require('./components')
 const { npmFor } = require('./platform')
-const { DEFAULT_NODE_FLOOR, parseNodeFloor } = require('./node-engine')
+const { DEFAULT_NODE_RANGE, normalizeNodeRange } = require('./node-engine')
 
 const DEFAULT_REGISTRY = 'https://registry.npmjs.org'
 const BOOT_CHECK_ARGS = Object.freeze(['web', '--dump-config'])
@@ -135,18 +135,18 @@ async function queryNpmArtifact({ registryUrl = '', timeoutMs = 20_000 } = {}) {
 }
 
 /** Resolve the pinned version's engine, including for resumed worker tasks. */
-async function resolveArtifactNodeFloor({ version, nodeEngine, registryUrl, installedEngine, fetchManifest = fetchJson }) {
-  let engine = nodeEngine
-  if (!parseNodeFloor(engine)) {
-    const registry = String(registryUrl || DEFAULT_REGISTRY).replace(/\/$/, '')
-    try {
-      const manifest = await fetchManifest(`${registry}/${NPM_PACKAGE}/${encodeURIComponent(version)}`, 10_000)
-      engine = manifest.engines?.node
-    } catch {
-      // Installed metadata is still available when the version endpoint is down.
-    }
+async function resolveArtifactNodeRange({ version, nodeEngine, registryUrl, installedEngine, fetchManifest = fetchJson }) {
+  const knownRange = normalizeNodeRange(nodeEngine)
+  if (knownRange !== '') return knownRange
+  const registry = String(registryUrl || DEFAULT_REGISTRY).replace(/\/$/, '')
+  try {
+    const manifest = await fetchManifest(`${registry}/${NPM_PACKAGE}/${encodeURIComponent(version)}`, 10_000)
+    const range = normalizeNodeRange(manifest.engines?.node)
+    if (range !== '') return range
+  } catch {
+    // Installed metadata is still available when the version endpoint is down.
   }
-  return parseNodeFloor(engine) || parseNodeFloor(await installedEngine?.()) || DEFAULT_NODE_FLOOR
+  return normalizeNodeRange(await installedEngine?.()) || DEFAULT_NODE_RANGE
 }
 
 /**
@@ -361,7 +361,7 @@ module.exports = {
   BOOT_CHECK_TIMEOUT_MS,
   assertArtifactBoot,
   queryNpmArtifact,
-  resolveArtifactNodeFloor,
+  resolveArtifactNodeRange,
   resolveChannelVersion,
   installNpmArtifact,
   npmInstallDirs,

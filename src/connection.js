@@ -32,7 +32,7 @@ const {
   parseRemoteProbe,
 } = require('./remote-protocol')
 const { resolveTools } = require('./tools')
-const { DEFAULT_NODE_FLOOR, parseNodeFloor } = require('./node-engine')
+const { DEFAULT_NODE_RANGE, normalizeNodeRange } = require('./node-engine')
 const { prepareLocalNode } = require('./node-bootstrap')
 const { prepareRemoteNode, readRemoteNodeEngine } = require('./remote-node')
 const { findFreePort, releasePort, reservePort, tcpProbe } = require('./ports')
@@ -341,7 +341,7 @@ class ConnectionManager extends EventEmitter {
     this.stopped = false
     this.logRing = []
     this.tools = null
-    this.nodeFloor = DEFAULT_NODE_FLOOR
+    this.nodeRange = DEFAULT_NODE_RANGE
     this.cachedRemoteShell = ''
     this.localPort = null
     this.remotePort = null
@@ -480,17 +480,17 @@ class ConnectionManager extends EventEmitter {
     return this.logRing.join('\n')
   }
 
-  setNodeFloor(spec) {
-    const floor = parseNodeFloor(spec) || DEFAULT_NODE_FLOOR
-    if (floor !== this.nodeFloor) {
-      this.nodeFloor = floor
+  setNodeRange(spec) {
+    const nodeRange = normalizeNodeRange(spec) || DEFAULT_NODE_RANGE
+    if (nodeRange !== this.nodeRange) {
+      this.nodeRange = nodeRange
       this.tools = null
     }
-    return floor
+    return nodeRange
   }
 
   resolvedTools({ refresh = false } = {}) {
-    if (this.tools === null || refresh) this.tools = resolveTools(this.getSettings(), { floor: this.nodeFloor, refresh })
+    if (this.tools === null || refresh) this.tools = resolveTools(this.getSettings(), { nodeRange: this.nodeRange, refresh })
     return this.tools
   }
 
@@ -1226,9 +1226,9 @@ class ConnectionManager extends EventEmitter {
         `运行时尚未构建（${runtimeDir} 缺少 apps/cli/lib/bin.js 或官方产物）。请在顶部菜单「更新 → 更新并重启」完成首次构建/安装。`,
       )
     }
-    const floor = this.setNodeFloor(runtimeNodeEngine(runtimeDir))
+    const nodeRange = this.setNodeRange(runtimeNodeEngine(runtimeDir))
     const artifactVersion = serveVersion.startsWith('npm') ? serveVersion.slice(3) : ''
-    const tools = await prepareLocalNode(settings, { floor, artifactVersion, onLine: line => this.log(line) })
+    const tools = await prepareLocalNode(settings, { nodeRange, artifactVersion, onLine: line => this.log(line) })
     this.tools = tools
     const binPath = layout.bin
     this.log(`启动 dsh web（${port === 0 ? '由系统分配端口' : `端口 ${port}`}，数据目录 ${settings.local.dshHome}，运行时 ${runtimeDir}）…`)
@@ -2100,9 +2100,9 @@ class ConnectionManager extends EventEmitter {
   async launchRemoteService(settings, remotePort = 0, version = 'unknown') {
     const dir = await this.remoteServiceDir(settings)
     const remoteRun = (host, inner, options) => this.remoteRun(host, inner, options)
-    const floor = parseNodeFloor(await readRemoteNodeEngine(settings, remoteRun, dir)) || DEFAULT_NODE_FLOOR
+    const nodeRange = normalizeNodeRange(await readRemoteNodeEngine(settings, remoteRun, dir)) || DEFAULT_NODE_RANGE
     const artifactVersion = version.startsWith('npm') ? version.slice(3) : ''
-    await prepareRemoteNode(settings, remoteRun, { floor, artifactVersion, onLine: line => this.log(line) })
+    await prepareRemoteNode(settings, remoteRun, { nodeRange, artifactVersion, onLine: line => this.log(line) })
     const logFile = runtimeStore.REMOTE_LOG_FILE
     const pidFile = runtimeStore.REMOTE_PID_FILE
     const portFile = runtimeStore.REMOTE_PORT_FILE

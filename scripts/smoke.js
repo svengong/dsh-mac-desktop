@@ -20,7 +20,7 @@ const {
 } = require('../src/components')
 const {
   resolveChannelVersion, notargetPackage, npmInstallDirs, describeInstallFailure,
-  resolveArtifactNodeFloor, installNpmArtifact,
+  resolveArtifactNodeRange, installNpmArtifact,
 } = require('../src/artifact')
 const { UpdateManager } = require('../src/update-manager')
 const { parseTarget, shellQuote, remotePath, tunnelArgs, parseSshConfig, listSshHosts } = require('../src/ssh')
@@ -33,7 +33,7 @@ const { WindowManager } = require('../src/window-manager')
 const { mergeUpdates } = require('../src/device-merge')
 const { resolveTools, engineOk, childEnv } = require('../src/tools')
 const {
-  DEFAULT_NODE_FLOOR, PORTABLE_NODE_BUNDLED, parseNodeFloor, nodeVersionMeets, resolvePortableNodeVersion,
+  DEFAULT_NODE_RANGE, PORTABLE_NODE_BUNDLED, normalizeNodeRange, parseNodeVersion, nodeVersionMeets, resolvePortableNodeVersion,
 } = require('../src/node-engine')
 const { ensurePortableNode } = require('../src/node-bootstrap')
 const { prepareRemoteNode } = require('../src/remote-node')
@@ -50,6 +50,8 @@ const {
   processChildren, processGroupMembers, serviceFamily, commandMentionsPath,
   windowsHostBin,
 } = require('../src/process-scan')
+
+const ALPHA_NODE_RANGE = '^24.22.3 || >=26.13.1'
 
 /**
  * A portable "sleep" for tests. `/bin/sleep` and `/bin/echo` do not exist on
@@ -73,8 +75,8 @@ function sleepCommand(seconds) {
 }
 
 async function smokePortableNode() {
-  const newer = parseNodeFloor(process.version)
-  assert.ok(nodeVersionMeets(newer, DEFAULT_NODE_FLOOR), 'run smoke with a supported Node')
+  const newer = parseNodeVersion(process.version)
+  assert.ok(nodeVersionMeets(newer, DEFAULT_NODE_RANGE), 'run smoke with a supported Node')
   const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-portable-'))
   const root = path.join(fixture, 'tools')
   const nodeDir = path.join(root, 'node')
@@ -98,10 +100,12 @@ async function smokePortableNode() {
       downloads++
       return new Response('invalid archive')
     }
-    const request = { toolRoot: root, floor: DEFAULT_NODE_FLOOR, version: newer, artifactVersion: '0.2.2-rc.5' }
+    const nodeRange = `^${newer} || >=999.0.0`
+    const request = { toolRoot: root, nodeRange, version: newer, artifactVersion: '0.2.3-alpha.2' }
     const failed = await ensurePortableNode(request)
     assert.strictEqual(failed.ok, false)
-    assert.match(failed.error, /0\.2\.2-rc\.5.*>=24\.9\.0.*解压失败/)
+    assert.ok(failed.error.includes(`0.2.3-alpha.2要求 Node.js ${nodeRange}`))
+    assert.match(failed.error, /解压失败/)
     assert.strictEqual(fs.readFileSync(path.join(nodeDir, 'previous'), 'utf8'), 'preserve me')
 
     global.fetch = async () => {
@@ -141,7 +145,7 @@ async function smokeRemoteNode() {
     const shims = path.join(home, 'shims')
     fs.mkdirSync(bin, { recursive: true })
     fs.mkdirSync(shims)
-    fs.writeFileSync(path.join(bin, 'node'), '#!/bin/sh\necho v22.19.0\n', { mode: 0o755 })
+    fs.writeFileSync(path.join(bin, 'node'), '#!/bin/sh\necho v24.22.1\n', { mode: 0o755 })
     fs.writeFileSync(path.join(shims, 'curl'), '#!/bin/sh\ntouch "$4"\n', { mode: 0o755 })
     fs.writeFileSync(path.join(shims, 'tar'), `#!/bin/sh
 mkdir -p "$5/bin"
@@ -157,10 +161,10 @@ exec /bin/mv "$@"
     const env = { ...process.env, HOME: home, PATH: `${shims}:/usr/bin:/bin` }
     const settings = { mode: 'ssh', ssh: { host: 'fixture' } }
     const remoteRun = (_host, command, options) => runCommand({ cmd: '/bin/sh', args: ['-c', command], env, ...options })
-    const request = { floor: DEFAULT_NODE_FLOOR, artifactVersion: 'test', fetchIndex: async () => [] }
+    const request = { nodeRange: ALPHA_NODE_RANGE, artifactVersion: '0.2.3-alpha.2', fetchIndex: async () => [] }
     fs.writeFileSync(path.join(home, 'fail-rename'), '')
-    await assert.rejects(prepareRemoteNode(settings, remoteRun, request), /v22\.19\.0.*替换失败/)
-    assert.match(fs.readFileSync(path.join(bin, 'node'), 'utf8'), /22\.19\.0/)
+    await assert.rejects(prepareRemoteNode(settings, remoteRun, request), /v24\.22\.1.*替换失败/)
+    assert.match(fs.readFileSync(path.join(bin, 'node'), 'utf8'), /24\.22\.1/)
     fs.unlinkSync(path.join(home, 'fail-rename'))
     assert.strictEqual(await prepareRemoteNode(settings, remoteRun, request), PORTABLE_NODE_BUNDLED)
     assert.match(fs.readFileSync(path.join(bin, 'node'), 'utf8'), new RegExp(PORTABLE_NODE_BUNDLED))
@@ -194,8 +198,8 @@ cp "$HOME/fixture-cli.js" "$3/node_modules/@deepseek-ai/dsh/lib/bin.js"
         restartService: async () => { restarts++ },
       },
     })
-    updater.queryArtifact = async () => ({ ok: true, version, nodeEngine: '>=24.9.0' })
-    updater.ensureToolchain = async () => {}
+    updater.queryArtifact = async () => ({ ok: true, version, nodeEngine: ALPHA_NODE_RANGE })
+    updater.ensureToolchain = async (_settings, requirement) => assert.strictEqual(requirement.nodeRange, ALPHA_NODE_RANGE)
     const initial = await updater.runPipeline({ restartAfterInstall: false })
     assert.strictEqual(initial.ok, true, initial.error?.message)
     assert.strictEqual(restarts, 0, 'first install must leave service startup to the regular connection')
@@ -1062,13 +1066,23 @@ async function main() {
   assert.deepStrictEqual(gated.webArgs(3080, '0.1.1-rc.2'), ['web', '--port', '3080', '--no-open'])
 
   // tools: engine filter + a pnpm that actually runs under the clean env
-  assert.strictEqual(parseNodeFloor('>=24.9.0'), '24.9.0')
-  assert.strictEqual(parseNodeFloor('^22.19.0'), '22.19.0')
-  assert.strictEqual(parseNodeFloor('24.9.0'), '24.9.0')
-  assert.strictEqual(parseNodeFloor('>=24.9.0 <25'), '')
-  assert.strictEqual(nodeVersionMeets('v24.9.0-rc.1', '24.9.0'), false)
-  assert.strictEqual(nodeVersionMeets('v24.9.0', '24.9.0'), true)
-  assert.strictEqual(nodeVersionMeets('v26.1.0', '24.9.0'), true)
+  assert.strictEqual(normalizeNodeRange('>=24.9.0'), '>=24.9.0')
+  assert.strictEqual(normalizeNodeRange('^22.19.0'), '^22.19.0')
+  assert.strictEqual(normalizeNodeRange('24.9.0'), '24.9.0')
+  assert.strictEqual(normalizeNodeRange('>=24.9.0 <25'), '>=24.9.0 <25')
+  assert.strictEqual(normalizeNodeRange(` ${ALPHA_NODE_RANGE} `), ALPHA_NODE_RANGE)
+  assert.strictEqual(normalizeNodeRange('unknown'), '')
+  assert.strictEqual(nodeVersionMeets('v24.9.0-rc.1', '>=24.9.0'), false)
+  assert.strictEqual(nodeVersionMeets('v24.9.0', '>=24.9.0'), true)
+  assert.strictEqual(nodeVersionMeets('v24.10.0-rc.1', '>=24.9.0'), true)
+  assert.strictEqual(nodeVersionMeets('v26.1.0', '>=24.9.0'), true)
+  assert.strictEqual(nodeVersionMeets('v24.9.1', '24.9.0'), false)
+  for (const version of ['v24.22.1', 'v25.9.0', 'v26.13.0', 'v26.13.1-rc.1']) {
+    assert.strictEqual(nodeVersionMeets(version, ALPHA_NODE_RANGE), false, version)
+  }
+  for (const version of ['v24.22.3', 'v24.22.4', 'v26.13.1', 'v27.0.0']) {
+    assert.strictEqual(nodeVersionMeets(version, ALPHA_NODE_RANGE), true, version)
+  }
   const releases = async () => [
     { version: 'v26.5.1', lts: 'Test', files: ['linux-x64'] },
     { version: 'v26.12.1', lts: 'Test', files: ['linux-x64'] },
@@ -1076,24 +1090,40 @@ async function main() {
     { version: 'v26.14.0', lts: 'Test', files: ['linux-arm64'] },
     { version: 'v28.0.0', lts: false, files: ['linux-x64'] },
   ]
-  assert.strictEqual(await resolvePortableNodeVersion({ floor: '26.1.0', fetchJson: releases, distFile: 'linux-x64' }), '26.12.1')
-  assert.strictEqual(await resolvePortableNodeVersion({ floor: '28.0.0', fetchJson: releases }), '28.0.0')
+  assert.strictEqual(await resolvePortableNodeVersion({ nodeRange: '>=26.1.0', fetchJson: releases, distFile: 'linux-x64' }), '26.12.1')
+  assert.strictEqual(await resolvePortableNodeVersion({ nodeRange: '28.0.0', fetchJson: releases }), '28.0.0')
+  const alphaReleases = async () => [
+    { version: 'v24.22.3', lts: 'Krypton', files: ['linux-x64'] },
+    { version: 'v24.22.1', lts: 'Krypton', files: ['linux-arm64', 'linux-x64'] },
+    { version: 'v26.13.1', lts: 'Lithium', files: ['linux-arm64', 'linux-x64'] },
+  ]
+  const alphaRequest = { nodeRange: ALPHA_NODE_RANGE, fetchJson: alphaReleases }
+  // A machine with no Node.js runs everything on the portable build, so the
+  // newest LTS the artifact accepts wins over its floor.
+  assert.strictEqual(await resolvePortableNodeVersion({ ...alphaRequest, distFile: 'linux-x64' }), '26.13.1')
+  assert.strictEqual(await resolvePortableNodeVersion({ ...alphaRequest, distFile: 'linux-arm64' }), '26.13.1')
   const offline = async () => { throw new Error('offline') }
-  assert.strictEqual(await resolvePortableNodeVersion({ floor: '24.9.0', fetchJson: offline }), PORTABLE_NODE_BUNDLED)
-  await assert.rejects(resolvePortableNodeVersion({ floor: '28.0.0', fetchJson: offline }), /兜底.*低于要求/)
-  const requirement = { version: '0.2.2-rc.5', registryUrl: 'https://registry.invalid' }
-  assert.strictEqual(await resolveArtifactNodeFloor({
+  assert.strictEqual(await resolvePortableNodeVersion({ nodeRange: ALPHA_NODE_RANGE, fetchJson: offline }), PORTABLE_NODE_BUNDLED)
+  await assert.rejects(resolvePortableNodeVersion({ nodeRange: '<24.22.3 || >=26.13.1', fetchJson: offline }), /兜底.*不符合要求/)
+  const requirement = { version: '0.2.3-alpha.2', registryUrl: 'https://registry.invalid' }
+  assert.strictEqual(await resolveArtifactNodeRange({
+    ...requirement,
+    nodeEngine: ALPHA_NODE_RANGE,
+    fetchManifest: async () => assert.fail('a valid registry range needs no fallback'),
+    installedEngine: () => assert.fail('a valid registry range needs no installed metadata'),
+  }), ALPHA_NODE_RANGE)
+  assert.strictEqual(await resolveArtifactNodeRange({
     ...requirement,
     fetchManifest: async url => {
-      assert.strictEqual(url, 'https://registry.invalid/@deepseek-ai/dsh/0.2.2-rc.5')
-      return { engines: { node: '>=26.1.0' } }
+      assert.strictEqual(url, 'https://registry.invalid/@deepseek-ai/dsh/0.2.3-alpha.2')
+      return { engines: { node: ALPHA_NODE_RANGE } }
     },
     installedEngine: async () => '>=24.9.0',
-  }), '26.1.0')
-  assert.strictEqual(await resolveArtifactNodeFloor({
+  }), ALPHA_NODE_RANGE)
+  assert.strictEqual(await resolveArtifactNodeRange({
     ...requirement, fetchManifest: offline, installedEngine: async () => '^22.19.0',
-  }), '22.19.0')
-  assert.strictEqual(await resolveArtifactNodeFloor({ ...requirement, fetchManifest: offline }), DEFAULT_NODE_FLOOR)
+  }), '^22.19.0')
+  assert.strictEqual(await resolveArtifactNodeRange({ ...requirement, fetchManifest: offline }), DEFAULT_NODE_RANGE)
   await smokePortableNode()
   await smokeRemoteNode()
   assert.strictEqual(engineOk('v23.11.0'), false)
@@ -2462,9 +2492,9 @@ async function main() {
       path.dirname(process.execPath), 'an unselected portable Node must not shadow a compatible system Node')
     const connection = new ConnectionManager({ getSettings: () => ({ ...settings, toolPaths: { node: process.execPath } }) })
     assert.strictEqual(connection.resolvedTools().node, process.execPath)
-    connection.setNodeFloor('>=999.0.0')
-    assert.strictEqual(connection.resolvedTools({ refresh: true }).node, '', 'a changed floor must reject previously selected tools')
-    connection.setNodeFloor(DEFAULT_NODE_FLOOR)
+    connection.setNodeRange('>=999.0.0')
+    assert.strictEqual(connection.resolvedTools({ refresh: true }).node, '', 'a changed engine range must reject previously selected tools')
+    connection.setNodeRange(DEFAULT_NODE_RANGE)
     assert.strictEqual(connection.resolvedTools().node, process.execPath)
 
     const pathKey = IS_WINDOWS ? 'Path' : 'PATH'
@@ -2773,7 +2803,7 @@ async function main() {
       runtimeStore.activateLocalRuntime(settings, `npm:${version}`)
       const task = path.join(root, 'task.json')
       fs.writeFileSync(task, JSON.stringify({
-        dshHome: root, repoDir: root, version, nodeFloor: DEFAULT_NODE_FLOOR,
+        dshHome: root, repoDir: root, version, nodeRange: DEFAULT_NODE_RANGE,
         registryUrl: 'https://invalid.example', toolPaths: { node: process.execPath },
       }))
       const worker = await runCommand({

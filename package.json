@@ -1,6 +1,6 @@
 {
   "name": "dsh-mac-desktop",
-  "version": "0.11.7",
+  "version": "0.11.8",
   "private": true,
   "description": "Desktop shell for the DeepSeek Harness web app on macOS, Windows and Linux: local or SSH-remote connections with an in-menu update flow",
   "homepage": "https://github.com/svengong/dsh-mac-desktop",
@@ -39,6 +39,9 @@
     "dist:win:x64": "node scripts/build-win.js --x64",
     "dist:publish": "electron-builder --mac dmg --publish always",
     "dist:publish:win": "node scripts/build-win.js --publish always"
+  },
+  "dependencies": {
+    "semver": "^7.8.6"
   },
   "devDependencies": {
     "electron": "^45.3.2",

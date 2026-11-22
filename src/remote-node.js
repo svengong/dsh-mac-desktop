@@ -26,7 +26,7 @@ async function readRemoteNodeEngine(settings, remoteRun, dir) {
   }
 }
 
-async function prepareRemoteNode(settings, remoteRun, { floor, artifactVersion, onLine = () => {}, fetchIndex = fetchJson }) {
+async function prepareRemoteNode(settings, remoteRun, { nodeRange, artifactVersion, onLine = () => {}, fetchIndex = fetchJson }) {
   const run = (command, options) => remoteRun(settings.ssh.host, command, { timeoutMs: 30_000, ...options })
   const probe = async command => {
     const result = await run(command)
@@ -37,13 +37,13 @@ async function prepareRemoteNode(settings, remoteRun, { floor, artifactVersion, 
   let version
   try {
     const effectiveVersion = await probePath()
-    if (nodeVersionMeets(effectiveVersion, floor)) return effectiveVersion
+    if (nodeVersionMeets(effectiveVersion, nodeRange)) return effectiveVersion
     return await withRemoteLock(settings, remoteRun, 'portable-node', async () => {
       const recovery = await run(`D=${TOOL_ROOT}; if [ ! -e "$D/node" ] && [ -d "$D/node.old" ]; then mv "$D/node.old" "$D/node"; fi`)
       if (recovery.code !== 0) throw new Error(recovery.lines.join(' '))
       currentVersion = await probe(`${TOOL_ROOT}/node/bin/node --version`)
       const installedVersion = await probePath()
-      if (nodeVersionMeets(installedVersion, floor)) return installedVersion
+      if (nodeVersionMeets(installedVersion, nodeRange)) return installedVersion
 
       const host = await run('uname -s && uname -m')
       const os = host.lines.find(line => /^(Linux|Darwin)$/.test(line.trim()))?.trim()
@@ -52,11 +52,11 @@ async function prepareRemoteNode(settings, remoteRun, { floor, artifactVersion, 
       const arch = /^(aarch64|arm64)$/.test(cpu) ? 'arm64' : 'x64'
       const target = { windows: false, platform: os.toLowerCase() }
       version = await resolvePortableNodeVersion({
-        floor, fetchJson: fetchIndex, distFile: nodeDistArchive(PORTABLE_NODE_BUNDLED, arch, target).indexFile,
+        nodeRange, fetchJson: fetchIndex, distFile: nodeDistArchive(PORTABLE_NODE_BUNDLED, arch, target).indexFile,
       })
       const dist = nodeDistArchive(version, arch, target)
       const stage = `${TOOL_ROOT}/node.download-${randomUUID()}`
-      onLine(`正在下载远端便携版 Node.js v${version}（产物要求 >=${floor}）…`)
+      onLine(`正在下载远端便携版 Node.js v${version}（产物要求 ${nodeRange}）…`)
       try {
         const staged = await run([
           'set -e;',
@@ -67,7 +67,7 @@ async function prepareRemoteNode(settings, remoteRun, { floor, artifactVersion, 
         ].join(' '), { timeoutMs: 15 * 60_000, onLine })
         if (staged.code !== 0) throw new Error(`下载或解压失败：${staged.lines.slice(-3).join(' ')}`)
         const installed = staged.lines.map(parseNodeVersion).find(Boolean) || ''
-        if (installed !== version || !nodeVersionMeets(installed, floor)) throw new Error('下载的 Node.js 未通过版本自检。')
+        if (installed !== version || !nodeVersionMeets(installed, nodeRange)) throw new Error('下载的 Node.js 未通过版本自检。')
         const swap = await run([
           'set -e;',
           `D=${TOOL_ROOT}; S=${stage};`,
@@ -80,15 +80,15 @@ async function prepareRemoteNode(settings, remoteRun, { floor, artifactVersion, 
         ].join(' '))
         if (swap.code !== 0) throw new Error(`替换失败：${swap.lines.slice(-3).join(' ')}`)
         onLine(currentVersion
-          ? `远端便携版 Node.js 升级：v${currentVersion} → v${installed}（产物要求 >=${floor}）`
-          : `远端便携版 Node.js v${installed} 已就绪（产物要求 >=${floor}）`)
+          ? `远端便携版 Node.js 升级：v${currentVersion} → v${installed}（产物要求 ${nodeRange}）`
+          : `远端便携版 Node.js v${installed} 已就绪（产物要求 ${nodeRange}）`)
         return installed
       } finally {
         await run(`rm -rf ${stage}`).catch(() => {})
       }
     }, { timeoutMs: 20 * 60_000 })
   } catch (error) {
-    throw new Error(nodeRequirementError({ floor, artifactVersion, currentVersion, targetVersion: version, detail: error.message, remote: true }))
+    throw new Error(nodeRequirementError({ nodeRange, artifactVersion, currentVersion, targetVersion: version, detail: error.message, remote: true }))
   }
 }
 

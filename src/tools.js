@@ -32,7 +32,7 @@ const {
   IS_WINDOWS, PATH_KEY, SYSTEM_PATH_DIRS, findExecutableIn, findExecutableInDirs,
   isExecutable, joinPath, spawnInvocation, splitPath,
 } = require('./platform')
-const { DEFAULT_NODE_FLOOR, nodeVersionMeets, parseNodeVersion } = require('./node-engine')
+const { DEFAULT_NODE_RANGE, nodeVersionMeets, parseNodeVersion } = require('./node-engine')
 
 const COMMON_DIRS = IS_WINDOWS
   ? [
@@ -271,8 +271,8 @@ function resolveTool(name, manualPath, shellPath) {
   return findInDirs(name, COMMON_DIRS)
 }
 
-function engineOk(versionText, floor = DEFAULT_NODE_FLOOR) {
-  return nodeVersionMeets(versionText, floor)
+function engineOk(versionText, nodeRange = DEFAULT_NODE_RANGE) {
+  return nodeVersionMeets(versionText, nodeRange)
 }
 
 function nodeVersionAt(nodePath) {
@@ -302,10 +302,10 @@ function nodeCandidates(settings) {
 }
 
 /** Pick the first node candidate whose real version satisfies the engine range. */
-function pickNode(settings, floor) {
+function pickNode(settings, nodeRange) {
   const candidates = nodeCandidates(settings)
   for (const candidate of candidates) {
-    if (engineOk(nodeVersionAt(candidate), floor)) return candidate
+    if (engineOk(nodeVersionAt(candidate), nodeRange)) return candidate
   }
   return ''
 }
@@ -428,17 +428,17 @@ function detectSystemLocale() {
 const toolsCache = new Map()
 
 /** Resolve the tools the shell needs; a missing tool is an empty string. */
-function resolveTools(settings, { floor = DEFAULT_NODE_FLOOR, refresh = false } = {}) {
+function resolveTools(settings, { nodeRange = DEFAULT_NODE_RANGE, refresh = false } = {}) {
   const toolPaths = settings.toolPaths ?? {}
   // `PATH` is part of the key because the probes resolve through it: a shell
   // started from a different parent can legitimately see different tools.
   const cacheKey = JSON.stringify([
     toolPaths.node ?? '', toolPaths.git ?? '', toolPaths.pnpm ?? '', toolPaths.shell ?? '',
-    settings.local?.repoDir ?? '', process.env[PATH_KEY] ?? '', floor,
+    settings.local?.repoDir ?? '', process.env[PATH_KEY] ?? '', nodeRange,
   ])
   const cached = toolsCache.get(cacheKey)
   if (cached !== undefined && !refresh) return cached
-  const resolved = resolveToolsUncached(settings, floor)
+  const resolved = resolveToolsUncached(settings, nodeRange)
   toolsCache.set(cacheKey, resolved)
   return resolved
 }
@@ -448,9 +448,9 @@ function forgetResolvedTools() {
   toolsCache.clear()
 }
 
-function resolveToolsUncached(settings, floor) {
+function resolveToolsUncached(settings, nodeRange) {
   const toolPaths = settings.toolPaths ?? {}
-  const node = pickNode(settings, floor)
+  const node = pickNode(settings, nodeRange)
   const env = childEnv(settings, node)
   let pnpm = ''
   let pnpmPrefix = []
