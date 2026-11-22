@@ -19,7 +19,8 @@ const {
   compareVersions, isNewerVersion, versionOf, versionToken,
 } = require('../src/components')
 const {
-  resolveChannelVersion, notargetPackage, npmInstallDirs, describeInstallFailure, resolveArtifactNodeFloor,
+  resolveChannelVersion, notargetPackage, npmInstallDirs, describeInstallFailure,
+  resolveArtifactNodeFloor, installNpmArtifact,
 } = require('../src/artifact')
 const { UpdateManager } = require('../src/update-manager')
 const { parseTarget, shellQuote, remotePath, tunnelArgs, parseSshConfig, listSshHosts } = require('../src/ssh')
@@ -168,9 +169,20 @@ exec /bin/mv "$@"
     const { Updater } = require('../src/update')
     settings.local = { dshHome: path.join(home, 'shell-data') }
     settings.ssh.remoteRepoDir = '~/harness'
+    fs.unlinkSync(path.join(bin, 'node'))
+    fs.symlinkSync(process.execPath, path.join(bin, 'node'))
+    fs.writeFileSync(path.join(home, 'fixture-cli.js'), `
+      const assert = require('node:assert/strict')
+      const fs = require('node:fs')
+      const path = require('node:path')
+      assert.deepEqual(process.argv.slice(2), ['web', '--dump-config'])
+      assert.equal(fs.realpathSync(path.dirname(process.env.DSH_HOME)), process.cwd())
+      assert.ok(path.basename(process.env.DSH_HOME).startsWith('.boot-check-'))
+      if (fs.existsSync(process.env.HOME + '/fail-boot')) throw new SyntaxError('missing loader export')
+    `)
     fs.writeFileSync(path.join(shims, 'npm'), `#!/bin/sh
 mkdir -p "$3/node_modules/@deepseek-ai/dsh/lib"
-touch "$3/node_modules/@deepseek-ai/dsh/lib/bin.js"
+cp "$HOME/fixture-cli.js" "$3/node_modules/@deepseek-ai/dsh/lib/bin.js"
 `, { mode: 0o755 })
     let restarts = 0
     let version = '0.2.2-rc.5'
@@ -192,7 +204,14 @@ touch "$3/node_modules/@deepseek-ai/dsh/lib/bin.js"
     const update = await updater.runPipeline()
     assert.strictEqual(update.ok, true, update.error?.message)
     assert.strictEqual(restarts, 1, 'an explicit update still restarts the service')
-
+    version = '0.2.2-rc.7'
+    fs.writeFileSync(path.join(home, 'fail-boot'), '')
+    const failed = await updater.runPipeline()
+    assert.strictEqual(failed.ok, false)
+    assert.match(failed.error.message, /启动校验失败：SyntaxError: missing loader export/)
+    assert.strictEqual(restarts, 1, 'a rejected candidate must never restart the service')
+    assert.strictEqual((await runtimeStore.readRemoteRootManifest(settings, remoteRun)).current, 'npm0.2.2-rc.6')
+    assert.ok(!fs.existsSync(path.join(home, '.dsh', 'runtime', `npm${version}`)))
   } finally {
     fs.rmSync(home, { recursive: true, force: true })
   }
@@ -389,6 +408,11 @@ async function main() {
   const untracked = resolveChannelVersion({ latest: '0.1.0', canary: '9.9.9' })
   assert.strictEqual(untracked.version, '0.1.0')
   assert.strictEqual(untracked.channel, 'latest')
+  const brokenAlpha = resolveChannelVersion({ latest: '0.2.2-rc.5', alpha: '0.2.3-alpha.1' })
+  assert.strictEqual(brokenAlpha.version, '0.2.2-rc.5')
+  assert.match(brokenAlpha.note, /0\.2\.3-alpha\.1.*EntryValidationError/)
+  assert.strictEqual(resolveChannelVersion({ alpha: '0.2.3-alpha.1' }).ok, false)
+  assert.strictEqual(resolveChannelVersion({ latest: '0.2.2-rc.5', alpha: '0.2.3-alpha.2' }).version, '0.2.3-alpha.2')
   // No tracked tag at all is the one hard failure.
   assert.strictEqual(resolveChannelVersion({}).ok, false)
   assert.strictEqual(resolveChannelVersion({ canary: '9.9.9' }).ok, false)
@@ -427,6 +451,39 @@ async function main() {
     assert.ok(describeInstallFailure('npm error code EPERM\nnpm error syscall open').includes('没有写权限'))
     assert.ok(describeInstallFailure('npm error errno EACCES').includes('没有写权限'))
     assert.strictEqual(describeInstallFailure('npm error code ETARGET'), '', 'only permission failures are annotated')
+  }
+
+  // npm succeeds and writes a valid package manifest, but the CLI cannot load.
+  {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-artifact-boot-'))
+    const runtimeDir = path.join(root, 'candidate')
+    fs.mkdirSync(runtimeDir)
+    try {
+      fs.writeFileSync(path.join(runtimeDir, 'install'), `
+        const fs = require('node:fs')
+        const pkg = 'node_modules/@deepseek-ai/dsh'
+        fs.mkdirSync(pkg + '/lib', { recursive: true })
+        fs.writeFileSync(pkg + '/package.json', JSON.stringify({ version: '1.2.3' }))
+        fs.writeFileSync(pkg + '/lib/bin.js', process.env.FIXTURE_CLI)
+      `)
+      const request = {
+        nodeBin: process.execPath, npmBin: process.execPath, runtimeDir, spec: '@deepseek-ai/dsh@1.2.3',
+        env: { ...process.env, FIXTURE_CLI: 'throw new SyntaxError("missing loader export")' },
+      }
+      await assert.rejects(installNpmArtifact(request), /启动校验失败：SyntaxError: missing loader export/)
+      request.env.FIXTURE_CLI = `
+        const assert = require('node:assert/strict')
+        const fs = require('node:fs')
+        const path = require('node:path')
+        assert.deepEqual(process.argv.slice(2), ['web', '--dump-config'])
+        assert.equal(fs.realpathSync(path.dirname(process.env.DSH_HOME)), process.cwd())
+        fs.writeFileSync(path.join(process.env.DSH_HOME, 'disposable'), '')
+      `
+      assert.strictEqual(await installNpmArtifact(request), 'npm:1.2.3')
+      assert.ok(!fs.readdirSync(runtimeDir).some(name => name.startsWith('.boot-check-')))
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true })
+    }
   }
 
   // A `dsh web` token URL survives being re-hosted onto another loopback

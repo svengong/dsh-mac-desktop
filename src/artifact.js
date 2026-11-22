@@ -11,8 +11,8 @@
  * - `queryNpmArtifact`: registry preflight — resolves the latest version.
  * - `installNpmArtifact`: `npm install --prefix <runtimeDir>` of the pinned
  *   spec into a fresh version dir (idempotent, resumable);
- * - `verifyNpmArtifact`: the installed bin exists and reports the expected
- *   package version before the dir is activated.
+ * - `verifyNpmArtifact`: the installed bin and package version exist before
+ *   the web profile is checked and the dir is activated.
  */
 
 const fs = require('node:fs')
@@ -25,6 +25,12 @@ const { npmFor } = require('./platform')
 const { DEFAULT_NODE_FLOOR, parseNodeFloor } = require('./node-engine')
 
 const DEFAULT_REGISTRY = 'https://registry.npmjs.org'
+const BOOT_CHECK_ARGS = Object.freeze(['web', '--dump-config'])
+const BOOT_CHECK_TIMEOUT_MS = 60_000
+
+// The published CLI imports validation APIs absent from its published loader.
+const BROKEN_RELEASE = '0.2.3-alpha.1'
+const BROKEN_RELEASE_NOTE = `已跳过 v${BROKEN_RELEASE}：发布包的插件加载器缺少 EntryValidationError，无法启动。`
 
 /**
  * An npm `notarget`/ETARGET failure means the registry that served the
@@ -57,8 +63,7 @@ const TRACKED_DIST_TAGS = Object.freeze(['latest', 'next', 'alpha', 'beta', 'rc'
  * publishes `alpha` ahead of the stable track, so a shell that only read
  * `latest` sat on `0.1.1-rc.2` while `0.1.2-alpha.3` was already out. Unknown
  * tags are ignored (a registry may carry `canary`, `dev`, …), and the highest
- * semver wins — so this always tracks the newest real release on whichever
- * tag it was published.
+ * eligible semver wins, regardless of the tag it was published on.
  * @param {object} tags - registry `dist-tags` map.
  * @returns {{ok: boolean, version: string, channel: string, reason: string, note: string}}
  */
@@ -66,28 +71,35 @@ function resolveChannelVersion(tags) {
   const source = tags !== null && typeof tags === 'object' ? tags : {}
   const fail = reason => ({ ok: false, version: '', channel: '', reason, note: '' })
   const candidates = []
+  let skipped = false
   for (const tag of TRACKED_DIST_TAGS) {
     const value = source[tag]
     if (typeof value !== 'string' || value === '') continue
+    if (value === BROKEN_RELEASE) {
+      skipped = true
+      continue
+    }
     if (candidates.some(entry => entry.version === value)) continue
     candidates.push({ tag, version: value })
   }
-  if (candidates.length === 0) return fail(`registry 未报告 ${NPM_PACKAGE} 的任何 dist-tag 版本`)
+  if (candidates.length === 0) {
+    return fail(skipped ? `${BROKEN_RELEASE_NOTE} 当前没有其他可用的官方版本。` : `registry 未报告 ${NPM_PACKAGE} 的任何 dist-tag 版本`)
+  }
   let best = candidates[0]
   for (const entry of candidates.slice(1)) {
     if (compareVersions(entry.version, best.version) > 0) best = entry
   }
   // Name the winning tag only when it is not the plain stable one, so an
   // ordinary stable release reads as just a version.
-  const note = best.tag === 'latest'
+  const channelNote = best.tag === 'latest'
     ? ''
-    : `最新发布来自 ${best.tag}：v${best.version}（高于 latest ${source.latest ?? '—'}）。`
+    : `最新可用版本来自 ${best.tag}：v${best.version}。`
   return {
     ok: true,
     version: best.version,
     channel: best.tag,
     reason: '',
-    note,
+    note: [skipped ? BROKEN_RELEASE_NOTE : '', channelNote].filter(Boolean).join('\n'),
   }
 }
 
@@ -107,7 +119,7 @@ async function queryNpmArtifact({ registryUrl = '', timeoutMs = 20_000 } = {}) {
     // latest lagged behind the version dsh actually depends on — so the probe
     // kept 404ing a perfectly installable artifact. The install's own
     // dependency resolution is authoritative: a genuinely broken chain fails
-    // inside installNpmArtifact with a clear error instead.
+    // during installation or profile validation instead.
     const release = resolveChannelVersion(meta['dist-tags'])
     if (!release.ok) return release
     return { ...release, nodeEngine: meta.versions?.[release.version]?.engines?.node ?? '' }
@@ -253,9 +265,7 @@ async function installNpmArtifact({ nodeBin, npmBin, runtimeDir, spec, env, onLi
     return version
   }
 
-  try {
-    return await run(configured)
-  } catch (error) {
+  const version = await run(configured).catch(async error => {
     if (error.code === 'CANCELLED' || !NOTARGET_PATTERN.test(error.message)) throw error
     if (emit !== undefined) {
       emit(`[registry] ${configured} 报告的版本解析失败，判定为元数据不同步，清缓存后重试…`)
@@ -293,7 +303,42 @@ async function installNpmArtifact({ nodeBin, npmBin, runtimeDir, spec, env, onLi
         )
       }
     }
+  })
+
+  // Load the shipped web profile and its boot imports in a disposable home.
+  // A version or file-existence check alone misses broken runtime imports.
+  const probeHome = fs.mkdtempSync(path.join(runtimeDir, '.boot-check-'))
+  try {
+    const result = await runCommand({
+      cmd: nodeBin,
+      args: [path.join(runtimeDir, 'node_modules', NPM_PACKAGE, 'lib', 'bin.js'), ...BOOT_CHECK_ARGS],
+      cwd: runtimeDir,
+      env: { ...(env ?? process.env), DSH_HOME: probeHome },
+      timeoutMs: BOOT_CHECK_TIMEOUT_MS,
+      owner,
+      shouldAbort,
+    })
+    assertArtifactBoot(result, spec)
+  } finally {
+    fs.rmSync(probeHome, { recursive: true, force: true })
   }
+  return version
+}
+
+function assertArtifactBoot(result, spec) {
+  if (result.aborted) {
+    const error = new Error('官方产物启动校验已取消')
+    error.code = 'CANCELLED'
+    error.name = 'UpdateCancelledError'
+    throw error
+  }
+  if (result.code === 0) return
+  const detail = result.timedOut ? '检查超时' : (
+    result.lines.find(line => /^(?:\w*Error(?: \[[A-Z_]+\])?|dsh):/iu.test(line.trim()))
+    || result.lines.slice(-4).join('\n')
+    || `退出码 ${result.code ?? result.signal}`
+  )
+  throw new Error(`${spec} 启动校验失败：${detail}`)
 }
 
 /**
@@ -312,6 +357,9 @@ function verifyNpmArtifact(runtimeDir) {
 
 module.exports = {
   DEFAULT_REGISTRY,
+  BOOT_CHECK_ARGS,
+  BOOT_CHECK_TIMEOUT_MS,
+  assertArtifactBoot,
   queryNpmArtifact,
   resolveArtifactNodeFloor,
   resolveChannelVersion,

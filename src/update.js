@@ -16,7 +16,10 @@ const { runCommand } = require('./runner')
 const { remotePath, shellQuote, remoteToolchainPrefix } = require('./ssh')
 const { resolveTools } = require('./tools')
 const { isNewerVersion } = require('./components')
-const { DEFAULT_REGISTRY, queryNpmArtifact, resolveArtifactNodeFloor, installNpmArtifact } = require('./artifact')
+const {
+  DEFAULT_REGISTRY, BOOT_CHECK_ARGS, BOOT_CHECK_TIMEOUT_MS, assertArtifactBoot,
+  queryNpmArtifact, resolveArtifactNodeFloor, installNpmArtifact,
+} = require('./artifact')
 const { NPM_PACKAGE, npmArtifactVersion, runtimeNodeEngine } = require('./runtime-layout')
 const { OFFICIAL_REPO_URL } = require('./settings')
 const runtimeStore = require('./runtime-store')
@@ -407,6 +410,7 @@ class Updater {
         shouldAbort: () => this.cancelled,
       })
       if (installed !== `npm:${version}`) throw new Error(`官方产物版本校验失败：预期 v${version}，安装结果为 ${installed}。`)
+      if (this.cancelled) this.throwCancelled()
     } catch (error) {
       // A cancelled local install reaps its half-written version dir right
       // away (the child is dead by then, or the abort raced the cleanup and
@@ -474,42 +478,33 @@ class Updater {
     // remote machine's ~/.npmrc, which need not be the registry whose
     // dist-tags the preflight just read.
     const registry = String(this.registryUrl(settings) || DEFAULT_REGISTRY).replace(/\/$/, '')
-    const install = await remoteRun(
-      settings.ssh.host,
-      `rm -rf ${versionDir} && mkdir -p ${versionDir} && ${remoteToolchainPrefix()} cd ${versionDir} && npm install --prefix ${versionDir} --no-audit --no-fund --engine-strict --force=false --registry ${shellQuote(registry)} ${shellQuote(`${NPM_PACKAGE}@${version}`)}`,
-      { timeoutMs: 20 * 60_000, onLine: line => this.onLine(line), shouldAbort: () => this.cancelled },
-    )
-    if (install.aborted === true) {
-      // The ssh child group was terminated mid-install; the half-written
-      // version dir is reaped so a later rollback can never target it.
-      await remoteRun(settings.ssh.host, `rm -rf ${versionDir} 2>/dev/null || true`, { timeoutMs: 15_000 })
-      this.throwCancelled()
+    const spec = `${NPM_PACKAGE}@${version}`
+    try {
+      const install = await remoteRun(
+        settings.ssh.host,
+        `rm -rf ${versionDir} && mkdir -p ${versionDir} && ${REMOTE_PREFIX} cd ${versionDir} && npm install --prefix ${versionDir} --no-audit --no-fund --engine-strict --force=false --registry ${shellQuote(registry)} ${shellQuote(spec)}`,
+        { timeoutMs: 20 * 60_000, onLine: line => this.onLine(line), shouldAbort: () => this.cancelled },
+      )
+      if (install.aborted || this.cancelled) this.throwCancelled()
+      if (install.code !== 0) {
+        const tail = install.lines.slice(-8).join('\n')
+        const hint = /notarget|no matching version found|ETARGET/iu.test(tail)
+          ? `\n\n该 registry（${registry}）未报告依赖所需的版本，通常是镜像同步滞后或远端 npm 缓存过期，可在远端执行 npm cache clean --force 后重试。`
+          : ''
+        throw new Error(`远端官方产物安装失败（退出码 ${install.code}）：${tail}${hint}`)
+      }
+      const verify = await remoteRun(settings.ssh.host, [
+        REMOTE_PREFIX,
+        `cd ${versionDir} && probe=$(mktemp -d ${versionDir}/.boot-check-XXXXXX) || exit 1;`,
+        `trap 'rm -rf "$probe"' EXIT;`,
+        `DSH_HOME="$probe" node node_modules/${NPM_PACKAGE}/lib/bin.js ${BOOT_CHECK_ARGS.map(shellQuote).join(' ')}`,
+      ].join(' '), { timeoutMs: BOOT_CHECK_TIMEOUT_MS, shouldAbort: () => this.cancelled })
+      if (this.cancelled) this.throwCancelled()
+      assertArtifactBoot(verify, spec)
+    } catch (error) {
+      await remoteRun(settings.ssh.host, `rm -rf ${versionDir} 2>/dev/null || true`, { timeoutMs: 15_000 }).catch(() => {})
+      throw error
     }
-    if (install.code !== 0) {
-      await remoteRun(settings.ssh.host, `rm -rf ${versionDir} 2>/dev/null || true`, { timeoutMs: 15_000 })
-      const tail = install.lines.slice(-8).join('\n')
-      // An ETARGET here is the same stale-metadata failure the local path
-      // retries: name it plainly instead of letting npm's raw wording stand.
-      const hint = /notarget|no matching version found|ETARGET/iu.test(tail)
-        ? `\n\n该 registry（${registry}）未报告依赖所需的版本，通常是镜像同步滞后或远端 npm 缓存过期，可在远端执行 npm cache clean --force 后重试。`
-        : ''
-      throw new Error(`远端官方产物安装失败（退出码 ${install.code}）：${tail}${hint}`)
-    }
-    // Cancelling the remote install only aborts at step boundaries (the ssh
-    // child group is killed by cancelSessionTask; the remote command group
-    // dies with the ssh connection and the half-written version dir is
-    // re-rm'd by the next attempt). Between `activating` and a settled
-    // restart the pipeline is a non-cancellable critical section.
-    if (this.cancelled) {
-      await remoteRun(settings.ssh.host, `rm -rf ${versionDir} 2>/dev/null || true`, { timeoutMs: 15_000 })
-      this.throwCancelled()
-    }
-    const verify = await remoteRun(
-      settings.ssh.host,
-      `if test -f ${versionDir}/node_modules/@deepseek-ai/dsh/lib/bin.js; then echo ok; else echo missing; fi`,
-      { timeoutMs: 20_000 },
-    )
-    if (!verify.lines.includes('ok')) throw new Error(`远端官方产物校验失败：${versionDir}`)
     this.setPhase('activating')
     this.onLine('已安装，原子切换远端 current …')
     const previous = manifest.current ?? null
